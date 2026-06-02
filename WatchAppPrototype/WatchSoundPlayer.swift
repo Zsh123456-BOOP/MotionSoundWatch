@@ -10,6 +10,9 @@ final class WatchSoundPlayer: ObservableObject {
     @Published private(set) var isReady = false
     @Published private(set) var lastError: String?
     @Published private(set) var preloadedCount = 0
+    @Published private(set) var lastPlayedAssetName: String?
+    @Published private(set) var lastPlaySucceeded = false
+    @Published private(set) var lastOutputVolume: Float = 0
 
     private var players: [String: AVAudioPlayer] = [:]
 
@@ -18,9 +21,16 @@ final class WatchSoundPlayer: ObservableObject {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
             try session.setActive(true)
+            lastOutputVolume = session.outputVolume
             isReady = true
             lastError = nil
-            AppDiagnostics.record("watch.audioSession.ready")
+            AppDiagnostics.record(
+                "watch.audioSession.ready",
+                [
+                    "outputVolume": session.outputVolume,
+                    "secondaryAudioSilenced": session.secondaryAudioShouldBeSilencedHint,
+                ]
+            )
         } catch {
             isReady = false
             lastError = error.localizedDescription
@@ -90,8 +100,13 @@ final class WatchSoundPlayer: ObservableObject {
 
         player.currentTime = 0
         let played = player.play()
+        lastPlayedAssetName = assetName
+        lastPlaySucceeded = played
+        lastOutputVolume = AVAudioSession.sharedInstance().outputVolume
         if !played {
             lastError = "音频播放失败：\(assetName)"
+        } else {
+            lastError = nil
         }
         AppDiagnostics.record(
             "watch.audio.play",
@@ -100,6 +115,8 @@ final class WatchSoundPlayer: ObservableObject {
                 "played": played,
                 "volume": player.volume,
                 "duration": player.duration,
+                "outputVolume": AVAudioSession.sharedInstance().outputVolume,
+                "isPlaying": player.isPlaying,
             ]
         )
         return played

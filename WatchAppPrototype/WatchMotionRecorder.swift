@@ -20,6 +20,12 @@ final class WatchMotionRecorder: ObservableObject {
     @Published private(set) var loadedProfileCount = 0
     @Published private(set) var lastRecognitionEvent: GestureRecognitionEvent?
     @Published private(set) var lastRecognitionSummary: String?
+    @Published private(set) var triggerCount = 0
+    @Published private(set) var audioPlayedTriggerCount = 0
+    @Published private(set) var audioMissingTriggerCount = 0
+    @Published private(set) var lastTriggeredProfileName: String?
+    @Published private(set) var lastTriggerAudioPlayed = false
+    @Published private(set) var lastTriggerDate: Date?
     @Published private(set) var lastBurstGateRejectionReason: BurstGateRejectionReason?
     @Published private(set) var lastFeedbackMessage: String?
     @Published private(set) var standardTemplateCount = 0
@@ -431,20 +437,30 @@ final class WatchMotionRecorder: ObservableObject {
                 burstGateRejectionReason: evaluation.burstGateRejectionReason
             )
             if lastRecognitionEvent?.triggered == true {
+                triggerCount += 1
+                if audioPlayed {
+                    audioPlayedTriggerCount += 1
+                } else {
+                    audioMissingTriggerCount += 1
+                }
+                lastTriggeredProfileName = lastRecognitionEvent?.profile?.name
+                lastTriggerAudioPlayed = audioPlayed
+                lastTriggerDate = Date()
+                WKInterfaceDevice.current().play(.success)
                 AppDiagnostics.record(
                     "watch.recognition.triggered",
                     [
                         "profile": lastRecognitionEvent?.profile?.name ?? "",
                         "audioPlayed": audioPlayed,
+                        "triggerCount": triggerCount,
+                        "audioPlayedTriggerCount": audioPlayedTriggerCount,
+                        "audioMissingTriggerCount": audioMissingTriggerCount,
                     ]
                 )
-                if !audioPlayed {
-                    WKInterfaceDevice.current().play(.failure)
-                    AppDiagnostics.record(
-                        "watch.recognition.audioFallbackHaptic",
-                        ["profile": lastRecognitionEvent?.profile?.name ?? ""]
-                    )
-                }
+                AppDiagnostics.record(
+                    "watch.recognition.triggerHaptic",
+                    ["profile": lastRecognitionEvent?.profile?.name ?? ""]
+                )
             }
             persistRecognitionTraceIfNeeded(
                 segment: segment,

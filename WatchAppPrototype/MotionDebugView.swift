@@ -70,12 +70,6 @@ struct MotionDebugView: View {
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
-                if let summary = recorder.lastRecognitionSummary {
-                    Text(summary)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
                 if recorder.isRecording {
                     HStack {
                         Text("采样")
@@ -87,6 +81,61 @@ struct MotionDebugView: View {
                 }
             }
 
+            if recorder.triggerCount > 0 {
+                Section {
+                    HStack {
+                        Text("触发")
+                        Spacer()
+                        Text("\(recorder.triggerCount)")
+                            .font(.title3.weight(.semibold))
+                            .monospacedDigit()
+                    }
+                    HStack {
+                        Text("音频")
+                        Spacer()
+                        Text(triggerAudioStatusText)
+                            .foregroundStyle(recorder.lastTriggerAudioPlayed ? .green : .orange)
+                    }
+                    HStack {
+                        Text("有声/无声")
+                        Spacer()
+                        Text("\(recorder.audioPlayedTriggerCount)/\(recorder.audioMissingTriggerCount)")
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                    HStack {
+                        Text("音量")
+                        Spacer()
+                        Text(outputVolumeText)
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                    if let profileName = recorder.lastTriggeredProfileName {
+                        Text("最近：\(profileName)")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if let event = recorder.lastRecognitionEvent,
+                       event.triggered,
+                       event.profile?.sound != nil {
+                        Button("测试音效") {
+                            _ = soundPlayer.play(sound: event.profile?.sound)
+                        }
+                    }
+                    Button("误触反馈") {
+                        recorder.markLastTriggerAsFalse()
+                    }
+                }
+            } else if let summary = recorder.lastRecognitionSummary {
+                Section {
+                    Text(summary)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
             if recorder.isRecording || remoteCaptureState == "recording" {
                 Section {
                     ProgressView()
@@ -94,19 +143,6 @@ struct MotionDebugView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-
-            if let event = recorder.lastRecognitionEvent, event.triggered {
-                Section {
-                    Text(event.profile?.name ?? "已识别动作")
-                        .font(.headline)
-                    Text(event.logEntry.audioPlayed ? "音效已触发" : "动作已识别")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    Button("误触反馈") {
-                        recorder.markLastTriggerAsFalse()
-                    }
                 }
             }
 
@@ -177,6 +213,20 @@ struct MotionDebugView: View {
             return "抬手做动作，匹配后会立即触发音效。"
         }
         return "请在 iPhone 上创建动作、录制、配音并同步。"
+    }
+
+    private var triggerAudioStatusText: String {
+        if recorder.lastTriggerAudioPlayed {
+            return "已请求播放"
+        }
+        if let error = soundPlayer.lastError, !error.isEmpty {
+            return "无声"
+        }
+        return "未播放"
+    }
+
+    private var outputVolumeText: String {
+        "\(Int((soundPlayer.lastOutputVolume * 100).rounded()))%"
     }
 
     private var watchConnectionText: String {
