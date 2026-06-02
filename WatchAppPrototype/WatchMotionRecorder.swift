@@ -133,7 +133,7 @@ final class WatchMotionRecorder: ObservableObject {
             _ = try store.save(archive, preferredName: "feedback-updated-profiles")
             recognitionRuntime.replaceProfiles(updatedProfiles)
             loadedProfileCount = updatedProfiles.count
-            lastFeedbackMessage = "已加入负样本并更新阈值"
+            lastFeedbackMessage = "已记录误触反馈并更新阈值"
             AppDiagnostics.record("watch.feedback.falseTriggerApplied", ["profileCount": updatedProfiles.count])
         } catch {
             lastFeedbackMessage = error.localizedDescription
@@ -225,7 +225,7 @@ final class WatchMotionRecorder: ObservableObject {
         standardTemplates.append(template)
         standardTemplateCount = standardTemplates.count
         refreshStandardQuality()
-        lastFeedbackMessage = "已加入标准样本 \(standardTemplateCount)/\(standardRequiredTemplateCount)"
+        lastFeedbackMessage = "已加入校准样本 \(standardTemplateCount)/\(standardRequiredTemplateCount)"
         return standardTemplateCount
     }
 
@@ -246,7 +246,7 @@ final class WatchMotionRecorder: ObservableObject {
         standardNegativeTemplates.append(template)
         standardNegativeTemplateCount = standardNegativeTemplates.count
         refreshStandardQuality()
-        lastFeedbackMessage = "已加入负样本 \(standardNegativeTemplateCount)"
+        lastFeedbackMessage = "已记录误触反馈 \(standardNegativeTemplateCount)"
         return standardNegativeTemplateCount
     }
 

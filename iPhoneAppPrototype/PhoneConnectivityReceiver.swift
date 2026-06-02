@@ -324,6 +324,31 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
         sendFile(sourceURL, kind: .gestureProfile, queuedMessagePrefix: "已加入 Profile 发送队列")
     }
 
+    @discardableResult
+    func sendProfileLibrarySnapshot() -> Bool {
+        do {
+            let store = try GestureProfileFileStore.appDocumentsStore(fileManager: fileManager)
+            let profiles = try store.list()
+                .flatMap(\.archive.profiles)
+                .filter { !Self.isLegacyUntitledProfile($0) }
+            let archive = GestureProfileArchive(profiles: profiles)
+            let data = try GestureProfileCodec().encode(archive)
+            let snapshotURL = fileManager.temporaryDirectory
+                .appendingPathComponent("MotionSoundProfileLibrary-\(Int(Date().timeIntervalSince1970)).json")
+            try data.write(to: snapshotURL, options: [.atomic])
+            return sendFile(
+                snapshotURL,
+                kind: .gestureProfile,
+                queuedMessagePrefix: "已加入 Watch 动作库替换队列",
+                extraMetadata: ["replaceLibrary": true]
+            )
+        } catch {
+            lastMessage = error.localizedDescription
+            AppDiagnostics.record(error: error, event: "phone.profile.librarySnapshot.error")
+            return false
+        }
+    }
+
     func generateAndSendProfile(
         gesture: String,
         kind kindRawValue: String,
@@ -341,7 +366,7 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
             return nil
         }
         guard let requestedKind = GestureKind(rawValue: kindRawValue) else {
-            lastMessage = "动作类型无效：\(kindRawValue)"
+            lastMessage = "动作配置无效：\(kindRawValue)"
             return nil
         }
 
@@ -350,8 +375,7 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
                 .filter { $0.fileURL.pathExtension.lowercased() == "csv" }
                 .filter { Self.parseCaptureFileName($0.fileURL.deletingPathExtension().lastPathComponent).gesture == trimmedGesture }
 
-            var positiveTemplates: [MotionTemplate] = []
-            var negativeTemplates: [MotionTemplate] = []
+            var primaryTemplates: [MotionTemplate] = []
             let csvCodec = MotionSampleCSVCodec()
             let templateBuilder = MotionTemplateBuilder()
             let effectiveKind = Self.effectiveKind(
@@ -360,7 +384,7 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
             )
 
             if let primarySamplesOverride, !primarySamplesOverride.isEmpty {
-                positiveTemplates.append(templateBuilder.makeTemplate(
+                primaryTemplates.append(templateBuilder.makeTemplate(
                     label: trimmedGesture,
                     kind: effectiveKind,
                     samples: primarySamplesOverride
@@ -382,27 +406,21 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
                 guard !samples.isEmpty else { continue }
 
                 switch parsed.role {
-                case "positive":
+                case "sample", "positive", "watch", "unknown":
                     if primarySamplesOverride == nil {
-                        positiveTemplates.append(templateBuilder.makeTemplate(
+                        primaryTemplates.append(templateBuilder.makeTemplate(
                             label: trimmedGesture,
                             kind: effectiveKind,
                             samples: samples
                         ))
                     }
-                case "negative":
-                    negativeTemplates.append(templateBuilder.makeTemplate(
-                        label: "\(trimmedGesture)-negative",
-                        kind: effectiveKind,
-                        samples: samples
-                    ))
                 default:
                     continue
                 }
             }
 
-            guard !positiveTemplates.isEmpty else {
-                lastMessage = "没有可生成 Profile 的正样本：\(trimmedGesture)"
+            guard !primaryTemplates.isEmpty else {
+                lastMessage = "没有可生成 Profile 的录制片段：\(trimmedGesture)"
                 return nil
             }
 
@@ -410,8 +428,8 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
             var profile = GestureProfileBuilder().makeProfile(
                 name: trimmedGesture,
                 kind: effectiveKind,
-                templates: positiveTemplates,
-                negativeTemplates: negativeTemplates,
+                templates: primaryTemplates,
+                negativeTemplates: [],
                 sound: sound,
                 cooldownSeconds: cooldownSeconds
             )
@@ -420,6 +438,29 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
             }
             let localStore = try GestureProfileFileStore.appDocumentsStore()
             let existingArchives = try localStore.list()
+            let existingProfiles = existingArchives.flatMap(\.archive.profiles)
+            if let conflict = existingProfiles.first(where: { existing in
+                guard existing.name.caseInsensitiveCompare(profile.name) == .orderedSame else {
+                    return false
+                }
+                if let replacingProfileID, existing.id == replacingProfileID {
+                    return false
+                }
+                if let replacingName, existing.name.caseInsensitiveCompare(replacingName) == .orderedSame {
+                    return false
+                }
+                return true
+            }) {
+                lastMessage = "动作名已存在：\(conflict.name)，请重新命名。"
+                AppDiagnostics.record(
+                    "phone.profile.nameConflict",
+                    [
+                        "gesture": trimmedGesture,
+                        "conflictID": conflict.id.uuidString,
+                    ]
+                )
+                return nil
+            }
             let matchingArchives = existingArchives.filter { stored in
                 stored.archive.profiles.contains {
                     if let replacingProfileID, $0.id == replacingProfileID {
@@ -428,7 +469,7 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
                     if let replacingName, $0.name.caseInsensitiveCompare(replacingName) == .orderedSame {
                         return true
                     }
-                    return $0.name.caseInsensitiveCompare(profile.name) == .orderedSame
+                    return false
                 }
             }
             if let existingProfile = matchingArchives
@@ -440,7 +481,7 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
                     if let replacingName, $0.name.caseInsensitiveCompare(replacingName) == .orderedSame {
                         return true
                     }
-                    return $0.name.caseInsensitiveCompare(profile.name) == .orderedSame
+                    return false
                 }) {
                 profile.id = existingProfile.id
                 profile.createdAt = existingProfile.createdAt
@@ -463,8 +504,8 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
                     "gesture": trimmedGesture,
                     "requestedKind": requestedKind.rawValue,
                     "effectiveKind": effectiveKind.rawValue,
-                    "templates": positiveTemplates.count,
-                    "negativeTemplates": negativeTemplates.count,
+                    "templates": primaryTemplates.count,
+                    "negativeTemplates": 0,
                     "queued": didQueueTransfer,
                 ]
             )
@@ -512,7 +553,12 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
     }
 
     @discardableResult
-    private func sendFile(_ sourceURL: URL, kind: SyncedFileKind, queuedMessagePrefix: String) -> Bool {
+    private func sendFile(
+        _ sourceURL: URL,
+        kind: SyncedFileKind,
+        queuedMessagePrefix: String,
+        extraMetadata: [String: Any] = [:]
+    ) -> Bool {
         guard let session else {
             lastMessage = "当前设备不支持 WatchConnectivity"
             AppDiagnostics.record("phone.connectivity.transfer.unsupported", ["kind": kind.rawValue])
@@ -528,13 +574,16 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
 
         do {
             let fileURL = try copyToOutgoingDirectory(sourceURL)
-            let metadata: [String: Any] = [
+            var metadata: [String: Any] = [
                 "kind": kind.rawValue,
                 "fileName": fileURL.lastPathComponent,
                 "sentAt": Date().timeIntervalSince1970,
                 "source": "MotionSoundPhone",
                 "checksum": try sha256Hex(fileURL),
             ]
+            for (key, value) in extraMetadata {
+                metadata[key] = value
+            }
             session.transferFile(fileURL, metadata: metadata)
             lastMessage = "\(queuedMessagePrefix)：\(fileURL.lastPathComponent)"
             AppDiagnostics.record("phone.connectivity.transfer.queued", ["file": fileURL.lastPathComponent, "kind": kind.rawValue])
@@ -653,6 +702,11 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
         return requestedKind
     }
 
+    nonisolated private static func isLegacyUntitledProfile(_ profile: GestureProfile) -> Bool {
+        profile.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            .caseInsensitiveCompare("untitled") == .orderedSame
+    }
+
     private func availableDestinationURL(directory: URL, fileName: String) -> URL {
         var destination = directory.appendingPathComponent(fileName)
         guard fileManager.fileExists(atPath: destination.path) else {
@@ -756,7 +810,7 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
             .filter { !$0.isEmpty }
 
         let roleIndex = parts.firstIndex { part in
-            ["positive", "negative", "debug"].contains(part.lowercased())
+            ["sample", "positive", "negative", "debug", "watch"].contains(part.lowercased())
         }
         let role = roleIndex.map { parts[$0].lowercased() } ?? "unknown"
         let startIndex = min(2, parts.count)

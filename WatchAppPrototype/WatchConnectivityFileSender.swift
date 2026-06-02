@@ -181,7 +181,7 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
         }
     }
 
-    private func receiveProfile(fileURL: URL, preferredFileName: String?, checksum: String?) {
+    private func receiveProfile(fileURL: URL, preferredFileName: String?, checksum: String?, replaceLibrary: Bool) {
         do {
             if let checksum, let actualChecksum = sha256Hex(fileURL), checksum != actualChecksum {
                 lastTransferMessage = "Profile 校验失败：\(preferredFileName ?? fileURL.lastPathComponent)"
@@ -194,7 +194,11 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
 
             let store = try GestureProfileFileStore.appDocumentsStore()
             try fileManager.createDirectory(at: store.directoryURL, withIntermediateDirectories: true)
-            try deleteProfiles(matching: archive.profiles, in: store)
+            if replaceLibrary {
+                try deleteAllProfiles(in: store)
+            } else {
+                try deleteProfiles(matching: archive.profiles, in: store)
+            }
 
             let preferredName = preferredFileName?.isEmpty == false
                 ? preferredFileName!
@@ -206,8 +210,17 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
             try fileManager.moveItem(at: fileURL, to: destination)
             lastReceivedProfileURL = destination
             profileLibraryChangeCount += 1
-            lastTransferMessage = "已接收 Profile：\(destination.lastPathComponent)"
-            AppDiagnostics.record("watch.connectivity.receiveProfile", ["file": destination.lastPathComponent])
+            lastTransferMessage = replaceLibrary
+                ? "已替换 Watch 动作库：\(archive.profiles.count) 个动作"
+                : "已接收 Profile：\(destination.lastPathComponent)"
+            AppDiagnostics.record(
+                "watch.connectivity.receiveProfile",
+                [
+                    "file": destination.lastPathComponent,
+                    "profiles": archive.profiles.count,
+                    "replaceLibrary": replaceLibrary,
+                ]
+            )
         } catch {
             lastTransferMessage = error.localizedDescription
             AppDiagnostics.record(error: error, event: "watch.connectivity.receiveProfile.error", ["file": preferredFileName ?? fileURL.lastPathComponent])
@@ -291,6 +304,14 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
             lastTransferMessage = error.localizedDescription
             AppDiagnostics.record(error: error, event: "watch.connectivity.deleteProfile.error", ["name": name ?? ""])
         }
+    }
+
+    private func deleteAllProfiles(in store: GestureProfileFileStore) throws {
+        let storedArchives = try store.list()
+        for stored in storedArchives {
+            try store.delete(fileURL: stored.fileURL)
+        }
+        AppDiagnostics.record("watch.connectivity.profileLibrary.cleared", ["files": storedArchives.count])
     }
 
     private func deleteProfiles(matching profiles: [GestureProfile], in store: GestureProfileFileStore) throws {
@@ -443,6 +464,7 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
         let kind = file.metadata?["kind"] as? String
         let preferredFileName = file.metadata?["fileName"] as? String
         let checksum = file.metadata?["checksum"] as? String
+        let replaceLibrary = file.metadata?["replaceLibrary"] as? Bool ?? false
         let fallbackFileName = file.fileURL.lastPathComponent
         let persistedFileURL: URL
 
@@ -468,7 +490,12 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
             case SyncedFileKind.audioAsset.rawValue:
                 receiveAudio(fileURL: persistedFileURL, preferredFileName: preferredFileName, checksum: checksum)
             case SyncedFileKind.gestureProfile.rawValue:
-                receiveProfile(fileURL: persistedFileURL, preferredFileName: preferredFileName, checksum: checksum)
+                receiveProfile(
+                    fileURL: persistedFileURL,
+                    preferredFileName: preferredFileName,
+                    checksum: checksum,
+                    replaceLibrary: replaceLibrary
+                )
             default:
                 lastTransferMessage = "忽略未知文件：\(preferredFileName ?? persistedFileURL.lastPathComponent)"
             }

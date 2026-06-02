@@ -9,8 +9,7 @@ struct PhoneDebugView: View {
     @State private var currentStep = SetupStep.library
     @State private var activeFileImport: FileImportTarget?
     @State private var recordingLabel = "punch"
-    @State private var recordingKind = "burst"
-    @State private var sampleRole = "positive"
+    @State private var sampleRole = "sample"
     @State private var selectedCaptureURL: URL?
     @State private var previewSamples: [MotionSample] = []
     @State private var previewMessage: String?
@@ -32,10 +31,6 @@ struct PhoneDebugView: View {
     @State private var isPreviewPlaying = false
     @State private var editingAsset: PhoneGestureAsset?
 
-    private var receivedCaptureSummaries: [ReceivedCaptureSummary] {
-        ReceivedCaptureSummary.makeSummaries(from: receiver.receivedFiles)
-    }
-
     private var captureFiles: [ReceivedSyncedFile] {
         let csvFiles = receiver.receivedFiles
             .filter { $0.fileURL.pathExtension.lowercased() == "csv" }
@@ -43,7 +38,8 @@ struct PhoneDebugView: View {
             let parsed = PhoneConnectivityReceiver.parseCaptureFileName(
                 file.fileURL.deletingPathExtension().lastPathComponent
             )
-            return parsed.gesture == normalizedGestureName && parsed.role == sampleRole
+            return parsed.gesture == normalizedGestureName
+                && (parsed.role == sampleRole || parsed.role == "positive" || parsed.role == "watch")
         }
         return matching.isEmpty ? csvFiles : matching
     }
@@ -58,7 +54,16 @@ struct PhoneDebugView: View {
 
     private var normalizedGestureName: String {
         let trimmed = recordingLabel.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? "untitled" : trimmed
+        return trimmed
+    }
+
+    private var nameConflict: PhoneGestureAsset? {
+        let name = normalizedGestureName
+        guard !name.isEmpty else { return nil }
+        return savedProfiles.first { asset in
+            asset.profile.name.caseInsensitiveCompare(name) == .orderedSame
+                && asset.profile.id != editingAsset?.profile.id
+        }
     }
 
     private var isRecording: Bool {
@@ -69,6 +74,7 @@ struct PhoneDebugView: View {
         countdownRemaining == nil
             && pendingRecordingAction == nil
             && !normalizedGestureName.isEmpty
+            && nameConflict == nil
     }
 
     private var trimmedSamples: [MotionSample] {
@@ -112,6 +118,7 @@ struct PhoneDebugView: View {
                         receiver.reloadReceivedFiles()
                         reloadLocalAudioFiles()
                         reloadSavedProfiles()
+                        syncWatchLibrarySnapshot(reason: "toolbarRefresh")
                         loadPreferredCapture()
                     } label: {
                         Label("刷新", systemImage: "arrow.clockwise")
@@ -125,6 +132,7 @@ struct PhoneDebugView: View {
                 receiver.requestWatchRuntime(reason: "phoneViewAppear")
                 reloadLocalAudioFiles()
                 reloadSavedProfiles()
+                syncWatchLibrarySnapshot(reason: "viewAppear")
                 loadPreferredCapture()
             }
             .onChange(of: receiver.receivedFiles) {
@@ -226,21 +234,6 @@ struct PhoneDebugView: View {
                     }
                 }
 
-                if !receivedCaptureSummaries.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("最近采样")
-                            .font(.subheadline.weight(.semibold))
-                        ForEach(receivedCaptureSummaries.prefix(4)) { summary in
-                            SummaryRow(
-                                label: summary.gesture,
-                                value: "\(summary.positiveCount) 正样本 · \(summary.negativeCount) 负样本"
-                            )
-                        }
-                    }
-                    .padding(12)
-                    .background(Color(.tertiarySystemGroupedBackground))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                }
             }
         }
     }
@@ -251,24 +244,22 @@ struct PhoneDebugView: View {
                 TextField("动作名称", text: $recordingLabel)
                     .textFieldStyle(.roundedBorder)
 
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("动作类型")
-                        .font(.subheadline.weight(.semibold))
-                    Picker("动作类型", selection: $recordingKind) {
-                        Text("短促").tag("burst")
-                        Text("连续").tag("sequence")
-                        Text("姿态").tag("posture")
-                    }
-                    .pickerStyle(.segmented)
+                if let nameConflict {
+                    Text("动作名已存在：\(nameConflict.profile.name)，请重新命名。")
+                        .font(.footnote)
+                        .foregroundStyle(.red)
                 }
 
-                ActionKindHint(kind: recordingKind)
+                Text("系统会根据录制片段自动判断短促或连续动作。")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 PrimaryActionButton(title: "下一步：录制动作", systemImage: "arrow.right") {
                     currentStep = .record
                     AppDiagnostics.record("phone.wizard.step", ["step": currentStep.rawValue])
                 }
-                .disabled(normalizedGestureName.isEmpty)
+                .disabled(normalizedGestureName.isEmpty || nameConflict != nil)
             }
         }
     }
@@ -280,7 +271,7 @@ struct PhoneDebugView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(normalizedGestureName)
                             .font(.title3.weight(.semibold))
-                        Text(recordingKindText)
+                        Text("系统自动识别短促/连续")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
@@ -292,12 +283,6 @@ struct PhoneDebugView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-
-                Picker("样本", selection: $sampleRole) {
-                    Text("正样本").tag("positive")
-                    Text("负样本").tag("negative")
-                }
-                .pickerStyle(.segmented)
 
                 if let countdownRemaining {
                     CountdownView(value: countdownRemaining)
@@ -449,18 +434,15 @@ struct PhoneDebugView: View {
                     TextField("动作名称", text: $recordingLabel)
                         .textFieldStyle(.roundedBorder)
 
-                    Picker("动作类型", selection: $recordingKind) {
-                        Text("短促").tag("burst")
-                        Text("连续").tag("sequence")
-                        Text("姿态").tag("posture")
-                    }
-                    .pickerStyle(.segmented)
-
-                    if captureDuration >= 0.9 && recordingKind == "burst" {
-                        Text("这段动作更像连续动作，保存时会按连续动作处理。")
+                    if let nameConflict {
+                        Text("动作名已存在：\(nameConflict.profile.name)，请重新命名。")
                             .font(.footnote)
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(.red)
                     }
+
+                    Text("系统会按当前裁剪片段自动保存为\(automaticKindText)。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
                 .padding(12)
                 .background(Color(.tertiarySystemGroupedBackground))
@@ -541,12 +523,12 @@ struct PhoneDebugView: View {
 
                 StepNavigationBar(
                     backTitle: "返回裁剪",
-                    nextTitle: "下一步：保存同步",
-                    canGoNext: true
+                    nextTitle: editingAsset == nil ? "保存并同步" : "保存修改",
+                    canGoNext: !trimmedSamples.isEmpty && !normalizedGestureName.isEmpty && nameConflict == nil
                 ) {
                     currentStep = .trim
                 } next: {
-                    currentStep = .sync
+                    syncProfile()
                 }
             }
         }
@@ -556,13 +538,11 @@ struct PhoneDebugView: View {
         ProductSection("保存并同步") {
             VStack(alignment: .leading, spacing: 14) {
                 SummaryRow(label: "动作", value: normalizedGestureName)
-                SummaryRow(label: "类型", value: recordingKindText)
+                SummaryRow(label: "类型", value: automaticKindText)
                 SummaryRow(label: "片段", value: "\(trimmedSamples.count) 个采样点")
                 SummaryRow(label: "音效", value: selectedAudioFileName.isEmpty ? "未绑定" : selectedAudioFileName)
                 SummaryRow(label: "触发", value: triggerTiming == "atPeak" ? "峰值附近" : "动作结束")
-                if let effectiveKindText {
-                    SummaryRow(label: "保存类型", value: effectiveKindText)
-                }
+                SummaryRow(label: "保存类型", value: automaticKindText)
 
                 Text("保存后会生成动作 Profile，并把 Profile 与已选择的音频发送到 Watch。Watch 端会本地识别和播放。")
                     .font(.subheadline)
@@ -620,22 +600,8 @@ struct PhoneDebugView: View {
         return "请先安装并打开 Watch App。"
     }
 
-    private var recordingKindText: String {
-        switch recordingKind {
-        case "burst":
-            return "短促动作"
-        case "sequence":
-            return "连续动作"
-        case "posture":
-            return "姿态动作"
-        default:
-            return "自定义动作"
-        }
-    }
-
-    private var effectiveKindText: String? {
-        guard captureDuration >= 0.9, recordingKind == "burst" else { return nil }
-        return "连续动作（根据片段时长自动调整）"
+    private var automaticKindText: String {
+        captureDuration >= 0.9 ? "连续动作" : "短促动作"
     }
 
     private var captureDuration: Double {
@@ -647,7 +613,7 @@ struct PhoneDebugView: View {
         countdownTimer?.invalidate()
 
         let label = normalizedGestureName
-        let kind = recordingKind
+        let kind = "burst"
         let role = sampleRole
         countdownRemaining = 3
         AppDiagnostics.record("phone.recording.countdown.started", ["label": label, "kind": kind])
@@ -709,7 +675,7 @@ struct PhoneDebugView: View {
         let didSend = receiver.sendRecordingCommand(
             action: .stopRecording,
             label: normalizedGestureName,
-            kind: recordingKind,
+            kind: "burst",
             sampleRole: sampleRole,
             autoSendCSV: true
         )
@@ -717,7 +683,7 @@ struct PhoneDebugView: View {
             pendingRecordingAction = .stopRecording
             captureCountBeforeStop = captureFiles.count
         }
-        AppDiagnostics.record("phone.recording.stopRequested", ["label": normalizedGestureName, "kind": recordingKind])
+        AppDiagnostics.record("phone.recording.stopRequested", ["label": normalizedGestureName, "kind": "auto"])
     }
 
     private func handleRecordingStatus(_ status: RecordingStatusEvent?) {
@@ -793,9 +759,26 @@ struct PhoneDebugView: View {
     }
 
     private func syncProfile() {
+        guard !normalizedGestureName.isEmpty else {
+            receiver.setLastMessage("请先填写动作名称。")
+            AppDiagnostics.record("phone.profile.nameMissing")
+            return
+        }
+        if let nameConflict {
+            receiver.setLastMessage("动作名已存在：\(nameConflict.profile.name)，请重新命名。")
+            AppDiagnostics.record(
+                "phone.profile.nameConflict",
+                [
+                    "name": normalizedGestureName,
+                    "conflictID": nameConflict.profile.id.uuidString,
+                ]
+            )
+            return
+        }
+
         let result = receiver.generateAndSendProfile(
             gesture: normalizedGestureName,
-            kind: recordingKind,
+            kind: "burst",
             soundFileName: selectedAudioFileName,
             primarySamplesOverride: trimmedSamples,
             cooldownSeconds: cooldownSeconds,
@@ -809,22 +792,23 @@ struct PhoneDebugView: View {
                 _ = receiver.sendAudioFile(audioURL)
             }
             reloadSavedProfiles()
+            let didQueueLibraryReplace = receiver.sendProfileLibrarySnapshot()
             currentStep = .library
             editingAsset = nil
             receiver.setLastMessage(
-                result.didQueueTransfer
-                    ? "已保存动作并加入 Watch 同步队列。"
+                didQueueLibraryReplace || result.didQueueTransfer
+                    ? "已保存动作，并以 iPhone 动作列表替换 Watch 动作库。"
                     : "已保存动作，但同步队列未建立。"
             )
         }
         AppDiagnostics.record(
             "phone.profile.syncRequested",
-            [
-                "label": normalizedGestureName,
-                "kind": recordingKind,
-                "samples": trimmedSamples.count,
-                "sound": selectedAudioFileName,
-                "saved": result != nil,
+                [
+                    "label": normalizedGestureName,
+                    "kind": automaticKindText,
+                    "samples": trimmedSamples.count,
+                    "sound": selectedAudioFileName,
+                    "saved": result != nil,
             ]
         )
     }
@@ -839,6 +823,7 @@ struct PhoneDebugView: View {
             }
             var seen: Set<String> = []
             savedProfiles = assets.filter { asset in
+                guard !asset.isLegacyUntitled else { return false }
                 let key = asset.deduplicationKey
                 guard !seen.contains(key) else { return false }
                 seen.insert(key)
@@ -852,10 +837,20 @@ struct PhoneDebugView: View {
         }
     }
 
+    private func syncWatchLibrarySnapshot(reason: String) {
+        let queued = receiver.sendProfileLibrarySnapshot()
+        AppDiagnostics.record(
+            "phone.profile.librarySnapshot.requested",
+            [
+                "reason": reason,
+                "queued": queued,
+            ]
+        )
+    }
+
     private func resetForNewGesture() {
         recordingLabel = ""
-        recordingKind = "burst"
-        sampleRole = "positive"
+        sampleRole = "sample"
         selectedCaptureURL = nil
         previewSamples = []
         previewMessage = nil
@@ -886,7 +881,7 @@ struct PhoneDebugView: View {
     private func prepareToRecord(_ asset: PhoneGestureAsset) {
         editingAsset = asset
         applyAsset(asset)
-        sampleRole = "positive"
+        sampleRole = "sample"
         selectedCaptureURL = nil
         previewSamples = []
         previewMessage = nil
@@ -928,6 +923,7 @@ struct PhoneDebugView: View {
                 kind: asset.profile.kind
             )
             reloadSavedProfiles()
+            syncWatchLibrarySnapshot(reason: "delete")
             if editingAsset?.id == asset.id {
                 editingAsset = nil
             }
@@ -947,7 +943,6 @@ struct PhoneDebugView: View {
 
     private func applyAsset(_ asset: PhoneGestureAsset) {
         recordingLabel = asset.profile.name
-        recordingKind = asset.profile.kind.rawValue
         selectedAudioFileName = asset.profile.sound?.fileName ?? ""
         volume = Double(asset.profile.sound?.volume ?? 1)
         triggerTiming = asset.profile.triggerTiming.rawValue
@@ -1131,7 +1126,7 @@ struct PhoneDebugView: View {
 
     private func resetForNextGesture() {
         recordingLabel = ""
-        sampleRole = "positive"
+        sampleRole = "sample"
         selectedCaptureURL = nil
         previewSamples = []
         previewMessage = nil
@@ -1209,7 +1204,7 @@ private enum SetupStep: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 
     static var wizardSteps: [SetupStep] {
-        [.create, .record, .trim, .sound, .sync]
+        [.create, .record, .trim, .sound]
     }
 
     var title: String {
@@ -1397,63 +1392,6 @@ private struct StepNavigationBar: View {
             Button(nextTitle, action: next)
                 .buttonStyle(.borderedProminent)
                 .disabled(!canGoNext)
-        }
-    }
-}
-
-private struct ActionKindHint: View {
-    var kind: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Label(title, systemImage: systemImage)
-                .font(.subheadline.weight(.semibold))
-            Text(detail)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(12)
-        .background(Color(.tertiarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-    }
-
-    private var title: String {
-        switch kind {
-        case "burst":
-            return "适合挥拳、甩腕、下劈"
-        case "sequence":
-            return "适合转腕、完整挥舞、变身动作"
-        case "posture":
-            return "适合举手保持、手腕朝上"
-        default:
-            return "适合自定义动作"
-        }
-    }
-
-    private var detail: String {
-        switch kind {
-        case "burst":
-            return "系统会更关注峰值和短窗口，目标是低延迟触发。"
-        case "sequence":
-            return "系统会等动作完成后匹配整段节奏，更适合长动作。"
-        case "posture":
-            return "系统会关注姿态是否稳定保持，第一版先作为配置入口。"
-        default:
-            return "先采集个人模板，再按动作形态选择识别方式。"
-        }
-    }
-
-    private var systemImage: String {
-        switch kind {
-        case "burst":
-            return "bolt.fill"
-        case "sequence":
-            return "point.3.connected.trianglepath.dotted"
-        case "posture":
-            return "figure.stand"
-        default:
-            return "sparkle"
         }
     }
 }
@@ -1766,6 +1704,10 @@ private struct PhoneGestureAsset: Identifiable, Equatable {
     var templateCount: Int { profile.templates.count }
     var sampleCount: Int { profile.templates.map(\.samples.count).reduce(0, +) }
     var soundName: String { profile.sound?.fileName ?? "未绑定音效" }
+    var isLegacyUntitled: Bool {
+        profile.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            .caseInsensitiveCompare("untitled") == .orderedSame
+    }
 
     var kindText: String {
         switch profile.kind {
@@ -2068,63 +2010,4 @@ private func * (lhs: SCNVector3, rhs: Float) -> SCNVector3 {
 
 private func / (lhs: SCNVector3, rhs: Float) -> SCNVector3 {
     SCNVector3(lhs.x / rhs, lhs.y / rhs, lhs.z / rhs)
-}
-
-private struct ReceivedCaptureSummary: Identifiable, Equatable {
-    var id: String { gesture }
-    var gesture: String
-    var positiveCount: Int
-    var negativeCount: Int
-    var debugCount: Int
-    var unknownCount: Int
-
-    var isReadyForFirstProfile: Bool {
-        positiveCount >= 5 && negativeCount >= 3
-    }
-
-    var statusText: String {
-        if positiveCount >= 10 && negativeCount >= 3 {
-            return "样本充足，可以生成较稳定的动作。"
-        }
-        if isReadyForFirstProfile {
-            return "可以先生成动作，之后继续补充正样本。"
-        }
-        if positiveCount < 5 {
-            return "还需至少 \(5 - positiveCount) 个正样本"
-        }
-        return "还需至少 \(3 - negativeCount) 个负样本"
-    }
-
-    static func makeSummaries(from files: [ReceivedSyncedFile]) -> [ReceivedCaptureSummary] {
-        var summaries: [String: ReceivedCaptureSummary] = [:]
-
-        for file in files where file.fileURL.pathExtension.lowercased() == "csv" {
-            let parsed = PhoneConnectivityReceiver.parseCaptureFileName(file.fileURL.deletingPathExtension().lastPathComponent)
-            var summary = summaries[parsed.gesture] ?? ReceivedCaptureSummary(
-                gesture: parsed.gesture,
-                positiveCount: 0,
-                negativeCount: 0,
-                debugCount: 0,
-                unknownCount: 0
-            )
-            switch parsed.role {
-            case "positive":
-                summary.positiveCount += 1
-            case "negative":
-                summary.negativeCount += 1
-            case "debug":
-                summary.debugCount += 1
-            default:
-                summary.unknownCount += 1
-            }
-            summaries[parsed.gesture] = summary
-        }
-
-        return summaries.values.sorted { lhs, rhs in
-            if lhs.isReadyForFirstProfile != rhs.isReadyForFirstProfile {
-                return lhs.isReadyForFirstProfile && !rhs.isReadyForFirstProfile
-            }
-            return lhs.gesture < rhs.gesture
-        }
-    }
 }
