@@ -289,6 +289,95 @@ import Foundation
     #expect(decision.reason == .dominantAxisMismatch)
 }
 
+@Test func comboProfileRejectsMismatchedSegmentKind() {
+    let template = MotionTemplateBuilder().makeTemplate(
+        label: "punch",
+        kind: .combo,
+        samples: syntheticSequence(duration: 2.3, amplitude: 2.0)
+    )
+    let profile = GestureProfile(
+        name: "punch",
+        kind: .combo,
+        templates: [template],
+        acceptanceThreshold: 0.6
+    )
+    let samples = syntheticBurst(duration: 0.5, amplitude: 1.0)
+    let segment = GestureSegment(
+        kind: .burst,
+        samples: samples,
+        startTimestamp: 60,
+        endTimestamp: 60.5,
+        peakTimestamp: 60.25,
+        peakEnergy: 1.0,
+        features: MotionEnergyAnalyzer().features(for: samples)
+    )
+
+    let decision = MotionBurstGate().decision(for: segment, profile: profile)
+
+    #expect(decision.isAllowed == false)
+    #expect(decision.reason == .kindMismatch)
+}
+
+@Test func comboProfileRejectsWeakTiltLikeMotion() {
+    let template = MotionTemplateBuilder().makeTemplate(
+        label: "punch",
+        kind: .combo,
+        samples: syntheticSequence(duration: 2.3, amplitude: 2.0)
+    )
+    let profile = GestureProfile(
+        name: "punch",
+        kind: .combo,
+        templates: [template],
+        acceptanceThreshold: 0.6
+    )
+    let samples = syntheticSequence(duration: 2.0, amplitude: 0.2)
+    let segment = GestureSegment(
+        kind: .sequence,
+        samples: samples,
+        startTimestamp: 70,
+        endTimestamp: 72,
+        peakTimestamp: 71,
+        peakEnergy: 0.2,
+        features: MotionEnergyAnalyzer().features(for: samples)
+    )
+    var runtime = GestureRecognitionRuntime(profiles: [profile])
+
+    let event = runtime.recognize(segment: segment, now: 72)
+
+    #expect(event.triggered == false)
+    #expect(event.candidate == nil)
+    #expect(event.logEntry.burstGateRejectionReason == .peakAccelerationTooLow)
+}
+
+@Test func comboProfileRejectsOverlongMotion() {
+    let template = MotionTemplateBuilder().makeTemplate(
+        label: "punch",
+        kind: .combo,
+        samples: syntheticSequence(duration: 2.3, amplitude: 2.0)
+    )
+    let profile = GestureProfile(
+        name: "punch",
+        kind: .combo,
+        templates: [template],
+        acceptanceThreshold: 0.6
+    )
+    let samples = syntheticSequence(duration: 7.0, amplitude: 2.0)
+    let segment = GestureSegment(
+        kind: .sequence,
+        samples: samples,
+        startTimestamp: 80,
+        endTimestamp: 87,
+        peakTimestamp: 83,
+        peakEnergy: 2.0,
+        features: MotionEnergyAnalyzer().features(for: samples)
+    )
+
+    let decision = MotionBurstGate().decision(for: segment, profile: profile)
+
+    #expect(decision.isAllowed == false)
+    #expect(decision.reason == .durationTooLong)
+}
+
 @Test func recognitionLogEntryRoundTripsThroughJSON() throws {
     let profileID = UUID()
     let entry = RecognitionLogEntry(

@@ -137,7 +137,7 @@ final class WatchMotionRecorder: ObservableObject {
     func reloadSavedProfiles() {
         do {
             let store = try GestureProfileFileStore.appDocumentsStore()
-            let profiles = try store.list().flatMap(\.archive.profiles)
+            let profiles = deduplicateProfiles(try store.list().flatMap(\.archive.profiles))
             recognitionRuntime.replaceProfiles(profiles)
             soundPlayer?.preload(sounds: profiles.map(\.sound))
             loadedProfileCount = profiles.count
@@ -148,6 +148,25 @@ final class WatchMotionRecorder: ObservableObject {
             lastFeedbackMessage = error.localizedDescription
             AppDiagnostics.record(error: error, event: "watch.profiles.reload.error")
         }
+    }
+
+    private func deduplicateProfiles(_ profiles: [GestureProfile]) -> [GestureProfile] {
+        var seenIDs: Set<UUID> = []
+        var seenNames: Set<String> = []
+        var output: [GestureProfile] = []
+        output.reserveCapacity(profiles.count)
+
+        for profile in profiles {
+            let normalizedName = profile.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !seenIDs.contains(profile.id), !seenNames.contains(normalizedName) else {
+                continue
+            }
+            seenIDs.insert(profile.id)
+            seenNames.insert(normalizedName)
+            output.append(profile)
+        }
+
+        return output
     }
 
     func markLastTriggerAsFalse() {

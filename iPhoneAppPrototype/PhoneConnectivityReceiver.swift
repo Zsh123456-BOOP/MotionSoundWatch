@@ -686,8 +686,12 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
         primarySamples: [MotionSample]?
     ) -> GestureKind {
         guard requestedKind != .posture else { return requestedKind }
-        guard primarySamples?.isEmpty == false else { return requestedKind }
-        return .combo
+        guard let primarySamples, primarySamples.isEmpty == false else { return requestedKind }
+        guard let first = primarySamples.first, let last = primarySamples.last else {
+            return requestedKind
+        }
+        let duration = max(0, last.timestamp - first.timestamp)
+        return duration <= 0.9 ? .burst : .sequence
     }
 
     nonisolated private static func isLegacyUntitledProfile(_ profile: GestureProfile) -> Bool {
