@@ -21,6 +21,7 @@ struct PhoneDebugView: View {
     @State private var soundStartFraction = 0.0
     @State private var triggerTiming = "atEnd"
     @State private var cooldownSeconds = 0.8
+    @State private var localAudioFiles: [URL] = []
     @State private var countdownRemaining: Int?
     @State private var countdownTimer: Timer?
     @State private var pendingRecordingAction: RecordingControlAction?
@@ -102,6 +103,7 @@ struct PhoneDebugView: View {
                     Button {
                         receiver.activate()
                         receiver.reloadReceivedFiles()
+                        reloadLocalAudioFiles()
                         loadPreferredCapture()
                     } label: {
                         Label("刷新", systemImage: "arrow.clockwise")
@@ -113,6 +115,7 @@ struct PhoneDebugView: View {
                 UIApplication.shared.isIdleTimerDisabled = true
                 receiver.activate()
                 receiver.requestWatchRuntime(reason: "phoneViewAppear")
+                reloadLocalAudioFiles()
                 loadPreferredCapture()
             }
             .onChange(of: receiver.receivedFiles) {
@@ -382,9 +385,40 @@ struct PhoneDebugView: View {
                 Button {
                     activeFileImport = .audio
                 } label: {
-                    Label("选择音频文件", systemImage: "folder")
+                    Label("从文件选择音频", systemImage: "folder")
                 }
                 .buttonStyle(.borderedProminent)
+
+                if !localAudioFiles.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("本机音效")
+                            .font(.subheadline.weight(.semibold))
+                        ForEach(localAudioFiles, id: \.path) { url in
+                            Button {
+                                selectLocalAudio(url)
+                            } label: {
+                                HStack(spacing: 10) {
+                                    Image(systemName: selectedAudioFileName == url.lastPathComponent ? "checkmark.circle.fill" : "waveform")
+                                        .foregroundStyle(selectedAudioFileName == url.lastPathComponent ? Color.accentColor : .secondary)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(url.lastPathComponent)
+                                            .font(.subheadline.weight(.medium))
+                                            .lineLimit(1)
+                                        Text(localAudioFileDetail(url))
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .padding(10)
+                            .background(Color(.tertiarySystemGroupedBackground))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                        }
+                    }
+                }
 
                 VStack(alignment: .leading, spacing: 10) {
                     SliderValueRow(title: "音量", value: "\(Int(volume * 100))%")
@@ -663,11 +697,57 @@ struct PhoneDebugView: View {
             }
             selectedAudioFileName = url.lastPathComponent
             _ = receiver.sendAudioFile(url)
+            reloadLocalAudioFiles()
             AppDiagnostics.record("phone.audio.imported", ["file": url.lastPathComponent])
         case .profile:
             _ = receiver.sendProfileFile(url)
             AppDiagnostics.record("phone.profile.imported", ["file": url.lastPathComponent])
         }
+    }
+
+    private func selectLocalAudio(_ url: URL) {
+        selectedAudioFileName = url.lastPathComponent
+        _ = receiver.sendAudioFile(url)
+        receiver.setLastMessage("已选择音效：\(url.lastPathComponent)")
+        AppDiagnostics.record("phone.audio.localSelected", ["file": url.lastPathComponent])
+    }
+
+    private func reloadLocalAudioFiles() {
+        do {
+            let documents = try FileManager.default.url(
+                for: .documentDirectory,
+                in: .userDomainMask,
+                appropriateFor: nil,
+                create: true
+            )
+            let urls = try FileManager.default.contentsOfDirectory(
+                at: documents,
+                includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
+                options: [.skipsHiddenFiles]
+            )
+            localAudioFiles = urls
+                .filter { FileImportTarget.isSupportedAudio($0) }
+                .sorted { lhs, rhs in
+                    modificationDate(lhs) > modificationDate(rhs)
+                }
+            AppDiagnostics.record("phone.audio.localReload", ["count": localAudioFiles.count])
+        } catch {
+            localAudioFiles = []
+            AppDiagnostics.record(error: error, event: "phone.audio.localReload.error")
+        }
+    }
+
+    private func localAudioFileDetail(_ url: URL) -> String {
+        let size = ((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize) ?? 0
+        if size <= 0 {
+            return url.pathExtension.uppercased()
+        }
+        let kb = max(1, size / 1024)
+        return "\(url.pathExtension.uppercased()) · \(kb) KB"
+    }
+
+    private func modificationDate(_ url: URL) -> Date {
+        ((try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate) ?? .distantPast
     }
 
     private func resetForNextGesture() {
@@ -785,7 +865,7 @@ private enum FileImportTarget {
     var allowedContentTypes: [UTType] {
         switch self {
         case .audio:
-            return [.item]
+            return [.data, .content, .item, .audio]
         case .profile:
             return [.json]
         }
