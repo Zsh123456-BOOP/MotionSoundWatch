@@ -405,7 +405,13 @@ final class WatchMotionRecorder: ObservableObject {
                         "audioPlayed": audioPlayed,
                     ]
                 )
-                WKInterfaceDevice.current().play(.success)
+                if !audioPlayed {
+                    WKInterfaceDevice.current().play(.failure)
+                    AppDiagnostics.record(
+                        "watch.recognition.audioFallbackHaptic",
+                        ["profile": lastRecognitionEvent?.profile?.name ?? ""]
+                    )
+                }
             }
         }
 

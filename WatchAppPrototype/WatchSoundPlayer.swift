@@ -81,8 +81,10 @@ final class WatchSoundPlayer: ObservableObject {
 
     @discardableResult
     func play(assetName: String) -> Bool {
+        configureAudioSession()
         guard let player = players[assetName] else {
             lastError = "音频尚未预加载：\(assetName)"
+            AppDiagnostics.record("watch.audio.play.missing", ["asset": assetName])
             return false
         }
 
@@ -91,6 +93,15 @@ final class WatchSoundPlayer: ObservableObject {
         if !played {
             lastError = "音频播放失败：\(assetName)"
         }
+        AppDiagnostics.record(
+            "watch.audio.play",
+            [
+                "asset": assetName,
+                "played": played,
+                "volume": player.volume,
+                "duration": player.duration,
+            ]
+        )
         return played
     }
 

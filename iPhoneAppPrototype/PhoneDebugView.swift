@@ -601,7 +601,7 @@ struct PhoneDebugView: View {
     }
 
     private var automaticKindText: String {
-        captureDuration >= 0.9 ? "连续动作" : "短促动作"
+        "自适应动作"
     }
 
     private var captureDuration: Double {
