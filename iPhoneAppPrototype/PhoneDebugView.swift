@@ -448,6 +448,9 @@ struct PhoneDebugView: View {
         if receiver.isWatchAppInstalled {
             return "Apple Watch 已配对"
         }
+        if receiver.activationStateDescription == "activated" {
+            return "未识别 Watch App"
+        }
         return "等待 Apple Watch"
     }
 
@@ -457,6 +460,9 @@ struct PhoneDebugView: View {
         }
         if receiver.isWatchAppInstalled {
             return "请保持 Watch 上的 MotionSound 打开。"
+        }
+        if receiver.activationStateDescription == "activated" {
+            return "iPhone 已启用 WatchConnectivity，但还没把手表端识别为本 App 的 companion。"
         }
         return "请先安装并打开 Watch App。"
     }

@@ -6,6 +6,7 @@ import CryptoKit
 final class WatchConnectivityFileSender: NSObject, ObservableObject {
     @Published private(set) var isSupported = WCSession.isSupported()
     @Published private(set) var activationStateDescription = "not activated"
+    @Published private(set) var isPhoneReachable = false
     @Published private(set) var lastTransferMessage: String?
     @Published private(set) var receivedSoundFiles: [URL] = []
     @Published private(set) var lastReceivedProfileURL: URL?
@@ -39,7 +40,14 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
         session.delegate = self
         session.activate()
         activationStateDescription = description(for: session.activationState)
-        AppDiagnostics.record("watch.connectivity.activate", ["state": activationStateDescription])
+        isPhoneReachable = session.isReachable
+        AppDiagnostics.record(
+            "watch.connectivity.activate",
+            [
+                "state": activationStateDescription,
+                "reachable": isPhoneReachable,
+            ]
+        )
     }
 
     @discardableResult
@@ -326,13 +334,21 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
         activationDidCompleteWith activationState: WCSessionActivationState,
         error: Error?
     ) {
+        let reachable = session.isReachable
         Task { @MainActor in
             activationStateDescription = description(for: activationState)
+            isPhoneReachable = reachable
             if let error {
                 lastTransferMessage = error.localizedDescription
                 AppDiagnostics.record(error: error, event: "watch.connectivity.activation.error")
             } else {
-                AppDiagnostics.record("watch.connectivity.activation", ["state": activationStateDescription])
+                AppDiagnostics.record(
+                    "watch.connectivity.activation",
+                    [
+                        "state": activationStateDescription,
+                        "reachable": isPhoneReachable,
+                    ]
+                )
             }
         }
     }
@@ -427,6 +443,22 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
                 kind: kind,
                 sampleRole: sampleRole,
                 autoSendCSV: autoSendCSV
+            )
+        }
+    }
+
+    nonisolated func sessionReachabilityDidChange(_ session: WCSession) {
+        let reachable = session.isReachable
+        let activationState = session.activationState
+        Task { @MainActor in
+            isPhoneReachable = reachable
+            activationStateDescription = description(for: activationState)
+            AppDiagnostics.record(
+                "watch.connectivity.reachability",
+                [
+                    "state": activationStateDescription,
+                    "reachable": isPhoneReachable,
+                ]
             )
         }
     }

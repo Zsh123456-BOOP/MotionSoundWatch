@@ -42,7 +42,7 @@ struct MotionDebugView: View {
                     Text("iPhone")
                     Spacer()
                     Text(watchConnectionText)
-                        .foregroundStyle(fileSender.activationStateDescription == "activated" ? .green : .secondary)
+                        .foregroundStyle(fileSender.isPhoneReachable ? .green : .secondary)
                 }
                 HStack {
                     Text("动作")
@@ -145,7 +145,13 @@ struct MotionDebugView: View {
     }
 
     private var watchConnectionText: String {
-        fileSender.activationStateDescription == "activated" ? "已连接" : "等待连接"
+        if fileSender.isPhoneReachable {
+            return "已连接"
+        }
+        if fileSender.activationStateDescription == "activated" {
+            return "等待手机"
+        }
+        return "等待连接"
     }
 
     private var userFacingMessage: String? {
