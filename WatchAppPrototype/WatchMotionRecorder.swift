@@ -75,19 +75,18 @@ final class WatchMotionRecorder: ObservableObject {
         }
 
         motionManager.deviceMotionUpdateInterval = 1 / sampleRate
-        motionManager.startDeviceMotionUpdates(to: motionQueue) { [weak self] motion, error in
+        motionManager.startDeviceMotionUpdates(to: .main) { [weak self] motion, error in
             if let error {
                 AppDiagnostics.record(error: error, event: "watch.motion.callback.error")
                 return
             }
+            guard let self else { return }
             guard let motion else {
                 AppDiagnostics.record("watch.motion.callback.empty")
                 return
             }
             let rawSample = RawMotionSample(motion)
-            Task { @MainActor [weak self] in
-                self?.receive(rawSample)
-            }
+            self.receive(rawSample)
         }
 
         isLive = true
