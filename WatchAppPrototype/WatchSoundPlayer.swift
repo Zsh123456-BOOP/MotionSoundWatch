@@ -1,6 +1,7 @@
 import AVFoundation
 import Combine
 import Foundation
+import WatchKit
 #if canImport(MotionSoundCore)
 import MotionSoundCore
 #endif
@@ -13,14 +14,16 @@ final class WatchSoundPlayer: ObservableObject {
     @Published private(set) var lastPlayedAssetName: String?
     @Published private(set) var lastPlaySucceeded = false
     @Published private(set) var lastAudiblePlaySucceeded = false
+    @Published private(set) var lastSystemSoundFallbackSucceeded = false
     @Published private(set) var lastOutputVolume: Float = 0
 
     private var players: [String: AVAudioPlayer] = [:]
+    private var watchKitPlayers: [String: WKAudioFilePlayer] = [:]
 
     func configureAudioSession() {
         do {
             let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+            try session.setCategory(.playback, mode: .default, policy: .longFormAudio, options: [])
             try session.setActive(true)
             lastOutputVolume = session.outputVolume
             isReady = true
@@ -30,6 +33,9 @@ final class WatchSoundPlayer: ObservableObject {
                 [
                     "outputVolume": session.outputVolume,
                     "secondaryAudioSilenced": session.secondaryAudioShouldBeSilencedHint,
+                    "category": session.category.rawValue,
+                    "routeSharingPolicy": session.routeSharingPolicy.rawValue,
+                    "outputs": routeDescription(session),
                 ]
             )
         } catch {
@@ -104,7 +110,11 @@ final class WatchSoundPlayer: ObservableObject {
         lastPlayedAssetName = assetName
         lastPlaySucceeded = played
         lastOutputVolume = AVAudioSession.sharedInstance().outputVolume
-        lastAudiblePlaySucceeded = played && lastOutputVolume > 0.01
+        lastSystemSoundFallbackSucceeded = false
+        if played, lastOutputVolume <= 0.01 {
+            lastSystemSoundFallbackSucceeded = playWatchKitFallback(assetName: assetName)
+        }
+        lastAudiblePlaySucceeded = (played && lastOutputVolume > 0.01) || lastSystemSoundFallbackSucceeded
         if !played {
             lastError = "音频播放失败：\(assetName)"
         } else {
@@ -120,6 +130,8 @@ final class WatchSoundPlayer: ObservableObject {
                 "outputVolume": AVAudioSession.sharedInstance().outputVolume,
                 "isPlaying": player.isPlaying,
                 "audible": lastAudiblePlaySucceeded,
+                "systemSoundFallback": lastSystemSoundFallbackSucceeded,
+                "outputs": routeDescription(AVAudioSession.sharedInstance()),
             ]
         )
         return played
@@ -176,5 +188,50 @@ final class WatchSoundPlayer: ObservableObject {
             lastError = error.localizedDescription
             AppDiagnostics.record(error: error, event: "watch.audio.preload.file.error", ["file": fileURL.lastPathComponent, "key": key])
         }
+    }
+
+    private func playWatchKitFallback(assetName: String) -> Bool {
+        guard let player = players[assetName] else {
+            AppDiagnostics.record("watch.audio.watchKitFallback.missingPlayer", ["asset": assetName])
+            return false
+        }
+        guard let url = player.url else {
+            AppDiagnostics.record("watch.audio.watchKitFallback.missingURL", ["asset": assetName])
+            return false
+        }
+
+        let watchKitPlayer: WKAudioFilePlayer
+        if let existing = watchKitPlayers[assetName] {
+            watchKitPlayer = existing
+        } else {
+            let asset = WKAudioFileAsset(url: url)
+            let item = WKAudioFilePlayerItem(asset: asset)
+            watchKitPlayer = WKAudioFilePlayer(playerItem: item)
+            watchKitPlayers[assetName] = watchKitPlayer
+        }
+
+        watchKitPlayer.currentItem?.setCurrentTime(0)
+        watchKitPlayer.play()
+        AppDiagnostics.record(
+            "watch.audio.watchKitFallback.play",
+            [
+                "asset": assetName,
+                "status": watchKitPlayer.status.rawValue,
+                "rate": watchKitPlayer.rate,
+                "itemStatus": watchKitPlayer.currentItem?.status.rawValue ?? -1,
+                "error": watchKitPlayer.error?.localizedDescription ?? "",
+            ]
+        )
+        return true
+    }
+
+    private func routeDescription(_ session: AVAudioSession) -> String {
+        let outputs = session.currentRoute.outputs
+        guard !outputs.isEmpty else { return "none" }
+        return outputs
+            .map { output in
+                "\(output.portType.rawValue):\(output.portName)"
+            }
+            .joined(separator: "|")
     }
 }
