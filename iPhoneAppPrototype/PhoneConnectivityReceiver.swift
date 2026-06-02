@@ -21,6 +21,37 @@ struct RecordingStatusEvent: Identifiable, Equatable {
     var receivedAt: Date
 }
 
+private struct RecordingCommandReply {
+    var status: String?
+    var action: String?
+    var samples: Int?
+}
+
+private enum PhoneRecordingCommandTransport {
+    static func send(
+        session: WCSession,
+        message: [String: Any],
+        onReply: @MainActor @escaping (RecordingCommandReply) -> Void,
+        onError: @MainActor @escaping (String) -> Void
+    ) {
+        session.sendMessage(message) { reply in
+            let commandReply = RecordingCommandReply(
+                status: reply["status"] as? String,
+                action: reply["action"] as? String,
+                samples: reply["samples"] as? Int
+            )
+            Task { @MainActor in
+                onReply(commandReply)
+            }
+        } errorHandler: { error in
+            let errorMessage = error.localizedDescription
+            Task { @MainActor in
+                onError(errorMessage)
+            }
+        }
+    }
+}
+
 @MainActor
 final class PhoneConnectivityReceiver: NSObject, ObservableObject {
     @Published private(set) var isSupported = WCSession.isSupported()
@@ -128,37 +159,38 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
         ]
 
         if session.isReachable {
-            session.sendMessage(message) { [weak self] reply in
-                let status = reply["status"] as? String
-                let action = reply["action"] as? String
-                let samples = reply["samples"] as? Int
-                Task { @MainActor in
-                    AppDiagnostics.record(
-                        "phone.recordingCommand.reply",
-                        [
-                            "status": status ?? "",
-                            "action": action ?? "",
-                            "samples": samples ?? -1,
-                        ]
-                    )
-                    if status == "accepted" {
-                        if action == RecordingControlAction.startRecording.rawValue {
-                            self?.lastMessage = "Watch 已确认开始录制"
-                        } else if let samples {
-                            self?.lastMessage = "Watch 已确认停止录制，样本 \(samples)"
-                        } else {
-                            self?.lastMessage = "Watch 已确认停止录制"
-                        }
+            PhoneRecordingCommandTransport.send(
+                session: session,
+                message: message
+            ) { [weak self] reply in
+                AppDiagnostics.record(
+                    "phone.recordingCommand.reply",
+                    [
+                        "status": reply.status ?? "",
+                        "action": reply.action ?? "",
+                        "samples": reply.samples ?? -1,
+                    ]
+                )
+                if reply.status == "accepted" {
+                    if reply.action == RecordingControlAction.startRecording.rawValue {
+                        self?.lastMessage = "Watch 已确认开始录制"
+                    } else if let samples = reply.samples {
+                        self?.lastMessage = "Watch 已确认停止录制，样本 \(samples)"
                     } else {
-                        self?.lastMessage = "Watch 回执异常"
+                        self?.lastMessage = "Watch 已确认停止录制"
                     }
+                } else {
+                    self?.lastMessage = "Watch 回执异常"
                 }
-            } errorHandler: { [weak self] error in
-                let message = error.localizedDescription
-                Task { @MainActor in
-                    self?.lastMessage = message
-                    AppDiagnostics.record(error: error, event: "phone.recordingCommand.sendMessage.error", ["action": action.rawValue])
-                }
+            } onError: { [weak self] errorMessage in
+                self?.lastMessage = errorMessage
+                AppDiagnostics.record(
+                    "phone.recordingCommand.sendMessage.error",
+                    [
+                        "action": action.rawValue,
+                        "error": errorMessage,
+                    ]
+                )
             }
             lastMessage = action == .startRecording ? "已发送开始录制命令" : "已发送停止录制命令"
             refreshSessionState(
@@ -180,15 +212,14 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
             return true
         }
 
-        session.transferUserInfo(message)
-        lastMessage = "Watch 暂不可达，已加入录制命令队列"
+        lastMessage = "Watch 暂不可达，请打开 Watch App 后再开始或结束录制"
         refreshSessionState(
             activationState: session.activationState,
             isReachable: session.isReachable,
             isWatchAppInstalled: session.isWatchAppInstalled
         )
         AppDiagnostics.record(
-            "phone.recordingCommand.queued",
+            "phone.recordingCommand.unreachable",
             [
                 "action": action.rawValue,
                 "label": label,
@@ -198,7 +229,7 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
                 "reachable": false,
             ]
         )
-        return true
+        return false
     }
 
     @discardableResult
@@ -337,30 +368,10 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
         }
     }
 
-    private func receive(fileURL: URL, preferredFileName: String?) {
-        do {
-            let directory = try incomingDirectory()
-            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-
-            let preferredName = preferredFileName?.isEmpty == false
-                ? preferredFileName!
-                : fileURL.lastPathComponent
-            let destination = availableDestinationURL(
-                directory: directory,
-                fileName: sanitizeFileName(preferredName)
-            )
-
-            if fileManager.fileExists(atPath: destination.path) {
-                try fileManager.removeItem(at: destination)
-            }
-            try fileManager.moveItem(at: fileURL, to: destination)
-            lastMessage = "已接收：\(destination.lastPathComponent)"
-            AppDiagnostics.record("phone.connectivity.receiveFile", ["file": destination.lastPathComponent])
-            reloadReceivedFiles()
-        } catch {
-            lastMessage = error.localizedDescription
-            AppDiagnostics.record(error: error, event: "phone.connectivity.receiveFile.error", ["file": preferredFileName ?? fileURL.lastPathComponent])
-        }
+    private func finishReceivedFile(_ destination: URL) {
+        lastMessage = "已接收：\(destination.lastPathComponent)"
+        AppDiagnostics.record("phone.connectivity.receiveFile", ["file": destination.lastPathComponent])
+        reloadReceivedFiles()
     }
 
     private func receiveRecordingStatus(
@@ -563,6 +574,66 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
         let gesture = parts[startIndex..<endIndex].joined(separator: "-")
         return (gesture.isEmpty ? "unknown" : gesture, role)
     }
+
+    nonisolated private static func persistReceivedFile(
+        sourceURL: URL,
+        preferredFileName: String?,
+        fileManager: FileManager = .default
+    ) throws -> URL {
+        let documents = try fileManager.url(
+            for: .documentDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+        let directory = documents.appendingPathComponent("MotionSoundIncoming", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let preferredName = preferredFileName?.isEmpty == false
+            ? preferredFileName!
+            : sourceURL.lastPathComponent
+        let destination = nonisolatedAvailableDestinationURL(
+            directory: directory,
+            fileName: nonisolatedSanitizeFileName(preferredName),
+            fileManager: fileManager
+        )
+
+        if fileManager.fileExists(atPath: destination.path) {
+            try fileManager.removeItem(at: destination)
+        }
+        try fileManager.moveItem(at: sourceURL, to: destination)
+        return destination
+    }
+
+    nonisolated private static func nonisolatedAvailableDestinationURL(
+        directory: URL,
+        fileName: String,
+        fileManager: FileManager
+    ) -> URL {
+        var destination = directory.appendingPathComponent(fileName)
+        guard fileManager.fileExists(atPath: destination.path) else {
+            return destination
+        }
+
+        let base = destination.deletingPathExtension().lastPathComponent
+        let ext = destination.pathExtension
+        let timestamp = Int(Date().timeIntervalSince1970)
+        destination = directory.appendingPathComponent("\(base)-\(timestamp).\(ext)")
+        return destination
+    }
+
+    nonisolated private static func nonisolatedSanitizeFileName(_ value: String) -> String {
+        let fallback = "motion-sound-file"
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_."))
+        let scalars = value.unicodeScalars.map { scalar in
+            allowed.contains(scalar) ? Character(scalar) : "-"
+        }
+        let compact = String(scalars)
+            .split(separator: "-")
+            .joined(separator: "-")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-_"))
+        return compact.isEmpty ? fallback : compact
+    }
 }
 
 enum SyncedFileKind: String {
@@ -609,8 +680,20 @@ extension PhoneConnectivityReceiver: WCSessionDelegate {
     nonisolated func session(_ session: WCSession, didReceive file: WCSessionFile) {
         let fileURL = file.fileURL
         let preferredFileName = file.metadata?["fileName"] as? String
-        Task { @MainActor in
-            receive(fileURL: fileURL, preferredFileName: preferredFileName)
+        do {
+            let destination = try Self.persistReceivedFile(sourceURL: fileURL, preferredFileName: preferredFileName)
+            Task { @MainActor in
+                finishReceivedFile(destination)
+            }
+        } catch {
+            Task { @MainActor in
+                lastMessage = error.localizedDescription
+                AppDiagnostics.record(
+                    error: error,
+                    event: "phone.connectivity.receiveFile.error",
+                    ["file": preferredFileName ?? fileURL.lastPathComponent]
+                )
+            }
         }
     }
 

@@ -13,6 +13,9 @@ struct MotionDebugView: View {
     @State private var kind = GestureKind.burst
     @State private var exportedText = ""
     @State private var remoteCaptureState = "idle"
+    @State private var remoteRecordingTimeoutTask: Task<Void, Never>?
+
+    private let remoteRecordingLimitSeconds: UInt64 = 20
 
     init() {
         AppDiagnostics.record("watch.debugView.init")
@@ -295,9 +298,11 @@ struct MotionDebugView: View {
 
         switch command.action {
         case .startRecording:
-            if !recorder.isRecording {
-                recorder.startRecording()
+            if recorder.isRecording {
+                AppDiagnostics.record("watch.remoteRecording.restart", ["label": label])
             }
+            recorder.startRecording()
+            scheduleRemoteRecordingTimeout(sampleRole: command.sampleRole)
             AppDiagnostics.record("watch.remoteRecording.start", ["label": label, "kind": kind.rawValue])
             remoteCaptureState = "recording"
             WKInterfaceDevice.current().play(.start)
@@ -309,6 +314,8 @@ struct MotionDebugView: View {
                 samples: recorder.samples.count
             )
         case .stopRecording:
+            remoteRecordingTimeoutTask?.cancel()
+            remoteRecordingTimeoutTask = nil
             if recorder.isRecording {
                 _ = recorder.stopRecording()
             }
@@ -326,6 +333,26 @@ struct MotionDebugView: View {
                     samples: recorder.samples.count
                 )
             }
+        }
+    }
+
+    private func scheduleRemoteRecordingTimeout(sampleRole: String?) {
+        remoteRecordingTimeoutTask?.cancel()
+        remoteRecordingTimeoutTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: remoteRecordingLimitSeconds * 1_000_000_000)
+            guard !Task.isCancelled, recorder.isRecording else { return }
+            _ = recorder.stopRecording()
+            remoteCaptureState = "stopped"
+            WKInterfaceDevice.current().play(.stop)
+            AppDiagnostics.record(
+                "watch.remoteRecording.autoStop",
+                [
+                    "label": label,
+                    "samples": recorder.samples.count,
+                    "limitSeconds": remoteRecordingLimitSeconds,
+                ]
+            )
+            saveAndSendRemoteCSV(sampleRole: sampleRole)
         }
     }
 

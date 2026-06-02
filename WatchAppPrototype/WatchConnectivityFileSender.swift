@@ -109,11 +109,12 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
         }
 
         if session.isReachable {
-            session.sendMessage(message, replyHandler: nil) { [weak self] error in
-                Task { @MainActor in
-                    self?.lastTransferMessage = error.localizedDescription
-                    AppDiagnostics.record(error: error, event: "watch.connectivity.status.sendMessage.error")
-                }
+            WatchRecordingStatusTransport.send(session: session, message: message) { [weak self] errorMessage in
+                self?.lastTransferMessage = errorMessage
+                AppDiagnostics.record(
+                    "watch.connectivity.status.sendMessage.error",
+                    ["error": errorMessage]
+                )
             }
             AppDiagnostics.record("watch.connectivity.status.sent", ["action": action.rawValue, "samples": samples])
             return true
@@ -326,6 +327,21 @@ struct RecordingControlCommand: Identifiable, Equatable {
     var kindRawValue: String?
     var sampleRole: String?
     var autoSendCSV: Bool
+}
+
+private enum WatchRecordingStatusTransport {
+    static func send(
+        session: WCSession,
+        message: [String: Any],
+        onError: @MainActor @escaping (String) -> Void
+    ) {
+        session.sendMessage(message, replyHandler: nil) { error in
+            let errorMessage = error.localizedDescription
+            Task { @MainActor in
+                onError(errorMessage)
+            }
+        }
+    }
 }
 
 extension WatchConnectivityFileSender: WCSessionDelegate {

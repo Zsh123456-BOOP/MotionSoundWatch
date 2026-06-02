@@ -1,13 +1,11 @@
 import Charts
-import SceneKit
 import SwiftUI
 import UniformTypeIdentifiers
 
 struct PhoneDebugView: View {
     @StateObject private var receiver = PhoneConnectivityReceiver()
     @State private var currentStep = SetupStep.create
-    @State private var isImportingAudio = false
-    @State private var isImportingProfile = false
+    @State private var activeFileImport: FileImportTarget?
     @State private var recordingLabel = "punch"
     @State private var recordingKind = "burst"
     @State private var sampleRole = "positive"
@@ -23,7 +21,9 @@ struct PhoneDebugView: View {
     @State private var triggerTiming = "atEnd"
     @State private var cooldownSeconds = 0.8
     @State private var countdownRemaining: Int?
-    @State private var countdownTask: Task<Void, Never>?
+    @State private var countdownTimer: Timer?
+    @State private var pendingRecordingAction: RecordingControlAction?
+    @State private var captureCountBeforeStop: Int?
 
     private var receivedCaptureSummaries: [ReceivedCaptureSummary] {
         ReceivedCaptureSummary.makeSummaries(from: receiver.receivedFiles)
@@ -59,7 +59,10 @@ struct PhoneDebugView: View {
     }
 
     private var canStartRecording: Bool {
-        receiver.isWatchReachable && countdownRemaining == nil && !normalizedGestureName.isEmpty
+        receiver.isWatchReachable
+            && countdownRemaining == nil
+            && pendingRecordingAction == nil
+            && !normalizedGestureName.isEmpty
     }
 
     private var trimmedSamples: [MotionSample] {
@@ -111,42 +114,39 @@ struct PhoneDebugView: View {
                 loadPreferredCapture()
             }
             .onChange(of: receiver.receivedFiles) {
-                loadPreferredCapture()
+                handleReceivedFilesChanged()
+            }
+            .onChange(of: receiver.lastRecordingStatus) {
+                handleRecordingStatus(receiver.lastRecordingStatus)
             }
             .onChange(of: selectedCaptureURL) {
                 loadSelectedCapture()
             }
             .onDisappear {
-                countdownTask?.cancel()
+                countdownTimer?.invalidate()
+                countdownTimer = nil
             }
             .fileImporter(
-                isPresented: $isImportingAudio,
-                allowedContentTypes: [.audio],
+                isPresented: Binding(
+                    get: { activeFileImport != nil },
+                    set: { isPresented in
+                        if !isPresented {
+                            activeFileImport = nil
+                        }
+                    }
+                ),
+                allowedContentTypes: activeFileImport?.allowedContentTypes ?? [.data],
                 allowsMultipleSelection: false
             ) { result in
+                guard let target = activeFileImport else { return }
+                activeFileImport = nil
                 switch result {
                 case let .success(urls):
                     guard let url = urls.first else { return }
-                    selectedAudioFileName = url.lastPathComponent
-                    _ = receiver.sendAudioFile(url)
-                    AppDiagnostics.record("phone.audio.imported", ["file": url.lastPathComponent])
+                    handleImportedFile(url, target: target)
                 case let .failure(error):
                     receiver.setLastMessage(error.localizedDescription)
-                    AppDiagnostics.record(error: error, event: "phone.audio.import.error")
-                }
-            }
-            .fileImporter(
-                isPresented: $isImportingProfile,
-                allowedContentTypes: [.json],
-                allowsMultipleSelection: false
-            ) { result in
-                switch result {
-                case let .success(urls):
-                    guard let url = urls.first else { return }
-                    _ = receiver.sendProfileFile(url)
-                case let .failure(error):
-                    receiver.setLastMessage(error.localizedDescription)
-                    AppDiagnostics.record(error: error, event: "phone.profile.import.error")
+                    AppDiagnostics.record(error: error, event: target.errorEvent)
                 }
             }
         }
@@ -230,6 +230,21 @@ struct PhoneDebugView: View {
                         Label("取消倒计时", systemImage: "xmark")
                     }
                     .buttonStyle(.bordered)
+                } else if let pendingRecordingAction {
+                    PrimaryActionButton(
+                        title: pendingRecordingTitle(pendingRecordingAction),
+                        systemImage: "hourglass",
+                        tint: .gray
+                    ) {}
+                    .disabled(true)
+                    if pendingRecordingAction == .stopRecording {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                            Text("正在等待 Watch 保存并同步样本，完成后自动进入裁剪。")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 } else if isRecording {
                     PrimaryActionButton(title: "结束录制", systemImage: "stop.fill", tint: .red) {
                         stopRecording()
@@ -284,17 +299,14 @@ struct PhoneDebugView: View {
                         selectedURL: $selectedCaptureURL
                     )
 
-                    MotionShapeScene(samples: trimmedSamples, playbackFraction: playbackFraction)
-                        .frame(height: 220)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-
-                    EnergyTimeline(
+                    MotionSignalTimeline(
                         samples: previewSamples,
                         trimStartFraction: trimStartFraction,
                         trimEndFraction: trimEndFraction,
                         playbackFraction: playbackFraction
                     )
-                    .frame(height: 150)
+                    .frame(height: 260)
+                    .padding(.vertical, 4)
 
                     TrimControls(
                         startFraction: $trimStartFraction,
@@ -365,7 +377,7 @@ struct PhoneDebugView: View {
                 }
 
                 Button {
-                    isImportingAudio = true
+                    activeFileImport = .audio
                 } label: {
                     Label("选择音频文件", systemImage: "folder")
                 }
@@ -422,7 +434,7 @@ struct PhoneDebugView: View {
                 .disabled(trimmedSamples.isEmpty)
 
                 Button {
-                    isImportingProfile = true
+                    activeFileImport = .profile
                 } label: {
                     Label("导入已有 Profile", systemImage: "square.and.arrow.down")
                 }
@@ -491,43 +503,135 @@ struct PhoneDebugView: View {
             return
         }
 
-        countdownTask?.cancel()
-        countdownTask = Task { @MainActor in
-            for value in [3, 2, 1] {
-                countdownRemaining = value
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
-                if Task.isCancelled { return }
+        countdownTimer?.invalidate()
+
+        let label = normalizedGestureName
+        let kind = recordingKind
+        let role = sampleRole
+        countdownRemaining = 3
+        AppDiagnostics.record("phone.recording.countdown.started", ["label": label, "kind": kind])
+
+        countdownTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { timer in
+            Task { @MainActor in
+                advanceCountdown(label: label, kind: kind, role: role)
             }
-            countdownRemaining = nil
-            receiver.sendRecordingCommand(
-                action: .startRecording,
-                label: normalizedGestureName,
-                kind: recordingKind,
-                sampleRole: sampleRole,
-                autoSendCSV: false
-            )
-            AppDiagnostics.record("phone.recording.startAfterCountdown", ["label": normalizedGestureName, "kind": recordingKind])
         }
     }
 
+    @MainActor
+    private func advanceCountdown(label: String, kind: String, role: String) {
+        guard let current = countdownRemaining else {
+            countdownTimer?.invalidate()
+            countdownTimer = nil
+            return
+        }
+
+        if current > 1 {
+            countdownRemaining = current - 1
+            return
+        }
+
+        countdownTimer?.invalidate()
+        countdownTimer = nil
+        countdownRemaining = nil
+
+        let didSend = receiver.sendRecordingCommand(
+            action: .startRecording,
+            label: label,
+            kind: kind,
+            sampleRole: role,
+            autoSendCSV: false
+        )
+        if didSend {
+            pendingRecordingAction = .startRecording
+        }
+        AppDiagnostics.record("phone.recording.startAfterCountdown", ["label": label, "kind": kind])
+    }
+
     private func cancelCountdown() {
-        countdownTask?.cancel()
-        countdownTask = nil
+        countdownTimer?.invalidate()
+        countdownTimer = nil
         countdownRemaining = nil
         AppDiagnostics.record("phone.recording.countdown.cancelled")
     }
 
     private func stopRecording() {
+        guard pendingRecordingAction == nil else {
+            AppDiagnostics.record(
+                "phone.recording.commandIgnored",
+                ["reason": "pendingCommand", "action": pendingRecordingAction?.rawValue ?? ""]
+            )
+            return
+        }
+
         cancelCountdown()
-        receiver.sendRecordingCommand(
+        let didSend = receiver.sendRecordingCommand(
             action: .stopRecording,
             label: normalizedGestureName,
             kind: recordingKind,
             sampleRole: sampleRole,
             autoSendCSV: true
         )
-        currentStep = .trim
+        if didSend {
+            pendingRecordingAction = .stopRecording
+            captureCountBeforeStop = captureFiles.count
+        }
         AppDiagnostics.record("phone.recording.stopRequested", ["label": normalizedGestureName, "kind": recordingKind])
+    }
+
+    private func handleRecordingStatus(_ status: RecordingStatusEvent?) {
+        guard let status else { return }
+        if status.errorMessage?.isEmpty == false {
+            pendingRecordingAction = nil
+            return
+        }
+
+        if status.state == "stopped", status.csvQueued, captureCountBeforeStop != nil {
+            return
+        }
+
+        if status.actionRawValue == pendingRecordingAction?.rawValue {
+            pendingRecordingAction = nil
+        }
+
+        if status.state == "stopped" {
+            pendingRecordingAction = nil
+            cancelCountdown()
+        }
+    }
+
+    private func handleReceivedFilesChanged() {
+        guard let captureCountBeforeStop else {
+            loadPreferredCapture()
+            return
+        }
+
+        guard captureFiles.count > captureCountBeforeStop else {
+            loadPreferredCapture()
+            return
+        }
+
+        self.captureCountBeforeStop = nil
+        pendingRecordingAction = nil
+        selectedCaptureURL = captureFiles.first?.fileURL
+        currentStep = .trim
+        loadPreferredCapture()
+        AppDiagnostics.record(
+            "phone.recording.captureReady",
+            [
+                "label": normalizedGestureName,
+                "captures": captureFiles.count,
+            ]
+        )
+    }
+
+    private func pendingRecordingTitle(_ action: RecordingControlAction) -> String {
+        switch action {
+        case .startRecording:
+            return "等待 Watch 开始"
+        case .stopRecording:
+            return "等待 Watch 结束"
+        }
     }
 
     private func syncProfile() {
@@ -549,6 +653,18 @@ struct PhoneDebugView: View {
                 "sound": selectedAudioFileName,
             ]
         )
+    }
+
+    private func handleImportedFile(_ url: URL, target: FileImportTarget) {
+        switch target {
+        case .audio:
+            selectedAudioFileName = url.lastPathComponent
+            _ = receiver.sendAudioFile(url)
+            AppDiagnostics.record("phone.audio.imported", ["file": url.lastPathComponent])
+        case .profile:
+            _ = receiver.sendProfileFile(url)
+            AppDiagnostics.record("phone.profile.imported", ["file": url.lastPathComponent])
+        }
     }
 
     private func resetForNextGesture() {
@@ -656,6 +772,35 @@ private enum SetupStep: String, CaseIterable, Identifiable {
         case .sync:
             return "applewatch"
         }
+    }
+}
+
+private enum FileImportTarget {
+    case audio
+    case profile
+
+    var allowedContentTypes: [UTType] {
+        switch self {
+        case .audio:
+            return Self.audioTypes
+        case .profile:
+            return [.json]
+        }
+    }
+
+    var errorEvent: String {
+        switch self {
+        case .audio:
+            return "phone.audio.import.error"
+        case .profile:
+            return "phone.profile.import.error"
+        }
+    }
+
+    private static var audioTypes: [UTType] {
+        let extensions = ["mp3", "m4a", "wav", "caf", "aiff", "aif", "aac"]
+        let explicit = extensions.compactMap { UTType(filenameExtension: $0) }
+        return [.audio] + explicit
     }
 }
 
@@ -922,139 +1067,42 @@ private struct CapturePicker: View {
     }
 }
 
-private struct MotionShapeScene: UIViewRepresentable {
-    var samples: [MotionSample]
-    var playbackFraction: Double
-
-    func makeUIView(context: Context) -> SCNView {
-        let view = SCNView()
-        view.allowsCameraControl = false
-        view.autoenablesDefaultLighting = true
-        view.backgroundColor = UIColor.secondarySystemGroupedBackground
-        return view
-    }
-
-    func updateUIView(_ uiView: SCNView, context: Context) {
-        uiView.scene = Self.makeScene(samples: samples, playbackFraction: playbackFraction)
-    }
-
-    private static func makeScene(samples: [MotionSample], playbackFraction: Double) -> SCNScene {
-        let scene = SCNScene()
-        let cameraNode = SCNNode()
-        cameraNode.camera = SCNCamera()
-        cameraNode.position = SCNVector3(0, 0, 4.2)
-        scene.rootNode.addChildNode(cameraNode)
-
-        let light = SCNNode()
-        light.light = SCNLight()
-        light.light?.type = .omni
-        light.position = SCNVector3(2, 3, 4)
-        scene.rootNode.addChildNode(light)
-
-        let points = trajectoryPoints(samples: samples)
-        addAxes(to: scene)
-        addLine(points: points, to: scene)
-        addPlaybackPoint(points: points, playbackFraction: playbackFraction, to: scene)
-        return scene
-    }
-
-    private static func trajectoryPoints(samples: [MotionSample]) -> [SCNVector3] {
-        guard samples.count > 1 else { return [] }
-
-        let stride = max(samples.count / 90, 1)
-        var rawPoints: [SCNVector3] = []
-        rawPoints.reserveCapacity(samples.count / stride + 1)
-
-        var x: Double = 0
-        var y: Double = 0
-        var z: Double = 0
-        var previousTimestamp = samples.first?.timestamp ?? 0
-
-        for sample in samples.enumerated() where sample.offset % stride == 0 {
-            let dt = min(max(sample.element.timestamp - previousTimestamp, 0.01), 0.08)
-            previousTimestamp = sample.element.timestamp
-            x += sample.element.userAcceleration.x * dt + sample.element.rotationRate.y * 0.006
-            y += sample.element.userAcceleration.y * dt + sample.element.rotationRate.x * 0.006
-            z += sample.element.userAcceleration.z * dt + sample.element.rotationRate.z * 0.004
-            rawPoints.append(SCNVector3(Float(x), Float(y), Float(z)))
-        }
-
-        guard !rawPoints.isEmpty else { return [] }
-
-        let center = rawPoints.reduce(SCNVector3Zero) { partial, point in
-            SCNVector3(partial.x + point.x, partial.y + point.y, partial.z + point.z)
-        }
-        let count = Float(rawPoints.count)
-        let centered = SCNVector3(center.x / count, center.y / count, center.z / count)
-        let shifted = rawPoints.map { SCNVector3($0.x - centered.x, $0.y - centered.y, $0.z - centered.z) }
-        let maxMagnitude = max(
-            shifted.map { sqrt($0.x * $0.x + $0.y * $0.y + $0.z * $0.z) }.max() ?? 1,
-            0.01
-        )
-        let scale = Float(1.35) / maxMagnitude
-        return shifted.map { SCNVector3($0.x * scale, $0.y * scale, $0.z * scale) }
-    }
-
-    private static func addLine(points: [SCNVector3], to scene: SCNScene) {
-        guard points.count > 1 else { return }
-
-        var vertices: [SCNVector3] = []
-        vertices.reserveCapacity((points.count - 1) * 2)
-        for index in 0..<(points.count - 1) {
-            vertices.append(points[index])
-            vertices.append(points[index + 1])
-        }
-
-        let source = SCNGeometrySource(vertices: vertices)
-        let indices = Array(Int32(0)..<Int32(vertices.count))
-        let element = SCNGeometryElement(indices: indices, primitiveType: .line)
-        let geometry = SCNGeometry(sources: [source], elements: [element])
-        geometry.firstMaterial?.diffuse.contents = UIColor.systemTeal
-        geometry.firstMaterial?.emission.contents = UIColor.systemTeal.withAlphaComponent(0.35)
-        scene.rootNode.addChildNode(SCNNode(geometry: geometry))
-    }
-
-    private static func addPlaybackPoint(points: [SCNVector3], playbackFraction: Double, to scene: SCNScene) {
-        guard !points.isEmpty else { return }
-        let index = min(max(Int(Double(points.count - 1) * playbackFraction), 0), points.count - 1)
-        let sphere = SCNSphere(radius: 0.055)
-        sphere.firstMaterial?.diffuse.contents = UIColor.systemOrange
-        let node = SCNNode(geometry: sphere)
-        node.position = points[index]
-        scene.rootNode.addChildNode(node)
-    }
-
-    private static func addAxes(to scene: SCNScene) {
-        let axisPoints: [(UIColor, [SCNVector3])] = [
-            (.systemRed, [SCNVector3(-1.45, 0, 0), SCNVector3(1.45, 0, 0)]),
-            (.systemGreen, [SCNVector3(0, -1.45, 0), SCNVector3(0, 1.45, 0)]),
-            (.systemBlue, [SCNVector3(0, 0, -1.45), SCNVector3(0, 0, 1.45)]),
-        ]
-
-        for axis in axisPoints {
-            let source = SCNGeometrySource(vertices: axis.1)
-            let element = SCNGeometryElement(indices: [Int32(0), Int32(1)], primitiveType: .line)
-            let geometry = SCNGeometry(sources: [source], elements: [element])
-            geometry.firstMaterial?.diffuse.contents = axis.0.withAlphaComponent(0.35)
-            scene.rootNode.addChildNode(SCNNode(geometry: geometry))
-        }
-    }
-}
-
-private struct EnergyTimeline: View {
+private struct MotionSignalTimeline: View {
     var samples: [MotionSample]
     var trimStartFraction: Double
     var trimEndFraction: Double
     var playbackFraction: Double
 
-    private var points: [EnergyPoint] {
+    private var points: [SignalPoint] {
         guard let first = samples.first else { return [] }
-        return samples.enumerated().map { offset, sample in
-            EnergyPoint(
-                id: offset,
-                time: sample.timestamp - first.timestamp,
-                energy: sample.userAcceleration.magnitude + 0.25 * sample.rotationRate.magnitude
-            )
+        let stride = max(samples.count / 500, 1)
+        let reduced = samples.enumerated().compactMap { offset, sample -> (Int, MotionSample)? in
+            offset % stride == 0 ? (offset, sample) : nil
+        }
+        let maxAcceleration = max(
+            reduced.flatMap { item in
+                [
+                    abs(item.1.userAcceleration.x),
+                    abs(item.1.userAcceleration.y),
+                    abs(item.1.userAcceleration.z),
+                ]
+            }.max() ?? 1,
+            0.01
+        )
+        let maxEnergy = max(
+            reduced.map { $0.1.userAcceleration.magnitude + 0.25 * $0.1.rotationRate.magnitude }.max() ?? 1,
+            0.01
+        )
+
+        return reduced.flatMap { offset, sample in
+            let time = sample.timestamp - first.timestamp
+            let energy = sample.userAcceleration.magnitude + 0.25 * sample.rotationRate.magnitude
+            return [
+                SignalPoint(id: "\(offset)-energy", time: time, value: energy / maxEnergy, series: "强度"),
+                SignalPoint(id: "\(offset)-x", time: time, value: sample.userAcceleration.x / maxAcceleration, series: "X"),
+                SignalPoint(id: "\(offset)-y", time: time, value: sample.userAcceleration.y / maxAcceleration, series: "Y"),
+                SignalPoint(id: "\(offset)-z", time: time, value: sample.userAcceleration.z / maxAcceleration, series: "Z"),
+            ]
         }
     }
 
@@ -1064,31 +1112,79 @@ private struct EnergyTimeline: View {
     }
 
     var body: some View {
-        Chart {
-            ForEach(points) { point in
-                LineMark(
-                    x: .value("Time", point.time),
-                    y: .value("Energy", point.energy)
-                )
-                .foregroundStyle(Color.accentColor)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                SignalLegend(color: .accentColor, label: "强度")
+                SignalLegend(color: .red, label: "X")
+                SignalLegend(color: .green, label: "Y")
+                SignalLegend(color: .blue, label: "Z")
             }
+            .font(.caption)
 
-            RuleMark(x: .value("Start", duration * trimStartFraction))
-                .foregroundStyle(Color.orange)
-            RuleMark(x: .value("End", duration * trimEndFraction))
-                .foregroundStyle(Color.orange)
-            RuleMark(x: .value("Play", duration * playbackFraction))
-                .foregroundStyle(Color.red)
+            Chart {
+                ForEach(points) { point in
+                    LineMark(
+                        x: .value("时间", point.time),
+                        y: .value("归一化", point.value),
+                        series: .value("信号", point.series)
+                    )
+                    .lineStyle(StrokeStyle(lineWidth: point.series == "强度" ? 2.4 : 1.1))
+                    .foregroundStyle(by: .value("信号", point.series))
+                    .opacity(point.series == "强度" ? 1 : 0.62)
+                }
+
+                RectangleMark(
+                    xStart: .value("开始", duration * min(trimStartFraction, trimEndFraction)),
+                    xEnd: .value("结束", duration * max(trimStartFraction, trimEndFraction)),
+                    yStart: .value("下限", -1.05),
+                    yEnd: .value("上限", 1.05)
+                )
+                .foregroundStyle(Color.orange.opacity(0.12))
+
+                RuleMark(x: .value("开始", duration * trimStartFraction))
+                    .foregroundStyle(Color.orange)
+                    .lineStyle(StrokeStyle(lineWidth: 2))
+                RuleMark(x: .value("结束", duration * trimEndFraction))
+                    .foregroundStyle(Color.orange)
+                    .lineStyle(StrokeStyle(lineWidth: 2))
+                RuleMark(x: .value("播放", duration * playbackFraction))
+                    .foregroundStyle(Color.red)
+                    .lineStyle(StrokeStyle(lineWidth: 2, dash: [4, 3]))
+            }
+            .chartForegroundStyleScale([
+                "强度": Color.accentColor,
+                "X": Color.red,
+                "Y": Color.green,
+                "Z": Color.blue,
+            ])
+            .chartLegend(.hidden)
+            .chartYScale(domain: -1.05...1.05)
+            .chartXAxisLabel("时间")
+            .chartYAxis(.hidden)
         }
-        .chartXAxisLabel("时间")
-        .chartYAxisLabel("强度")
     }
 }
 
-private struct EnergyPoint: Identifiable {
-    var id: Int
+private struct SignalLegend: View {
+    var color: Color
+    var label: String
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(color)
+                .frame(width: 7, height: 7)
+            Text(label)
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct SignalPoint: Identifiable {
+    var id: String
     var time: Double
-    var energy: Double
+    var value: Double
+    var series: String
 }
 
 private struct TrimControls: View {
