@@ -37,11 +37,15 @@ final class WatchMotionRecorder: ObservableObject {
     private var segmenter = MotionGestureSegmenter()
     private var recognitionRuntime = GestureRecognitionRuntime()
     private var recordingStartTimestamp: TimeInterval?
+    private var liveStartTimestamp: TimeInterval?
     private var standardTemplates: [MotionTemplate] = []
     private var standardNegativeTemplates: [MotionTemplate] = []
     private var standardLabel: String?
     private var standardKind: GestureKind?
     private var lastMotionHeartbeatAt: TimeInterval = 0
+    private var motionCallbackCount = 0
+    private var firstMotionSampleLogged = false
+    private var motionStartDiagnosticTask: Task<Void, Never>?
 
     init(soundPlayer: WatchSoundPlayer? = nil) {
         self.soundPlayer = soundPlayer
@@ -51,6 +55,16 @@ final class WatchMotionRecorder: ObservableObject {
     }
 
     func startLiveUpdates(sampleRate: Double = 50) {
+        AppDiagnostics.record(
+            "watch.motion.startLiveUpdates.request",
+            [
+                "sampleRate": sampleRate,
+                "deviceMotionAvailable": motionManager.isDeviceMotionAvailable,
+                "accelerometerAvailable": motionManager.isAccelerometerAvailable,
+                "gyroAvailable": motionManager.isGyroAvailable,
+                "deviceMotionActive": motionManager.isDeviceMotionActive,
+            ]
+        )
         guard motionManager.isDeviceMotionAvailable else {
             AppDiagnostics.record("watch.motion.unavailable")
             return
@@ -61,28 +75,41 @@ final class WatchMotionRecorder: ObservableObject {
         }
 
         motionManager.deviceMotionUpdateInterval = 1 / sampleRate
-        motionManager.startDeviceMotionUpdates(to: .main) { [weak self] motion, error in
+        motionManager.startDeviceMotionUpdates(to: motionQueue) { [weak self] motion, error in
             if let error {
                 AppDiagnostics.record(error: error, event: "watch.motion.callback.error")
                 return
             }
-            guard let self else { return }
             guard let motion else {
                 AppDiagnostics.record("watch.motion.callback.empty")
                 return
             }
             let rawSample = RawMotionSample(motion)
-            self.receive(rawSample)
+            Task { @MainActor [weak self] in
+                self?.receive(rawSample)
+            }
         }
 
         isLive = true
-        AppDiagnostics.record("watch.motion.startLiveUpdates", ["sampleRate": sampleRate])
+        scheduleMotionCallbackDiagnostic(previousCount: motionCallbackCount)
+        AppDiagnostics.record(
+            "watch.motion.startLiveUpdates",
+            [
+                "sampleRate": sampleRate,
+                "deviceMotionActive": motionManager.isDeviceMotionActive,
+            ]
+        )
     }
 
     func stopLiveUpdates() {
+        motionStartDiagnosticTask?.cancel()
+        motionStartDiagnosticTask = nil
         motionManager.stopDeviceMotionUpdates()
         isLive = false
         isRecording = false
+        liveStartTimestamp = nil
+        recordingStartTimestamp = nil
+        firstMotionSampleLogged = false
         AppDiagnostics.record("watch.motion.stopLiveUpdates")
     }
 
@@ -367,14 +394,19 @@ final class WatchMotionRecorder: ObservableObject {
     }
 
     private func receive(_ rawSample: RawMotionSample) {
+        motionCallbackCount += 1
+        if liveStartTimestamp == nil {
+            liveStartTimestamp = rawSample.timestamp
+        }
         if isRecording, recordingStartTimestamp == nil {
             recordingStartTimestamp = rawSample.timestamp
         }
 
-        let sample = rawSample.makeSample(start: recordingStartTimestamp)
-        latestSample = sample
-        recordMotionHeartbeatIfNeeded(sample: sample)
-        if let segment = segmenter.ingest(sample) {
+        let liveSample = rawSample.makeSample(start: liveStartTimestamp)
+        latestSample = liveSample
+        recordFirstMotionSampleIfNeeded(rawSample: rawSample, sample: liveSample)
+        recordMotionHeartbeatIfNeeded(sample: liveSample)
+        if let segment = segmenter.ingest(liveSample) {
             lastSegment = segment
             AppDiagnostics.record(
                 "watch.motion.segment",
@@ -384,7 +416,7 @@ final class WatchMotionRecorder: ObservableObject {
                     "peakEnergy": segment.peakEnergy,
                 ]
             )
-            let evaluation = recognitionRuntime.evaluate(segment: segment, now: sample.timestamp)
+            let evaluation = recognitionRuntime.evaluate(segment: segment, now: liveSample.timestamp)
             let candidate = evaluation.candidate
             lastBurstGateRejectionReason = evaluation.burstGateRejectionReason
             updateRecognitionSummary(segment: segment, candidate: candidate, rejectionReason: evaluation.burstGateRejectionReason)
@@ -394,7 +426,7 @@ final class WatchMotionRecorder: ObservableObject {
             lastRecognitionEvent = recognitionRuntime.record(
                 segment: segment,
                 candidate: candidate,
-                now: sample.timestamp,
+                now: liveSample.timestamp,
                 wearContext: currentWearContext(),
                 audioPlayed: audioPlayed,
                 burstGateRejectionReason: evaluation.burstGateRejectionReason
@@ -425,9 +457,49 @@ final class WatchMotionRecorder: ObservableObject {
         }
 
         guard isRecording else { return }
-        samples.append(sample)
+        let recordingSample = rawSample.makeSample(start: recordingStartTimestamp)
+        samples.append(recordingSample)
         lastAssessment = validator.assess(samples)
         estimatedSampleRate = lastAssessment?.estimatedSampleRate ?? 0
+    }
+
+    private func scheduleMotionCallbackDiagnostic(previousCount: Int) {
+        motionStartDiagnosticTask?.cancel()
+        motionStartDiagnosticTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard !Task.isCancelled, isLive else { return }
+            if motionCallbackCount == previousCount {
+                AppDiagnostics.record(
+                    "watch.motion.noCallbacksAfterStart",
+                    [
+                        "deviceMotionActive": motionManager.isDeviceMotionActive,
+                        "deviceMotionAvailable": motionManager.isDeviceMotionAvailable,
+                    ]
+                )
+            } else {
+                AppDiagnostics.record(
+                    "watch.motion.callbacksAfterStart",
+                    [
+                        "count": motionCallbackCount - previousCount,
+                        "total": motionCallbackCount,
+                    ]
+                )
+            }
+        }
+    }
+
+    private func recordFirstMotionSampleIfNeeded(rawSample: RawMotionSample, sample: MotionSample) {
+        guard !firstMotionSampleLogged else { return }
+        firstMotionSampleLogged = true
+        AppDiagnostics.record(
+            "watch.motion.firstSample",
+            [
+                "rawTimestamp": rawSample.timestamp,
+                "liveTimestamp": sample.timestamp,
+                "acceleration": sample.userAcceleration.magnitude,
+                "rotation": sample.rotationRate.magnitude,
+            ]
+        )
     }
 
     private func persistRecognitionTraceIfNeeded(
