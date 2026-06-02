@@ -1,0 +1,14 @@
+.DS_Store
+__pycache__/
+*.pyc
+/.build
+/Packages
+xcuserdata/
+DerivedData/
+build/
+.swiftpm/configuration/registries.json
+.swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
+.netrc
+/data/raw/
+/data/reports/
+/data/splits/
