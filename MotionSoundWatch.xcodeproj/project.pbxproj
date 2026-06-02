@@ -21,6 +21,7 @@
 		AA0000000000000000000012 /* WatchConnectivityFileSender.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000112 /* WatchConnectivityFileSender.swift */; };
 		AA0000000000000000000013 /* MotionBurstGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000113 /* MotionBurstGate.swift */; };
 		AA0000000000000000000014 /* AppDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000114 /* AppDiagnostics.swift */; };
+		AA0000000000000000000015 /* MotionSoundWatch.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000100 /* MotionSoundWatch.app */; };
 		BB0000000000000000000001 /* MotionSoundPhoneApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000101 /* MotionSoundPhoneApp.swift */; };
 		BB0000000000000000000002 /* PhoneDebugView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000102 /* PhoneDebugView.swift */; };
 		BB0000000000000000000003 /* PhoneConnectivityReceiver.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000103 /* PhoneConnectivityReceiver.swift */; };
@@ -31,6 +32,30 @@
 		BB0000000000000000000008 /* MotionBurstGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000113 /* MotionBurstGate.swift */; };
 		BB0000000000000000000009 /* AppDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000114 /* AppDiagnostics.swift */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		BB0000000000000000000901 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AA0000000000000000000701 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = AA0000000000000000000301;
+			remoteInfo = MotionSoundWatch;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		BB0000000000000000000404 /* Embed Watch Content */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "$(CONTENTS_FOLDER_PATH)/Watch";
+			dstSubfolderSpec = 16;
+			files = (
+				AA0000000000000000000015 /* MotionSoundWatch.app in Embed Watch Content */,
+			);
+			name = "Embed Watch Content";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		AA0000000000000000000100 /* MotionSoundWatch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MotionSoundWatch.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -156,10 +181,12 @@
 				BB0000000000000000000402 /* Sources */,
 				BB0000000000000000000401 /* Frameworks */,
 				BB0000000000000000000403 /* Resources */,
+				BB0000000000000000000404 /* Embed Watch Content */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				BB0000000000000000000902 /* PBXTargetDependency */,
 			);
 			name = MotionSoundPhone;
 			productName = MotionSoundPhone;
@@ -260,6 +287,14 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		BB0000000000000000000902 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = AA0000000000000000000301 /* MotionSoundWatch */;
+			targetProxy = BB0000000000000000000901 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		AA0000000000000000000801 /* Debug */ = {
