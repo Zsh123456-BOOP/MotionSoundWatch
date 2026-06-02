@@ -430,10 +430,10 @@ public struct MotionTemplateMatcher: Sendable {
     ) -> ThresholdCalibration {
         guard positiveTemplates.count >= 2 else {
             return ThresholdCalibration(
-                threshold: 0.35,
+                threshold: 0.6,
                 positiveMaxDistance: 0,
                 negativeMinDistance: nil,
-                margin: 0.35,
+                margin: 0.6,
                 recommendedMarginThreshold: 0
             )
         }

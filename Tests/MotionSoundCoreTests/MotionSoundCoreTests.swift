@@ -53,6 +53,31 @@ import Foundation
     #expect(negativeMatch?.shouldTrigger == false)
 }
 
+@Test func singleTemplateCalibrationSupportsMVPTriggering() {
+    let matcher = MotionTemplateMatcher()
+    let template = MotionTemplate(
+        label: "punch",
+        kind: .burst,
+        samples: syntheticBurst(duration: 0.7, amplitude: 1.0),
+        qualityScore: 0.9
+    )
+    let calibration = matcher.calibrateThreshold(positiveTemplates: [template])
+    let profile = GestureProfile(
+        name: "punch",
+        kind: .burst,
+        templates: [template],
+        acceptanceThreshold: calibration.threshold
+    )
+
+    let match = matcher.bestMatch(
+        profiles: [profile],
+        candidateSamples: syntheticBurst(duration: 0.76, amplitude: 1.05, phase: 0.04)
+    )
+
+    #expect(calibration.threshold >= 0.55)
+    #expect(match?.shouldTrigger == true)
+}
+
 @Test func cooldownSuppressesRepeatedTrigger() {
     let matcher = MotionTemplateMatcher()
     let template = MotionTemplate(

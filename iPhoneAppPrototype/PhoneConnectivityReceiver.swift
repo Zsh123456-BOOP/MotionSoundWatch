@@ -21,6 +21,12 @@ struct RecordingStatusEvent: Identifiable, Equatable {
     var receivedAt: Date
 }
 
+struct ProfileSyncResult: Equatable {
+    var fileURL: URL
+    var archive: GestureProfileArchive
+    var didQueueTransfer: Bool
+}
+
 private struct RecordingCommandReply {
     var status: String?
     var action: String?
@@ -318,21 +324,25 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
         sendFile(sourceURL, kind: .gestureProfile, queuedMessagePrefix: "已加入 Profile 发送队列")
     }
 
-    @discardableResult
     func generateAndSendProfile(
         gesture: String,
         kind kindRawValue: String,
         soundFileName: String? = nil,
-        primarySamplesOverride: [MotionSample]? = nil
-    ) -> Bool {
+        primarySamplesOverride: [MotionSample]? = nil,
+        cooldownSeconds: Double = 0.8,
+        triggerTimingRawValue: String = TriggerTiming.atEnd.rawValue,
+        volume: Double = 1,
+        replacingProfileID: UUID? = nil,
+        replacingName: String? = nil
+    ) -> ProfileSyncResult? {
         let trimmedGesture = gesture.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedGesture.isEmpty else {
             lastMessage = "动作名称为空"
-            return false
+            return nil
         }
-        guard let kind = GestureKind(rawValue: kindRawValue) else {
+        guard let requestedKind = GestureKind(rawValue: kindRawValue) else {
             lastMessage = "动作类型无效：\(kindRawValue)"
-            return false
+            return nil
         }
 
         do {
@@ -344,11 +354,15 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
             var negativeTemplates: [MotionTemplate] = []
             let csvCodec = MotionSampleCSVCodec()
             let templateBuilder = MotionTemplateBuilder()
+            let effectiveKind = Self.effectiveKind(
+                requestedKind: requestedKind,
+                primarySamples: primarySamplesOverride
+            )
 
             if let primarySamplesOverride, !primarySamplesOverride.isEmpty {
                 positiveTemplates.append(templateBuilder.makeTemplate(
                     label: trimmedGesture,
-                    kind: kind,
+                    kind: effectiveKind,
                     samples: primarySamplesOverride
                 ))
                 AppDiagnostics.record(
@@ -356,6 +370,8 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
                     [
                         "gesture": trimmedGesture,
                         "samples": primarySamplesOverride.count,
+                        "requestedKind": requestedKind.rawValue,
+                        "effectiveKind": effectiveKind.rawValue,
                     ]
                 )
             }
@@ -370,14 +386,14 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
                     if primarySamplesOverride == nil {
                         positiveTemplates.append(templateBuilder.makeTemplate(
                             label: trimmedGesture,
-                            kind: kind,
+                            kind: effectiveKind,
                             samples: samples
                         ))
                     }
                 case "negative":
                     negativeTemplates.append(templateBuilder.makeTemplate(
                         label: "\(trimmedGesture)-negative",
-                        kind: kind,
+                        kind: effectiveKind,
                         samples: samples
                     ))
                 default:
@@ -387,26 +403,112 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
 
             guard !positiveTemplates.isEmpty else {
                 lastMessage = "没有可生成 Profile 的正样本：\(trimmedGesture)"
-                return false
+                return nil
             }
 
-            let sound = normalizedSoundAsset(fileName: soundFileName)
-            let profile = GestureProfileBuilder().makeProfile(
+            let sound = normalizedSoundAsset(fileName: soundFileName, volume: volume)
+            var profile = GestureProfileBuilder().makeProfile(
                 name: trimmedGesture,
-                kind: kind,
+                kind: effectiveKind,
                 templates: positiveTemplates,
                 negativeTemplates: negativeTemplates,
-                sound: sound
+                sound: sound,
+                cooldownSeconds: cooldownSeconds
             )
+            if let triggerTiming = TriggerTiming(rawValue: triggerTimingRawValue) {
+                profile.triggerTiming = triggerTiming
+            }
+            let localStore = try GestureProfileFileStore.appDocumentsStore()
+            let existingArchives = try localStore.list()
+            let matchingArchives = existingArchives.filter { stored in
+                stored.archive.profiles.contains {
+                    if let replacingProfileID, $0.id == replacingProfileID {
+                        return true
+                    }
+                    if let replacingName, $0.name.caseInsensitiveCompare(replacingName) == .orderedSame {
+                        return true
+                    }
+                    return $0.name.caseInsensitiveCompare(profile.name) == .orderedSame
+                }
+            }
+            if let existingProfile = matchingArchives
+                .flatMap(\.archive.profiles)
+                .first(where: {
+                    if let replacingProfileID, $0.id == replacingProfileID {
+                        return true
+                    }
+                    if let replacingName, $0.name.caseInsensitiveCompare(replacingName) == .orderedSame {
+                        return true
+                    }
+                    return $0.name.caseInsensitiveCompare(profile.name) == .orderedSame
+                }) {
+                profile.id = existingProfile.id
+                profile.createdAt = existingProfile.createdAt
+            }
+            if let replacingProfileID {
+                profile.id = replacingProfileID
+            }
+            for stored in matchingArchives {
+                try? localStore.delete(fileURL: stored.fileURL)
+            }
+
             let archive = GestureProfileArchive(profiles: [profile])
-            let data = try GestureProfileCodec().encode(archive)
-            let url = try writeGeneratedProfile(data, gesture: trimmedGesture)
-            lastMessage = "已生成 Profile：\(url.lastPathComponent)"
-            return sendProfileFile(url)
+            let localURL = try localStore.save(archive, preferredName: trimmedGesture)
+            let didQueueTransfer = sendProfileFile(localURL)
+            lastMessage = "已保存动作：\(profile.name)"
+            AppDiagnostics.record(
+                "phone.profile.saved",
+                [
+                    "file": localURL.lastPathComponent,
+                    "gesture": trimmedGesture,
+                    "requestedKind": requestedKind.rawValue,
+                    "effectiveKind": effectiveKind.rawValue,
+                    "templates": positiveTemplates.count,
+                    "negativeTemplates": negativeTemplates.count,
+                    "queued": didQueueTransfer,
+                ]
+            )
+            return ProfileSyncResult(fileURL: localURL, archive: archive, didQueueTransfer: didQueueTransfer)
         } catch {
             lastMessage = error.localizedDescription
+            AppDiagnostics.record(error: error, event: "phone.profile.generate.error", ["gesture": trimmedGesture])
+            return nil
+        }
+    }
+
+    @discardableResult
+    func sendDeleteProfileCommand(profileID: UUID, name: String, kind: GestureKind) -> Bool {
+        guard let session else {
+            lastMessage = "当前设备不支持 WatchConnectivity"
+            AppDiagnostics.record("phone.profile.deleteCommand.unsupported", ["profile": name])
             return false
         }
+
+        let message: [String: Any] = [
+            "command": "deleteProfile",
+            "profileID": profileID.uuidString,
+            "name": name,
+            "kind": kind.rawValue,
+            "sentAt": Date().timeIntervalSince1970,
+            "source": "MotionSoundPhone",
+        ]
+
+        if session.isReachable {
+            session.sendMessage(message, replyHandler: nil) { error in
+                AppDiagnostics.record(
+                    "phone.profile.deleteCommand.sendMessage.error",
+                    ["profile": name, "error": error.localizedDescription]
+                )
+            }
+            lastMessage = "已发送删除到 Watch：\(name)"
+            AppDiagnostics.record("phone.profile.deleteCommand.sent", ["profile": name, "reachable": true])
+            return true
+        }
+
+        session.transferUserInfo(message)
+        lastMessage = "Watch 当前不可达，已排队删除：\(name)"
+        AppDiagnostics.record("phone.profile.deleteCommand.queued", ["profile": name, "reachable": false])
+        return true
     }
 
     @discardableResult
@@ -523,20 +625,32 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
         return destination
     }
 
-    private func writeGeneratedProfile(_ data: Data, gesture: String) throws -> URL {
-        let directory = try outgoingDirectory()
-        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-        let fileName = "\(fileTimestamp(Date()))-\(sanitizeFileName(gesture))-profile.json"
-        let destination = availableDestinationURL(directory: directory, fileName: fileName)
-        try data.write(to: destination, options: [.atomic])
-        return destination
-    }
-
-    private func normalizedSoundAsset(fileName: String?) -> SoundAsset? {
+    private func normalizedSoundAsset(fileName: String?, volume: Double = 1) -> SoundAsset? {
         guard let fileName else { return nil }
         let trimmed = fileName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        return SoundAsset(fileName: trimmed, duration: 0, localWatchPath: trimmed)
+        return SoundAsset(fileName: trimmed, duration: 0, volume: Float(max(0, min(1, volume))))
+    }
+
+    nonisolated private static func effectiveKind(
+        requestedKind: GestureKind,
+        primarySamples: [MotionSample]?
+    ) -> GestureKind {
+        guard requestedKind != .posture else { return requestedKind }
+        guard let primarySamples,
+              let first = primarySamples.first,
+              let last = primarySamples.last else {
+            return requestedKind
+        }
+
+        let duration = max(0, last.timestamp - first.timestamp)
+        if duration >= 0.9 {
+            return .sequence
+        }
+        if duration > 0 {
+            return .burst
+        }
+        return requestedKind
     }
 
     private func availableDestinationURL(directory: URL, fileName: String) -> URL {

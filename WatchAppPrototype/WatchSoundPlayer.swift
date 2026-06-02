@@ -53,8 +53,11 @@ final class WatchSoundPlayer: ObservableObject {
         guard let sound else { return }
 
         if let path = sound.localWatchPath {
-            preload(fileURL: URL(fileURLWithPath: path), key: sound.fileName)
-            return
+            let explicitURL = URL(fileURLWithPath: path)
+            if explicitURL.isFileURL, FileManager.default.fileExists(atPath: explicitURL.path) {
+                preload(fileURL: explicitURL, key: sound.fileName)
+                return
+            }
         }
 
         let fileURL = URL(fileURLWithPath: sound.fileName)
@@ -101,6 +104,8 @@ final class WatchSoundPlayer: ObservableObject {
         if players[sound.fileName] == nil {
             preload(sound: sound)
         }
+
+        players[sound.fileName]?.volume = sound.volume
 
         return play(assetName: sound.fileName)
     }

@@ -33,11 +33,11 @@ public struct BurstGateConfiguration: Equatable, Sendable {
     public var axisMismatchMinimumPeakAcceleration: Double
 
     public init(
-        minimumPeakAcceleration: Double = 0.55,
+        minimumPeakAcceleration: Double = 0.35,
         minimumPeakRotationRate: Double = 0,
         maximumDuration: Double = 0.9,
         requiresDominantAxisMatch: Bool = true,
-        axisMismatchMinimumPeakAcceleration: Double = 1.2
+        axisMismatchMinimumPeakAcceleration: Double = 1.6
     ) {
         self.minimumPeakAcceleration = minimumPeakAcceleration
         self.minimumPeakRotationRate = minimumPeakRotationRate

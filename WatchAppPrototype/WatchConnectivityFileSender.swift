@@ -12,6 +12,7 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
     @Published private(set) var lastReceivedProfileURL: URL?
     @Published private(set) var lastRecordingCommand: RecordingControlCommand?
     @Published private(set) var runtimePrepareRequestCount = 0
+    @Published private(set) var profileLibraryChangeCount = 0
 
     private var session: WCSession? {
         isSupported ? WCSession.default : nil
@@ -189,10 +190,11 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
             }
 
             let data = try Data(contentsOf: fileURL)
-            _ = try GestureProfileCodec().decode(data)
+            let archive = try GestureProfileCodec().decode(data)
 
             let store = try GestureProfileFileStore.appDocumentsStore()
             try fileManager.createDirectory(at: store.directoryURL, withIntermediateDirectories: true)
+            try deleteProfiles(matching: archive.profiles, in: store)
 
             let preferredName = preferredFileName?.isEmpty == false
                 ? preferredFileName!
@@ -203,6 +205,7 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
             )
             try fileManager.moveItem(at: fileURL, to: destination)
             lastReceivedProfileURL = destination
+            profileLibraryChangeCount += 1
             lastTransferMessage = "已接收 Profile：\(destination.lastPathComponent)"
             AppDiagnostics.record("watch.connectivity.receiveProfile", ["file": destination.lastPathComponent])
         } catch {
@@ -248,6 +251,63 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
                 "autoSendCSV": command.autoSendCSV,
             ]
         )
+    }
+
+    private func receiveDeleteProfile(profileID: String?, name: String?, kind: String?) {
+        do {
+            let store = try GestureProfileFileStore.appDocumentsStore()
+            let profileUUID = profileID.flatMap(UUID.init(uuidString:))
+            let storedArchives = try store.list()
+            var deletedCount = 0
+
+            for stored in storedArchives {
+                let shouldDelete = stored.archive.profiles.contains { profile in
+                    if let profileUUID, profile.id == profileUUID {
+                        return true
+                    }
+                    guard let name,
+                          profile.name.caseInsensitiveCompare(name) == .orderedSame else {
+                        return false
+                    }
+                    return true
+                }
+                guard shouldDelete else { continue }
+                try store.delete(fileURL: stored.fileURL)
+                deletedCount += 1
+            }
+
+            profileLibraryChangeCount += 1
+            lastTransferMessage = deletedCount > 0 ? "已删除动作：\(name ?? profileID ?? "")" : "没有找到要删除的动作"
+            AppDiagnostics.record(
+                "watch.connectivity.deleteProfile",
+                [
+                    "profileID": profileID ?? "",
+                    "name": name ?? "",
+                    "kind": kind ?? "",
+                    "deleted": deletedCount,
+                ]
+            )
+        } catch {
+            lastTransferMessage = error.localizedDescription
+            AppDiagnostics.record(error: error, event: "watch.connectivity.deleteProfile.error", ["name": name ?? ""])
+        }
+    }
+
+    private func deleteProfiles(matching profiles: [GestureProfile], in store: GestureProfileFileStore) throws {
+        guard !profiles.isEmpty else { return }
+        let storedArchives = try store.list()
+
+        for stored in storedArchives {
+            let shouldDelete = stored.archive.profiles.contains { existing in
+                profiles.contains { incoming in
+                    existing.id == incoming.id
+                        || existing.name.caseInsensitiveCompare(incoming.name) == .orderedSame
+                }
+            }
+            if shouldDelete {
+                try store.delete(fileURL: stored.fileURL)
+            }
+        }
     }
 
     private func receivePrepareRuntime(reason: String?) {
@@ -423,9 +483,15 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
         let kind = message["kind"] as? String
         let sampleRole = message["sampleRole"] as? String
         let autoSendCSV = message["autoSendCSV"] as? Bool
+        let profileID = message["profileID"] as? String
+        let name = message["name"] as? String
         Task { @MainActor in
             if command == "prepareRuntime" {
                 receivePrepareRuntime(reason: reason)
+                return
+            }
+            if command == "deleteProfile" {
+                receiveDeleteProfile(profileID: profileID, name: name, kind: kind)
                 return
             }
             guard command == "recordingControl" else { return }
@@ -451,6 +517,8 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
         let kind = message["kind"] as? String
         let sampleRole = message["sampleRole"] as? String
         let autoSendCSV = message["autoSendCSV"] as? Bool
+        let profileID = message["profileID"] as? String
+        let name = message["name"] as? String
 
         if command == "prepareRuntime" {
             replyHandler([
@@ -460,6 +528,18 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
             ])
             Task { @MainActor in
                 receivePrepareRuntime(reason: reason)
+            }
+            return
+        }
+
+        if command == "deleteProfile" {
+            replyHandler([
+                "status": "accepted",
+                "command": "deleteProfile",
+                "receivedAt": Date().timeIntervalSince1970,
+            ])
+            Task { @MainActor in
+                receiveDeleteProfile(profileID: profileID, name: name, kind: kind)
             }
             return
         }
@@ -499,9 +579,15 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
         let kind = userInfo["kind"] as? String
         let sampleRole = userInfo["sampleRole"] as? String
         let autoSendCSV = userInfo["autoSendCSV"] as? Bool
+        let profileID = userInfo["profileID"] as? String
+        let name = userInfo["name"] as? String
         Task { @MainActor in
             if command == "prepareRuntime" {
                 receivePrepareRuntime(reason: reason)
+                return
+            }
+            if command == "deleteProfile" {
+                receiveDeleteProfile(profileID: profileID, name: name, kind: kind)
                 return
             }
             guard command == "recordingControl" else { return }

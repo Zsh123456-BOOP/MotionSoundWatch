@@ -70,6 +70,12 @@ struct MotionDebugView: View {
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
+                if let summary = recorder.lastRecognitionSummary {
+                    Text(summary)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if recorder.isRecording {
                     HStack {
                         Text("采样")
@@ -136,6 +142,9 @@ struct MotionDebugView: View {
             syncRuntimeSession(reason: "phonePrepareRuntime")
         }
         .onChange(of: fileSender.lastReceivedProfileURL) {
+            recorder.reloadSavedProfiles()
+        }
+        .onChange(of: fileSender.profileLibraryChangeCount) {
             recorder.reloadSavedProfiles()
         }
         .onReceive(fileSender.$lastRecordingCommand.compactMap { $0 }) { command in

@@ -19,6 +19,7 @@ final class WatchMotionRecorder: ObservableObject {
     @Published private(set) var savedRecordingURL: URL?
     @Published private(set) var loadedProfileCount = 0
     @Published private(set) var lastRecognitionEvent: GestureRecognitionEvent?
+    @Published private(set) var lastRecognitionSummary: String?
     @Published private(set) var lastBurstGateRejectionReason: BurstGateRejectionReason?
     @Published private(set) var lastFeedbackMessage: String?
     @Published private(set) var standardTemplateCount = 0
@@ -384,6 +385,7 @@ final class WatchMotionRecorder: ObservableObject {
             let evaluation = recognitionRuntime.evaluate(segment: segment, now: sample.timestamp)
             let candidate = evaluation.candidate
             lastBurstGateRejectionReason = evaluation.burstGateRejectionReason
+            updateRecognitionSummary(segment: segment, candidate: candidate, rejectionReason: evaluation.burstGateRejectionReason)
             let audioPlayed = candidate?.shouldTrigger == true
                 ? (soundPlayer?.play(sound: candidate?.profile.sound) ?? false)
                 : false
@@ -411,6 +413,73 @@ final class WatchMotionRecorder: ObservableObject {
         samples.append(sample)
         lastAssessment = validator.assess(samples)
         estimatedSampleRate = lastAssessment?.estimatedSampleRate ?? 0
+    }
+
+    private func updateRecognitionSummary(
+        segment: GestureSegment,
+        candidate: RecognitionCandidate?,
+        rejectionReason: BurstGateRejectionReason?
+    ) {
+        if recognitionRuntime.profiles.isEmpty {
+            lastRecognitionSummary = "已检测到动作，但 Watch 没有已同步动作。"
+            AppDiagnostics.record(
+                "watch.recognition.noProfiles",
+                [
+                    "segmentKind": segment.kind.rawValue,
+                    "duration": segment.duration,
+                    "peak": segment.features.peakAcceleration,
+                ]
+            )
+            return
+        }
+
+        if let rejectionReason {
+            lastRecognitionSummary = "动作被过滤：\(rejectionReason.rawValue)"
+            AppDiagnostics.record(
+                "watch.recognition.rejected",
+                [
+                    "reason": rejectionReason.rawValue,
+                    "segmentKind": segment.kind.rawValue,
+                    "duration": segment.duration,
+                    "peak": segment.features.peakAcceleration,
+                ]
+            )
+            return
+        }
+
+        guard let candidate else {
+            lastRecognitionSummary = "检测到动作，但没有匹配到已保存动作。"
+            AppDiagnostics.record(
+                "watch.recognition.noCandidate",
+                [
+                    "segmentKind": segment.kind.rawValue,
+                    "profileCount": recognitionRuntime.profiles.count,
+                    "duration": segment.duration,
+                    "peak": segment.features.peakAcceleration,
+                ]
+            )
+            return
+        }
+
+        lastRecognitionSummary = candidate.shouldTrigger
+            ? "已触发：\(candidate.profile.name)"
+            : String(
+                format: "%@ 未触发，距离 %.3f / 阈值 %.3f",
+                candidate.profile.name,
+                candidate.distance,
+                candidate.profile.acceptanceThreshold
+            )
+        AppDiagnostics.record(
+            candidate.shouldTrigger ? "watch.recognition.candidateTriggered" : "watch.recognition.candidateRejected",
+            [
+                "profile": candidate.profile.name,
+                "distance": candidate.distance,
+                "threshold": candidate.profile.acceptanceThreshold,
+                "margin": candidate.margin ?? -1,
+                "marginThreshold": candidate.profile.marginThreshold,
+                "confidence": candidate.confidence,
+            ]
+        )
     }
 }
 

@@ -1,11 +1,12 @@
 import Charts
+import SceneKit
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
 struct PhoneDebugView: View {
     @StateObject private var receiver = PhoneConnectivityReceiver()
-    @State private var currentStep = SetupStep.create
+    @State private var currentStep = SetupStep.library
     @State private var activeFileImport: FileImportTarget?
     @State private var recordingLabel = "punch"
     @State private var recordingKind = "burst"
@@ -26,6 +27,10 @@ struct PhoneDebugView: View {
     @State private var countdownTimer: Timer?
     @State private var pendingRecordingAction: RecordingControlAction?
     @State private var captureCountBeforeStop: Int?
+    @State private var savedProfiles: [PhoneGestureAsset] = []
+    @State private var trimPlaybackTask: Task<Void, Never>?
+    @State private var isPreviewPlaying = false
+    @State private var editingAsset: PhoneGestureAsset?
 
     private var receivedCaptureSummaries: [ReceivedCaptureSummary] {
         ReceivedCaptureSummary.makeSummaries(from: receiver.receivedFiles)
@@ -91,7 +96,9 @@ struct PhoneDebugView: View {
                         subtitle: connectionSubtitle,
                         detail: receiver.lastMessage
                     )
-                    StepProgressView(currentStep: currentStep)
+                    if currentStep != .library {
+                        StepProgressView(currentStep: currentStep)
+                    }
                     activeStepView
                 }
                 .padding(16)
@@ -104,6 +111,7 @@ struct PhoneDebugView: View {
                         receiver.activate()
                         receiver.reloadReceivedFiles()
                         reloadLocalAudioFiles()
+                        reloadSavedProfiles()
                         loadPreferredCapture()
                     } label: {
                         Label("刷新", systemImage: "arrow.clockwise")
@@ -116,6 +124,7 @@ struct PhoneDebugView: View {
                 receiver.activate()
                 receiver.requestWatchRuntime(reason: "phoneViewAppear")
                 reloadLocalAudioFiles()
+                reloadSavedProfiles()
                 loadPreferredCapture()
             }
             .onChange(of: receiver.receivedFiles) {
@@ -130,6 +139,7 @@ struct PhoneDebugView: View {
             .onDisappear {
                 countdownTimer?.invalidate()
                 countdownTimer = nil
+                stopTrimPlayback()
                 UIApplication.shared.isIdleTimerDisabled = false
             }
             .fileImporter(
@@ -161,6 +171,8 @@ struct PhoneDebugView: View {
     @ViewBuilder
     private var activeStepView: some View {
         switch currentStep {
+        case .library:
+            libraryStep
         case .create:
             createStep
         case .record:
@@ -171,6 +183,65 @@ struct PhoneDebugView: View {
             soundStep
         case .sync:
             syncStep
+        }
+    }
+
+    private var libraryStep: some View {
+        ProductSection("我的动作") {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("\(savedProfiles.count) 个动作")
+                            .font(.title3.weight(.semibold))
+                        Text("保存后的动作会显示在这里，可继续补录、换声音或重新同步到 Watch。")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+
+                PrimaryActionButton(title: "新建动作", systemImage: "plus") {
+                    resetForNewGesture()
+                    currentStep = .create
+                }
+
+                if savedProfiles.isEmpty {
+                    EmptyStateView(
+                        title: "还没有动作",
+                        subtitle: "先创建一个动作，录制完成并配置声音后会回到这里。"
+                    )
+                } else {
+                    VStack(spacing: 10) {
+                        ForEach(savedProfiles) { asset in
+                            GestureAssetRow(asset: asset) {
+                                openAssetForSound(asset)
+                            } record: {
+                                prepareToRecord(asset)
+                            } resync: {
+                                resyncAsset(asset)
+                            } delete: {
+                                deleteAsset(asset)
+                            }
+                        }
+                    }
+                }
+
+                if !receivedCaptureSummaries.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("最近采样")
+                            .font(.subheadline.weight(.semibold))
+                        ForEach(receivedCaptureSummaries.prefix(4)) { summary in
+                            SummaryRow(
+                                label: summary.gesture,
+                                value: "\(summary.positiveCount) 正样本 · \(summary.negativeCount) 负样本"
+                            )
+                        }
+                    }
+                    .padding(12)
+                    .background(Color(.tertiarySystemGroupedBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+            }
         }
     }
 
@@ -305,6 +376,15 @@ struct PhoneDebugView: View {
                         selectedURL: $selectedCaptureURL
                     )
 
+                    MotionTrajectorySceneView(
+                        samples: previewSamples,
+                        trimStartFraction: trimStartFraction,
+                        trimEndFraction: trimEndFraction,
+                        playbackFraction: playbackFraction
+                    )
+                    .frame(height: 260)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+
                     MotionSignalTimeline(
                         samples: previewSamples,
                         trimStartFraction: trimStartFraction,
@@ -325,16 +405,14 @@ struct PhoneDebugView: View {
 
                     HStack(spacing: 10) {
                         Button {
-                            playbackFraction = 0
-                            withAnimation(.easeInOut(duration: 1.2)) {
-                                playbackFraction = 1
-                            }
+                            toggleTrimPlayback()
                         } label: {
-                            Label("播放片段", systemImage: "play.fill")
+                            Label(isPreviewPlaying ? "暂停播放" : "播放片段", systemImage: isPreviewPlaying ? "pause.fill" : "play.fill")
                         }
                         .buttonStyle(.bordered)
 
                         Button {
+                            stopTrimPlayback()
                             currentStep = .record
                         } label: {
                             Label("重新录制", systemImage: "arrow.counterclockwise")
@@ -353,8 +431,10 @@ struct PhoneDebugView: View {
                         nextTitle: "下一步：配置声音",
                         canGoNext: !trimmedSamples.isEmpty
                     ) {
+                        stopTrimPlayback()
                         currentStep = .record
                     } next: {
+                        stopTrimPlayback()
                         currentStep = .sound
                     }
                 }
@@ -363,8 +443,29 @@ struct PhoneDebugView: View {
     }
 
     private var soundStep: some View {
-        ProductSection("配置声音") {
+        ProductSection(editingAsset == nil ? "配置声音" : "编辑动作") {
             VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 10) {
+                    TextField("动作名称", text: $recordingLabel)
+                        .textFieldStyle(.roundedBorder)
+
+                    Picker("动作类型", selection: $recordingKind) {
+                        Text("短促").tag("burst")
+                        Text("连续").tag("sequence")
+                        Text("姿态").tag("posture")
+                    }
+                    .pickerStyle(.segmented)
+
+                    if captureDuration >= 0.9 && recordingKind == "burst" {
+                        Text("这段动作更像连续动作，保存时会按连续动作处理。")
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
+                    }
+                }
+                .padding(12)
+                .background(Color(.tertiarySystemGroupedBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+
                 HStack(spacing: 12) {
                     Image(systemName: selectedAudioFileName.isEmpty ? "music.note" : "waveform")
                         .font(.title2)
@@ -459,13 +560,16 @@ struct PhoneDebugView: View {
                 SummaryRow(label: "片段", value: "\(trimmedSamples.count) 个采样点")
                 SummaryRow(label: "音效", value: selectedAudioFileName.isEmpty ? "未绑定" : selectedAudioFileName)
                 SummaryRow(label: "触发", value: triggerTiming == "atPeak" ? "峰值附近" : "动作结束")
+                if let effectiveKindText {
+                    SummaryRow(label: "保存类型", value: effectiveKindText)
+                }
 
                 Text("保存后会生成动作 Profile，并把 Profile 与已选择的音频发送到 Watch。Watch 端会本地识别和播放。")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                PrimaryActionButton(title: "保存并同步到 Watch", systemImage: "applewatch") {
+                PrimaryActionButton(title: editingAsset == nil ? "保存并同步到 Watch" : "保存修改并同步", systemImage: "applewatch") {
                     syncProfile()
                 }
                 .disabled(trimmedSamples.isEmpty)
@@ -527,6 +631,11 @@ struct PhoneDebugView: View {
         default:
             return "自定义动作"
         }
+    }
+
+    private var effectiveKindText: String? {
+        guard captureDuration >= 0.9, recordingKind == "burst" else { return nil }
+        return "连续动作（根据片段时长自动调整）"
     }
 
     private var captureDuration: Double {
@@ -638,6 +747,23 @@ struct PhoneDebugView: View {
             return
         }
 
+        if let statusFileName = receiver.lastRecordingStatus?.fileName,
+           let explicitFile = receiver.receivedFiles.first(where: { $0.fileURL.lastPathComponent == statusFileName }) {
+            self.captureCountBeforeStop = nil
+            pendingRecordingAction = nil
+            selectedCaptureURL = explicitFile.fileURL
+            currentStep = .trim
+            loadCapture(explicitFile)
+            AppDiagnostics.record(
+                "phone.recording.captureReadyByStatusFile",
+                [
+                    "label": normalizedGestureName,
+                    "file": statusFileName,
+                ]
+            )
+            return
+        }
+
         guard captureFiles.count > captureCountBeforeStop else {
             loadPreferredCapture()
             return
@@ -667,14 +793,29 @@ struct PhoneDebugView: View {
     }
 
     private func syncProfile() {
-        let didSend = receiver.generateAndSendProfile(
+        let result = receiver.generateAndSendProfile(
             gesture: normalizedGestureName,
             kind: recordingKind,
             soundFileName: selectedAudioFileName,
-            primarySamplesOverride: trimmedSamples
+            primarySamplesOverride: trimmedSamples,
+            cooldownSeconds: cooldownSeconds,
+            triggerTimingRawValue: triggerTiming,
+            volume: volume,
+            replacingProfileID: editingAsset?.profile.id,
+            replacingName: editingAsset?.profile.name
         )
-        if didSend {
-            receiver.setLastMessage("已生成动作并加入 Watch 同步队列。")
+        if let result {
+            if let audioURL = localAudioFiles.first(where: { $0.lastPathComponent == selectedAudioFileName }) {
+                _ = receiver.sendAudioFile(audioURL)
+            }
+            reloadSavedProfiles()
+            currentStep = .library
+            editingAsset = nil
+            receiver.setLastMessage(
+                result.didQueueTransfer
+                    ? "已保存动作并加入 Watch 同步队列。"
+                    : "已保存动作，但同步队列未建立。"
+            )
         }
         AppDiagnostics.record(
             "phone.profile.syncRequested",
@@ -683,8 +824,173 @@ struct PhoneDebugView: View {
                 "kind": recordingKind,
                 "samples": trimmedSamples.count,
                 "sound": selectedAudioFileName,
+                "saved": result != nil,
             ]
         )
+    }
+
+    private func reloadSavedProfiles() {
+        do {
+            let store = try GestureProfileFileStore.appDocumentsStore()
+            let assets = try store.list().flatMap { stored in
+                stored.archive.profiles.map { profile in
+                    PhoneGestureAsset(fileURL: stored.fileURL, profile: profile)
+                }
+            }
+            var seen: Set<String> = []
+            savedProfiles = assets.filter { asset in
+                let key = asset.deduplicationKey
+                guard !seen.contains(key) else { return false }
+                seen.insert(key)
+                return true
+            }
+            AppDiagnostics.record("phone.profile.list.reload", ["count": savedProfiles.count])
+        } catch {
+            savedProfiles = []
+            receiver.setLastMessage(error.localizedDescription)
+            AppDiagnostics.record(error: error, event: "phone.profile.list.reload.error")
+        }
+    }
+
+    private func resetForNewGesture() {
+        recordingLabel = ""
+        recordingKind = "burst"
+        sampleRole = "positive"
+        selectedCaptureURL = nil
+        previewSamples = []
+        previewMessage = nil
+        trimStartFraction = 0.05
+        trimEndFraction = 0.95
+        playbackFraction = 0
+        selectedAudioFileName = ""
+        soundStartFraction = 0
+        triggerTiming = TriggerTiming.atEnd.rawValue
+        cooldownSeconds = 0.8
+        editingAsset = nil
+        stopTrimPlayback()
+        AppDiagnostics.record("phone.wizard.newGesture")
+    }
+
+    private func openAssetForSound(_ asset: PhoneGestureAsset) {
+        editingAsset = asset
+        applyAsset(asset)
+        previewSamples = asset.profile.templates.first?.samples ?? []
+        trimStartFraction = 0
+        trimEndFraction = 1
+        playbackFraction = 0
+        previewMessage = "已载入动作：\(asset.profile.name)"
+        currentStep = .sound
+        AppDiagnostics.record("phone.profile.openSound", ["profile": asset.profile.name])
+    }
+
+    private func prepareToRecord(_ asset: PhoneGestureAsset) {
+        editingAsset = asset
+        applyAsset(asset)
+        sampleRole = "positive"
+        selectedCaptureURL = nil
+        previewSamples = []
+        previewMessage = nil
+        currentStep = .record
+        AppDiagnostics.record("phone.profile.prepareRecord", ["profile": asset.profile.name])
+    }
+
+    private func resyncAsset(_ asset: PhoneGestureAsset) {
+        let profileQueued = receiver.sendProfileFile(asset.fileURL)
+        if let audioName = asset.profile.sound?.fileName,
+           let audioURL = localAudioFiles.first(where: { $0.lastPathComponent == audioName }) {
+            _ = receiver.sendAudioFile(audioURL)
+        }
+        receiver.setLastMessage(profileQueued ? "已重新同步：\(asset.profile.name)" : "重新同步失败")
+        AppDiagnostics.record(
+            "phone.profile.resync",
+            [
+                "profile": asset.profile.name,
+                "queued": profileQueued,
+            ]
+        )
+    }
+
+    private func deleteAsset(_ asset: PhoneGestureAsset) {
+        do {
+            let store = try GestureProfileFileStore.appDocumentsStore()
+            let matching = try store.list().filter { stored in
+                stored.archive.profiles.contains {
+                    $0.id == asset.profile.id
+                        || $0.name.caseInsensitiveCompare(asset.profile.name) == .orderedSame
+                }
+            }
+            for stored in matching {
+                try store.delete(fileURL: stored.fileURL)
+            }
+            _ = receiver.sendDeleteProfileCommand(
+                profileID: asset.profile.id,
+                name: asset.profile.name,
+                kind: asset.profile.kind
+            )
+            reloadSavedProfiles()
+            if editingAsset?.id == asset.id {
+                editingAsset = nil
+            }
+            receiver.setLastMessage("已删除：\(asset.profile.name)")
+            AppDiagnostics.record(
+                "phone.profile.delete",
+                [
+                    "profile": asset.profile.name,
+                    "files": matching.count,
+                ]
+            )
+        } catch {
+            receiver.setLastMessage(error.localizedDescription)
+            AppDiagnostics.record(error: error, event: "phone.profile.delete.error", ["profile": asset.profile.name])
+        }
+    }
+
+    private func applyAsset(_ asset: PhoneGestureAsset) {
+        recordingLabel = asset.profile.name
+        recordingKind = asset.profile.kind.rawValue
+        selectedAudioFileName = asset.profile.sound?.fileName ?? ""
+        volume = Double(asset.profile.sound?.volume ?? 1)
+        triggerTiming = asset.profile.triggerTiming.rawValue
+        cooldownSeconds = asset.profile.cooldownSeconds
+        stopTrimPlayback()
+    }
+
+    private func toggleTrimPlayback() {
+        isPreviewPlaying ? stopTrimPlayback() : startTrimPlayback()
+    }
+
+    private func startTrimPlayback() {
+        stopTrimPlayback()
+        guard !previewSamples.isEmpty else { return }
+
+        let start = min(trimStartFraction, trimEndFraction)
+        let end = max(trimStartFraction, trimEndFraction)
+        playbackFraction = start
+        isPreviewPlaying = true
+
+        let duration = max(0.45, captureDuration * max(0.05, end - start))
+        let startedAt = Date()
+        trimPlaybackTask = Task { @MainActor in
+            while !Task.isCancelled {
+                let progress = min(1, Date().timeIntervalSince(startedAt) / duration)
+                playbackFraction = start + (end - start) * progress
+                if progress >= 1 {
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 33_000_000)
+            }
+            guard !Task.isCancelled else { return }
+            playbackFraction = end
+            trimPlaybackTask = nil
+            isPreviewPlaying = false
+        }
+        AppDiagnostics.record("phone.trim.playback.start", ["duration": duration])
+    }
+
+    private func stopTrimPlayback() {
+        trimPlaybackTask?.cancel()
+        trimPlaybackTask = nil
+        isPreviewPlaying = false
     }
 
     private func handleImportedFile(_ url: URL, target: FileImportTarget) {
@@ -695,14 +1001,87 @@ struct PhoneDebugView: View {
                 AppDiagnostics.record("phone.audio.import.unsupported", ["file": url.lastPathComponent])
                 return
             }
-            selectedAudioFileName = url.lastPathComponent
-            _ = receiver.sendAudioFile(url)
-            reloadLocalAudioFiles()
-            AppDiagnostics.record("phone.audio.imported", ["file": url.lastPathComponent])
+            do {
+                let savedURL = try copyImportedAudioToDocuments(url)
+                reloadLocalAudioFiles()
+                selectLocalAudio(savedURL)
+                AppDiagnostics.record("phone.audio.imported", ["file": savedURL.lastPathComponent])
+            } catch {
+                receiver.setLastMessage(error.localizedDescription)
+                AppDiagnostics.record(error: error, event: "phone.audio.import.error", ["file": url.lastPathComponent])
+            }
         case .profile:
-            _ = receiver.sendProfileFile(url)
-            AppDiagnostics.record("phone.profile.imported", ["file": url.lastPathComponent])
+            importProfile(url)
         }
+    }
+
+    private func importProfile(_ url: URL) {
+        let didAccess = url.startAccessingSecurityScopedResource()
+        defer {
+            if didAccess {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        do {
+            let archive = try GestureProfileCodec().decode(Data(contentsOf: url))
+            let store = try GestureProfileFileStore.appDocumentsStore()
+            let savedURL = try store.save(archive, preferredName: archive.profiles.first?.name ?? url.deletingPathExtension().lastPathComponent)
+            reloadSavedProfiles()
+            _ = receiver.sendProfileFile(savedURL)
+            currentStep = .library
+            receiver.setLastMessage("已导入动作：\(archive.profiles.first?.name ?? savedURL.lastPathComponent)")
+            AppDiagnostics.record("phone.profile.imported", ["file": savedURL.lastPathComponent])
+        } catch {
+            receiver.setLastMessage(error.localizedDescription)
+            AppDiagnostics.record(error: error, event: "phone.profile.import.error", ["file": url.lastPathComponent])
+        }
+    }
+
+    private func copyImportedAudioToDocuments(_ url: URL) throws -> URL {
+        let didAccess = url.startAccessingSecurityScopedResource()
+        defer {
+            if didAccess {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        let documents = try FileManager.default.url(
+            for: .documentDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+        let destination = availableAudioDestinationURL(
+            directory: documents,
+            fileName: url.lastPathComponent
+        )
+        try FileManager.default.copyItem(at: url, to: destination)
+        return destination
+    }
+
+    private func availableAudioDestinationURL(directory: URL, fileName: String) -> URL {
+        let destination = directory.appendingPathComponent(sanitizeImportedFileName(fileName))
+        guard FileManager.default.fileExists(atPath: destination.path) else {
+            return destination
+        }
+
+        let base = destination.deletingPathExtension().lastPathComponent
+        let ext = destination.pathExtension
+        let timestamp = Int(Date().timeIntervalSince1970)
+        return directory.appendingPathComponent("\(base)-\(timestamp).\(ext)")
+    }
+
+    private func sanitizeImportedFileName(_ value: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_."))
+        let scalars = value.unicodeScalars.map { scalar in
+            allowed.contains(scalar) ? Character(scalar) : "-"
+        }
+        let compact = String(scalars)
+            .split(separator: "-")
+            .joined(separator: "-")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-_"))
+        return compact.isEmpty ? "sound.wav" : compact
     }
 
     private func selectLocalAudio(_ url: URL) {
@@ -760,6 +1139,7 @@ struct PhoneDebugView: View {
         trimEndFraction = 0.95
         playbackFraction = 0
         selectedAudioFileName = ""
+        editingAsset = nil
         currentStep = .create
         AppDiagnostics.record("phone.wizard.reset")
     }
@@ -819,6 +1199,7 @@ struct PhoneDebugView: View {
 }
 
 private enum SetupStep: String, CaseIterable, Identifiable {
+    case library
     case create
     case record
     case trim
@@ -827,8 +1208,14 @@ private enum SetupStep: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    static var wizardSteps: [SetupStep] {
+        [.create, .record, .trim, .sound, .sync]
+    }
+
     var title: String {
         switch self {
+        case .library:
+            return "动作"
         case .create:
             return "动作"
         case .record:
@@ -844,6 +1231,8 @@ private enum SetupStep: String, CaseIterable, Identifiable {
 
     var systemImage: String {
         switch self {
+        case .library:
+            return "list.bullet"
         case .create:
             return "sparkle"
         case .record:
@@ -926,7 +1315,7 @@ private struct StepProgressView: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            ForEach(SetupStep.allCases) { step in
+            ForEach(SetupStep.wizardSteps) { step in
                 VStack(spacing: 6) {
                     Image(systemName: step.systemImage)
                         .font(.caption.weight(.semibold))
@@ -938,7 +1327,7 @@ private struct StepProgressView: View {
                         .font(.caption2)
                         .foregroundStyle(step.rawValue == currentStep.rawValue ? .primary : .secondary)
                 }
-                if step != SetupStep.allCases.last {
+                if step != SetupStep.wizardSteps.last {
                     Rectangle()
                         .fill(Color.secondary.opacity(0.25))
                         .frame(height: 1)
@@ -1366,6 +1755,319 @@ private struct SummaryRow: View {
         }
         .font(.subheadline)
     }
+}
+
+private struct PhoneGestureAsset: Identifiable, Equatable {
+    var fileURL: URL
+    var profile: GestureProfile
+
+    var id: UUID { profile.id }
+    var deduplicationKey: String { "\(profile.name.lowercased())|\(profile.kind.rawValue)" }
+    var templateCount: Int { profile.templates.count }
+    var sampleCount: Int { profile.templates.map(\.samples.count).reduce(0, +) }
+    var soundName: String { profile.sound?.fileName ?? "未绑定音效" }
+
+    var kindText: String {
+        switch profile.kind {
+        case .burst:
+            return "短促"
+        case .sequence:
+            return "连续"
+        case .posture:
+            return "姿态"
+        case .combo:
+            return "组合"
+        }
+    }
+}
+
+private struct GestureAssetRow: View {
+    var asset: PhoneGestureAsset
+    var open: () -> Void
+    var record: () -> Void
+    var resync: () -> Void
+    var delete: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button(action: open) {
+                HStack(spacing: 12) {
+                    Image(systemName: asset.profile.kind == .burst ? "bolt.fill" : "point.3.connected.trianglepath.dotted")
+                        .frame(width: 34, height: 34)
+                        .background(Color.accentColor.opacity(0.13))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(asset.profile.name)
+                            .font(.headline)
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                        Text("\(asset.kindText) · \(asset.templateCount) 模板 · \(asset.sampleCount) 采样点")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .buttonStyle(.plain)
+
+            HStack(spacing: 8) {
+                Label(asset.soundName, systemImage: "waveform")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer()
+                Button("补录", action: record)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                Button(action: resync) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                Button(role: .destructive, action: delete) {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+        .padding(12)
+        .background(Color(.tertiarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct MotionTrajectorySceneView: UIViewRepresentable {
+    var samples: [MotionSample]
+    var trimStartFraction: Double
+    var trimEndFraction: Double
+    var playbackFraction: Double
+
+    func makeUIView(context: Context) -> SCNView {
+        let view = SCNView()
+        view.scene = SCNScene()
+        view.backgroundColor = UIColor.secondarySystemGroupedBackground
+        view.allowsCameraControl = true
+        view.autoenablesDefaultLighting = true
+        view.antialiasingMode = .multisampling4X
+        MotionTrajectoryRenderer.ensureCamera(in: view.scene)
+        return view
+    }
+
+    func updateUIView(_ uiView: SCNView, context: Context) {
+        MotionTrajectoryRenderer.render(
+            samples: samples,
+            trimStartFraction: trimStartFraction,
+            trimEndFraction: trimEndFraction,
+            playbackFraction: playbackFraction,
+            in: uiView.scene
+        )
+    }
+}
+
+private enum MotionTrajectoryRenderer {
+    static func ensureCamera(in scene: SCNScene?) {
+        guard let scene else { return }
+        if scene.rootNode.childNode(withName: "motion-camera", recursively: false) == nil {
+            let cameraNode = SCNNode()
+            cameraNode.name = "motion-camera"
+            cameraNode.camera = SCNCamera()
+            cameraNode.camera?.fieldOfView = 46
+            cameraNode.position = SCNVector3(0, 0.9, 5.2)
+            cameraNode.eulerAngles = SCNVector3(-0.18, 0, 0)
+            scene.rootNode.addChildNode(cameraNode)
+        }
+
+        if scene.rootNode.childNode(withName: "motion-light", recursively: false) == nil {
+            let lightNode = SCNNode()
+            lightNode.name = "motion-light"
+            lightNode.light = SCNLight()
+            lightNode.light?.type = .omni
+            lightNode.light?.intensity = 600
+            lightNode.position = SCNVector3(0, 3, 4)
+            scene.rootNode.addChildNode(lightNode)
+        }
+    }
+
+    static func render(
+        samples: [MotionSample],
+        trimStartFraction: Double,
+        trimEndFraction: Double,
+        playbackFraction: Double,
+        in scene: SCNScene?
+    ) {
+        guard let scene else { return }
+        ensureCamera(in: scene)
+        scene.rootNode.childNodes
+            .filter { $0.name == "motion-content" }
+            .forEach { $0.removeFromParentNode() }
+
+        let root = SCNNode()
+        root.name = "motion-content"
+        scene.rootNode.addChildNode(root)
+
+        addAxes(to: root)
+
+        let points = trajectoryPoints(for: samples)
+        guard points.count >= 2 else {
+            addEmptyMessagePlane(to: root)
+            return
+        }
+
+        root.addChildNode(lineNode(points: points, color: UIColor.systemGray3, opacity: 0.72))
+
+        let startIndex = clampedIndex(fraction: min(trimStartFraction, trimEndFraction), count: points.count)
+        let endIndex = clampedIndex(fraction: max(trimStartFraction, trimEndFraction), count: points.count)
+        if endIndex > startIndex {
+            let trimmed = Array(points[startIndex...endIndex])
+            root.addChildNode(lineNode(points: trimmed, color: UIColor.systemOrange, opacity: 1))
+        }
+
+        let cursorIndex = clampedIndex(fraction: playbackFraction, count: points.count)
+        let cursor = sphereNode(radius: 0.06, color: UIColor.systemRed)
+        cursor.position = points[cursorIndex]
+        root.addChildNode(cursor)
+
+        let startMarker = sphereNode(radius: 0.045, color: UIColor.systemGreen)
+        startMarker.position = points[startIndex]
+        root.addChildNode(startMarker)
+
+        let endMarker = sphereNode(radius: 0.045, color: UIColor.systemOrange)
+        endMarker.position = points[endIndex]
+        root.addChildNode(endMarker)
+    }
+
+    private static func trajectoryPoints(for samples: [MotionSample]) -> [SCNVector3] {
+        guard samples.count >= 2 else { return [] }
+        let stride = max(samples.count / 700, 1)
+        let reduced = samples.enumerated().compactMap { offset, sample in
+            offset % stride == 0 ? sample : nil
+        }
+
+        var points: [SCNVector3] = []
+        points.reserveCapacity(reduced.count)
+        var velocity = SCNVector3Zero
+        var position = SCNVector3Zero
+        var previousTimestamp = reduced.first?.timestamp ?? 0
+
+        for sample in reduced {
+            let dt = Float(min(max(sample.timestamp - previousTimestamp, 1.0 / 120.0), 0.05))
+            previousTimestamp = sample.timestamp
+            let acceleration = SCNVector3(
+                Float(sample.userAcceleration.x),
+                Float(sample.userAcceleration.y),
+                Float(sample.userAcceleration.z)
+            )
+            velocity = (velocity + acceleration * dt) * 0.88
+            position = position + velocity * dt
+            points.append(position)
+        }
+
+        if spatialSpan(points) < 0.01 {
+            points = reduced.map {
+                SCNVector3(
+                    Float($0.userAcceleration.x),
+                    Float($0.userAcceleration.y),
+                    Float($0.userAcceleration.z)
+                )
+            }
+        }
+
+        return normalized(points)
+    }
+
+    private static func normalized(_ points: [SCNVector3]) -> [SCNVector3] {
+        guard !points.isEmpty else { return [] }
+        let center = points.reduce(SCNVector3Zero, +) / Float(points.count)
+        let centered = points.map { $0 - center }
+        let span = max(spatialSpan(centered), 0.001)
+        let scale = Float(2.6) / span
+        return centered.map { $0 * scale }
+    }
+
+    private static func spatialSpan(_ points: [SCNVector3]) -> Float {
+        guard let first = points.first else { return 0 }
+        var minX = first.x
+        var maxX = first.x
+        var minY = first.y
+        var maxY = first.y
+        var minZ = first.z
+        var maxZ = first.z
+
+        for point in points {
+            minX = min(minX, point.x)
+            maxX = max(maxX, point.x)
+            minY = min(minY, point.y)
+            maxY = max(maxY, point.y)
+            minZ = min(minZ, point.z)
+            maxZ = max(maxZ, point.z)
+        }
+
+        return max(maxX - minX, max(maxY - minY, maxZ - minZ))
+    }
+
+    private static func lineNode(points: [SCNVector3], color: UIColor, opacity: CGFloat) -> SCNNode {
+        let source = SCNGeometrySource(vertices: points)
+        let indices = (0..<(points.count - 1)).flatMap { [Int32($0), Int32($0 + 1)] }
+        let element = SCNGeometryElement(indices: indices, primitiveType: .line)
+        let geometry = SCNGeometry(sources: [source], elements: [element])
+        let material = SCNMaterial()
+        material.diffuse.contents = color.withAlphaComponent(opacity)
+        material.emission.contents = color.withAlphaComponent(opacity * 0.35)
+        geometry.materials = [material]
+        return SCNNode(geometry: geometry)
+    }
+
+    private static func sphereNode(radius: CGFloat, color: UIColor) -> SCNNode {
+        let sphere = SCNSphere(radius: radius)
+        let material = SCNMaterial()
+        material.diffuse.contents = color
+        material.emission.contents = color.withAlphaComponent(0.25)
+        sphere.materials = [material]
+        return SCNNode(geometry: sphere)
+    }
+
+    private static func addAxes(to root: SCNNode) {
+        root.addChildNode(lineNode(points: [SCNVector3(-1.4, 0, 0), SCNVector3(1.4, 0, 0)], color: .systemRed, opacity: 0.34))
+        root.addChildNode(lineNode(points: [SCNVector3(0, -1.4, 0), SCNVector3(0, 1.4, 0)], color: .systemGreen, opacity: 0.34))
+        root.addChildNode(lineNode(points: [SCNVector3(0, 0, -1.4), SCNVector3(0, 0, 1.4)], color: .systemBlue, opacity: 0.34))
+    }
+
+    private static func addEmptyMessagePlane(to root: SCNNode) {
+        let plane = SCNPlane(width: 1.6, height: 0.8)
+        let material = SCNMaterial()
+        material.diffuse.contents = UIColor.systemGray5
+        plane.materials = [material]
+        let node = SCNNode(geometry: plane)
+        node.opacity = 0.6
+        root.addChildNode(node)
+    }
+
+    private static func clampedIndex(fraction: Double, count: Int) -> Int {
+        guard count > 0 else { return 0 }
+        return max(0, min(count - 1, Int(round(Double(count - 1) * fraction))))
+    }
+}
+
+private func + (lhs: SCNVector3, rhs: SCNVector3) -> SCNVector3 {
+    SCNVector3(lhs.x + rhs.x, lhs.y + rhs.y, lhs.z + rhs.z)
+}
+
+private func - (lhs: SCNVector3, rhs: SCNVector3) -> SCNVector3 {
+    SCNVector3(lhs.x - rhs.x, lhs.y - rhs.y, lhs.z - rhs.z)
+}
+
+private func * (lhs: SCNVector3, rhs: Float) -> SCNVector3 {
+    SCNVector3(lhs.x * rhs, lhs.y * rhs, lhs.z * rhs)
+}
+
+private func / (lhs: SCNVector3, rhs: Float) -> SCNVector3 {
+    SCNVector3(lhs.x / rhs, lhs.y / rhs, lhs.z / rhs)
 }
 
 private struct ReceivedCaptureSummary: Identifiable, Equatable {
