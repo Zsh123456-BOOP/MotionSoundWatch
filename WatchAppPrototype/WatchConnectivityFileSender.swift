@@ -152,6 +152,43 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
         }
     }
 
+    @discardableResult
+    func sendPlaySound(fileName: String, profileName: String, volume: Float) -> Bool {
+        guard let session else {
+            lastTransferMessage = "当前设备不支持 WatchConnectivity"
+            AppDiagnostics.record("watch.playSound.unsupported", ["file": fileName, "profile": profileName])
+            return false
+        }
+
+        let message: [String: Any] = [
+            "command": "playSound",
+            "fileName": fileName,
+            "profile": profileName,
+            "volume": Double(volume),
+            "sentAt": Date().timeIntervalSince1970,
+            "source": "MotionSoundWatch",
+        ]
+
+        if session.isReachable {
+            session.sendMessage(message, replyHandler: nil) { error in
+                AppDiagnostics.record(
+                    "watch.playSound.sendMessage.error",
+                    [
+                        "file": fileName,
+                        "profile": profileName,
+                        "error": error.localizedDescription,
+                    ]
+                )
+            }
+            AppDiagnostics.record("watch.playSound.sent", ["file": fileName, "profile": profileName])
+            return true
+        }
+
+        session.transferUserInfo(message)
+        AppDiagnostics.record("watch.playSound.queued", ["file": fileName, "profile": profileName])
+        return true
+    }
+
     private func receiveAudio(fileURL: URL, preferredFileName: String?, checksum: String?) {
         do {
             let directory = try WatchSoundPlayer.soundsDirectory()

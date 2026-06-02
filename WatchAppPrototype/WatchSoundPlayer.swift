@@ -12,6 +12,7 @@ final class WatchSoundPlayer: ObservableObject {
     @Published private(set) var preloadedCount = 0
     @Published private(set) var lastPlayedAssetName: String?
     @Published private(set) var lastPlaySucceeded = false
+    @Published private(set) var lastAudiblePlaySucceeded = false
     @Published private(set) var lastOutputVolume: Float = 0
 
     private var players: [String: AVAudioPlayer] = [:]
@@ -103,6 +104,7 @@ final class WatchSoundPlayer: ObservableObject {
         lastPlayedAssetName = assetName
         lastPlaySucceeded = played
         lastOutputVolume = AVAudioSession.sharedInstance().outputVolume
+        lastAudiblePlaySucceeded = played && lastOutputVolume > 0.01
         if !played {
             lastError = "音频播放失败：\(assetName)"
         } else {
@@ -117,6 +119,7 @@ final class WatchSoundPlayer: ObservableObject {
                 "duration": player.duration,
                 "outputVolume": AVAudioSession.sharedInstance().outputVolume,
                 "isPlaying": player.isPlaying,
+                "audible": lastAudiblePlaySucceeded,
             ]
         )
         return played

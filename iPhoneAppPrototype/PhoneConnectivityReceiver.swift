@@ -69,9 +69,11 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
     @Published private(set) var lastRecordingStatus: RecordingStatusEvent?
 
     private let fileManager: FileManager
+    private let soundPlayer: PhoneSoundPlayer
 
-    init(fileManager: FileManager = .default) {
+    init(fileManager: FileManager = .default, soundPlayer: PhoneSoundPlayer = PhoneSoundPlayer()) {
         self.fileManager = fileManager
+        self.soundPlayer = soundPlayer
         super.init()
         AppDiagnostics.record("phone.connectivity.init", ["supported": isSupported])
         reloadReceivedFiles()
@@ -639,6 +641,37 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
         )
     }
 
+    private func receivePlaySound(
+        command: String?,
+        fileName: String?,
+        profile: String?,
+        volume: Double?
+    ) {
+        guard command == "playSound" else { return }
+        let trimmedFileName = fileName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmedFileName.isEmpty else {
+            lastMessage = "Watch 触发了动作，但没有音频文件名。"
+            AppDiagnostics.record("phone.playSound.emptyFileName", ["profile": profile ?? ""])
+            return
+        }
+
+        let played = soundPlayer.play(
+            fileName: trimmedFileName,
+            volume: Float(max(0, min(1, volume ?? 1)))
+        )
+        lastMessage = played
+            ? "Watch 触发：\(profile ?? "")，iPhone 已播放音效。"
+            : "Watch 触发：\(profile ?? "")，但 iPhone 未找到或未播放音效。"
+        AppDiagnostics.record(
+            "phone.playSound.received",
+            [
+                "file": trimmedFileName,
+                "profile": profile ?? "",
+                "played": played,
+            ]
+        )
+    }
+
     private func incomingDirectory() throws -> URL {
         let documents = try fileManager.url(
             for: .documentDirectory,
@@ -943,7 +976,13 @@ extension PhoneConnectivityReceiver: WCSessionDelegate {
         let csvQueued = message["csvQueued"] as? Bool ?? false
         let fileName = message["fileName"] as? String
         let errorMessage = message["errorMessage"] as? String
+        let profile = message["profile"] as? String
+        let volume = message["volume"] as? Double
         Task { @MainActor in
+            if command == "playSound" {
+                receivePlaySound(command: command, fileName: fileName, profile: profile, volume: volume)
+                return
+            }
             receiveRecordingStatus(
                 command: command,
                 action: action,
@@ -966,7 +1005,13 @@ extension PhoneConnectivityReceiver: WCSessionDelegate {
         let csvQueued = userInfo["csvQueued"] as? Bool ?? false
         let fileName = userInfo["fileName"] as? String
         let errorMessage = userInfo["errorMessage"] as? String
+        let profile = userInfo["profile"] as? String
+        let volume = userInfo["volume"] as? Double
         Task { @MainActor in
+            if command == "playSound" {
+                receivePlaySound(command: command, fileName: fileName, profile: profile, volume: volume)
+                return
+            }
             receiveRecordingStatus(
                 command: command,
                 action: action,

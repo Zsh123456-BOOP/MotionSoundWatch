@@ -444,9 +444,10 @@ final class WatchMotionRecorder: ObservableObject {
             let candidate = evaluation.candidate
             lastBurstGateRejectionReason = evaluation.burstGateRejectionReason
             updateRecognitionSummary(segment: segment, candidate: candidate, rejectionReason: evaluation.burstGateRejectionReason)
-            let audioPlayed = candidate?.shouldTrigger == true
+            let audioPlayRequested = candidate?.shouldTrigger == true
                 ? (soundPlayer?.play(sound: candidate?.profile.sound) ?? false)
                 : false
+            let audioPlayed = audioPlayRequested && (soundPlayer?.lastAudiblePlaySucceeded ?? audioPlayRequested)
             lastRecognitionEvent = recognitionRuntime.record(
                 segment: segment,
                 candidate: candidate,
@@ -471,6 +472,7 @@ final class WatchMotionRecorder: ObservableObject {
                     [
                         "profile": lastRecognitionEvent?.profile?.name ?? "",
                         "audioPlayed": audioPlayed,
+                        "audioPlayRequested": audioPlayRequested,
                         "triggerCount": triggerCount,
                         "audioPlayedTriggerCount": audioPlayedTriggerCount,
                         "audioMissingTriggerCount": audioMissingTriggerCount,

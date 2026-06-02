@@ -27,6 +27,7 @@
 		BB0000000000000000000001 /* MotionSoundPhoneApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000101 /* MotionSoundPhoneApp.swift */; };
 		BB0000000000000000000002 /* PhoneDebugView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000102 /* PhoneDebugView.swift */; };
 		BB0000000000000000000003 /* PhoneConnectivityReceiver.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000103 /* PhoneConnectivityReceiver.swift */; };
+		BB0000000000000000000010 /* PhoneSoundPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000105 /* PhoneSoundPlayer.swift */; };
 		BB0000000000000000000004 /* MotionSoundCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000105 /* MotionSoundCore.swift */; };
 		BB0000000000000000000005 /* MotionPipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000106 /* MotionPipeline.swift */; };
 		BB0000000000000000000006 /* MotionProfiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000107 /* MotionProfiles.swift */; };
@@ -82,6 +83,7 @@
 		BB0000000000000000000101 /* MotionSoundPhoneApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotionSoundPhoneApp.swift; sourceTree = "<group>"; };
 		BB0000000000000000000102 /* PhoneDebugView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneDebugView.swift; sourceTree = "<group>"; };
 		BB0000000000000000000103 /* PhoneConnectivityReceiver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneConnectivityReceiver.swift; sourceTree = "<group>"; };
+		BB0000000000000000000105 /* PhoneSoundPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneSoundPlayer.swift; sourceTree = "<group>"; };
 		BB0000000000000000000104 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -159,6 +161,7 @@
 				BB0000000000000000000101 /* MotionSoundPhoneApp.swift */,
 				BB0000000000000000000102 /* PhoneDebugView.swift */,
 				BB0000000000000000000103 /* PhoneConnectivityReceiver.swift */,
+				BB0000000000000000000105 /* PhoneSoundPlayer.swift */,
 				BB0000000000000000000104 /* Info.plist */,
 			);
 			path = iPhoneAppPrototype;
@@ -289,6 +292,7 @@
 				BB0000000000000000000001 /* MotionSoundPhoneApp.swift in Sources */,
 				BB0000000000000000000002 /* PhoneDebugView.swift in Sources */,
 				BB0000000000000000000003 /* PhoneConnectivityReceiver.swift in Sources */,
+				BB0000000000000000000010 /* PhoneSoundPlayer.swift in Sources */,
 				BB0000000000000000000004 /* MotionSoundCore.swift in Sources */,
 				BB0000000000000000000005 /* MotionPipeline.swift in Sources */,
 				BB0000000000000000000006 /* MotionProfiles.swift in Sources */,
