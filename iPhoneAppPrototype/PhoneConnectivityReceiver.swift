@@ -134,6 +134,48 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
     }
 
     @discardableResult
+    func requestWatchRuntime(reason: String) -> Bool {
+        guard let session else {
+            AppDiagnostics.record("phone.prepareRuntime.unsupported", ["reason": reason])
+            return false
+        }
+        guard session.activationState == .activated else {
+            AppDiagnostics.record(
+                "phone.prepareRuntime.deferred",
+                ["reason": reason, "state": Self.description(for: session.activationState)]
+            )
+            return false
+        }
+
+        let message: [String: Any] = [
+            "command": "prepareRuntime",
+            "reason": reason,
+            "sentAt": Date().timeIntervalSince1970,
+            "source": "MotionSoundPhone",
+        ]
+
+        if session.isReachable {
+            session.sendMessage(message, replyHandler: nil) { error in
+                AppDiagnostics.record(
+                    "phone.prepareRuntime.sendMessage.error",
+                    ["reason": reason, "error": error.localizedDescription]
+                )
+            }
+            AppDiagnostics.record("phone.prepareRuntime.sent", ["reason": reason, "reachable": true])
+            return true
+        }
+
+        do {
+            try session.updateApplicationContext(message)
+            AppDiagnostics.record("phone.prepareRuntime.contextUpdated", ["reason": reason, "reachable": false])
+            return true
+        } catch {
+            AppDiagnostics.record(error: error, event: "phone.prepareRuntime.context.error", ["reason": reason])
+            return false
+        }
+    }
+
+    @discardableResult
     func sendRecordingCommand(
         action: RecordingControlAction,
         label: String,
@@ -183,7 +225,16 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
                     self?.lastMessage = "Watch 回执异常"
                 }
             } onError: { [weak self] errorMessage in
-                self?.lastMessage = errorMessage
+                self?.queueRecordingCommand(
+                    session: session,
+                    message: message,
+                    action: action,
+                    label: label,
+                    kind: kind,
+                    sampleRole: sampleRole,
+                    autoSendCSV: autoSendCSV,
+                    errorMessage: errorMessage
+                )
                 AppDiagnostics.record(
                     "phone.recordingCommand.sendMessage.error",
                     [
@@ -212,14 +263,39 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
             return true
         }
 
-        lastMessage = "Watch 暂不可达，请打开 Watch App 后再开始或结束录制"
+        queueRecordingCommand(
+            session: session,
+            message: message,
+            action: action,
+            label: label,
+            kind: kind,
+            sampleRole: sampleRole,
+            autoSendCSV: autoSendCSV
+        )
+        return true
+    }
+
+    private func queueRecordingCommand(
+        session: WCSession,
+        message: [String: Any],
+        action: RecordingControlAction,
+        label: String,
+        kind: String,
+        sampleRole: String,
+        autoSendCSV: Bool,
+        errorMessage: String? = nil
+    ) {
+        session.transferUserInfo(message)
+        lastMessage = action == .startRecording
+            ? "Watch 即时不可达，已排队开始录制；打开 Watch App 后会执行。"
+            : "Watch 即时不可达，已排队结束录制；等待 Watch 保存并同步样本。"
         refreshSessionState(
             activationState: session.activationState,
             isReachable: session.isReachable,
             isWatchAppInstalled: session.isWatchAppInstalled
         )
         AppDiagnostics.record(
-            "phone.recordingCommand.unreachable",
+            "phone.recordingCommand.queued",
             [
                 "action": action.rawValue,
                 "label": label,
@@ -227,9 +303,9 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
                 "sampleRole": sampleRole,
                 "autoSendCSV": autoSendCSV,
                 "reachable": false,
+                "error": errorMessage ?? "",
             ]
         )
-        return false
     }
 
     @discardableResult
@@ -673,6 +749,7 @@ extension PhoneConnectivityReceiver: WCSessionDelegate {
                         "watchAppInstalled": isWatchAppInstalled,
                     ]
                 )
+                _ = requestWatchRuntime(reason: "activationComplete")
             }
         }
     }

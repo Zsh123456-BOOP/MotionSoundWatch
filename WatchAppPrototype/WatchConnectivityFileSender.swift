@@ -11,6 +11,7 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
     @Published private(set) var receivedSoundFiles: [URL] = []
     @Published private(set) var lastReceivedProfileURL: URL?
     @Published private(set) var lastRecordingCommand: RecordingControlCommand?
+    @Published private(set) var runtimePrepareRequestCount = 0
 
     private var session: WCSession? {
         isSupported ? WCSession.default : nil
@@ -249,6 +250,15 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
         )
     }
 
+    private func receivePrepareRuntime(reason: String?) {
+        runtimePrepareRequestCount += 1
+        lastTransferMessage = "手机已准备监听"
+        AppDiagnostics.record(
+            "watch.connectivity.prepareRuntime.received",
+            ["reason": reason ?? "", "count": runtimePrepareRequestCount]
+        )
+    }
+
     private func description(for state: WCSessionActivationState) -> String {
         switch state {
         case .activated:
@@ -370,30 +380,54 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
     }
 
     nonisolated func session(_ session: WCSession, didReceive file: WCSessionFile) {
-        let fileURL = file.fileURL
         let kind = file.metadata?["kind"] as? String
         let preferredFileName = file.metadata?["fileName"] as? String
         let checksum = file.metadata?["checksum"] as? String
+        let fallbackFileName = file.fileURL.lastPathComponent
+        let persistedFileURL: URL
+
+        do {
+            persistedFileURL = try Self.persistReceivedTransferFile(
+                sourceURL: file.fileURL,
+                preferredFileName: preferredFileName
+            )
+        } catch {
+            Task { @MainActor in
+                lastTransferMessage = error.localizedDescription
+                AppDiagnostics.record(
+                    error: error,
+                    event: "watch.connectivity.receiveFile.persist.error",
+                    ["file": preferredFileName ?? fallbackFileName]
+                )
+            }
+            return
+        }
+
         Task { @MainActor in
             switch kind {
             case SyncedFileKind.audioAsset.rawValue:
-                receiveAudio(fileURL: fileURL, preferredFileName: preferredFileName, checksum: checksum)
+                receiveAudio(fileURL: persistedFileURL, preferredFileName: preferredFileName, checksum: checksum)
             case SyncedFileKind.gestureProfile.rawValue:
-                receiveProfile(fileURL: fileURL, preferredFileName: preferredFileName, checksum: checksum)
+                receiveProfile(fileURL: persistedFileURL, preferredFileName: preferredFileName, checksum: checksum)
             default:
-                lastTransferMessage = "忽略未知文件：\(preferredFileName ?? fileURL.lastPathComponent)"
+                lastTransferMessage = "忽略未知文件：\(preferredFileName ?? persistedFileURL.lastPathComponent)"
             }
         }
     }
 
     nonisolated func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
         let command = message["command"] as? String
+        let reason = message["reason"] as? String
         let action = message["action"] as? String
         let label = message["label"] as? String
         let kind = message["kind"] as? String
         let sampleRole = message["sampleRole"] as? String
         let autoSendCSV = message["autoSendCSV"] as? Bool
         Task { @MainActor in
+            if command == "prepareRuntime" {
+                receivePrepareRuntime(reason: reason)
+                return
+            }
             guard command == "recordingControl" else { return }
             receiveRecordingCommand(
                 action: action,
@@ -411,11 +445,24 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
         replyHandler: @escaping ([String: Any]) -> Void
     ) {
         let command = message["command"] as? String
+        let reason = message["reason"] as? String
         let action = message["action"] as? String
         let label = message["label"] as? String
         let kind = message["kind"] as? String
         let sampleRole = message["sampleRole"] as? String
         let autoSendCSV = message["autoSendCSV"] as? Bool
+
+        if command == "prepareRuntime" {
+            replyHandler([
+                "status": "accepted",
+                "command": "prepareRuntime",
+                "receivedAt": Date().timeIntervalSince1970,
+            ])
+            Task { @MainActor in
+                receivePrepareRuntime(reason: reason)
+            }
+            return
+        }
 
         guard command == "recordingControl",
               RecordingControlAction(rawValue: action ?? "") != nil else {
@@ -446,12 +493,17 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
 
     nonisolated func session(_ session: WCSession, didReceiveUserInfo userInfo: [String: Any] = [:]) {
         let command = userInfo["command"] as? String
+        let reason = userInfo["reason"] as? String
         let action = userInfo["action"] as? String
         let label = userInfo["label"] as? String
         let kind = userInfo["kind"] as? String
         let sampleRole = userInfo["sampleRole"] as? String
         let autoSendCSV = userInfo["autoSendCSV"] as? Bool
         Task { @MainActor in
+            if command == "prepareRuntime" {
+                receivePrepareRuntime(reason: reason)
+                return
+            }
             guard command == "recordingControl" else { return }
             receiveRecordingCommand(
                 action: action,
@@ -460,6 +512,15 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
                 sampleRole: sampleRole,
                 autoSendCSV: autoSendCSV
             )
+        }
+    }
+
+    nonisolated func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) {
+        let command = applicationContext["command"] as? String
+        let reason = applicationContext["reason"] as? String
+        Task { @MainActor in
+            guard command == "prepareRuntime" else { return }
+            receivePrepareRuntime(reason: reason)
         }
     }
 
@@ -477,5 +538,33 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
                 ]
             )
         }
+    }
+
+    nonisolated private static func persistReceivedTransferFile(
+        sourceURL: URL,
+        preferredFileName: String?,
+        fileManager: FileManager = .default
+    ) throws -> URL {
+        let baseDirectory = fileManager.temporaryDirectory
+            .appendingPathComponent("MotionSoundWatchTransfers", isDirectory: true)
+        try fileManager.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
+
+        let rawName = preferredFileName?.isEmpty == false ? preferredFileName! : sourceURL.lastPathComponent
+        let destination = baseDirectory.appendingPathComponent("\(UUID().uuidString)-\(nonisolatedSanitizeFileName(rawName))")
+        try fileManager.copyItem(at: sourceURL, to: destination)
+        return destination
+    }
+
+    nonisolated private static func nonisolatedSanitizeFileName(_ value: String) -> String {
+        let fallback = "motion-sound-transfer"
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_."))
+        let scalars = value.unicodeScalars.map { scalar in
+            allowed.contains(scalar) ? Character(scalar) : "-"
+        }
+        let compact = String(scalars)
+            .split(separator: "-")
+            .joined(separator: "-")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-_"))
+        return compact.isEmpty ? fallback : compact
     }
 }

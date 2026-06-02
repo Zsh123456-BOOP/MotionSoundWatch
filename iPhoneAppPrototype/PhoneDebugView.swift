@@ -1,5 +1,6 @@
 import Charts
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 
 struct PhoneDebugView: View {
@@ -59,8 +60,7 @@ struct PhoneDebugView: View {
     }
 
     private var canStartRecording: Bool {
-        receiver.isWatchReachable
-            && countdownRemaining == nil
+        countdownRemaining == nil
             && pendingRecordingAction == nil
             && !normalizedGestureName.isEmpty
     }
@@ -110,7 +110,9 @@ struct PhoneDebugView: View {
             }
             .onAppear {
                 AppDiagnostics.record("phone.productView.onAppear")
+                UIApplication.shared.isIdleTimerDisabled = true
                 receiver.activate()
+                receiver.requestWatchRuntime(reason: "phoneViewAppear")
                 loadPreferredCapture()
             }
             .onChange(of: receiver.receivedFiles) {
@@ -125,6 +127,7 @@ struct PhoneDebugView: View {
             .onDisappear {
                 countdownTimer?.invalidate()
                 countdownTimer = nil
+                UIApplication.shared.isIdleTimerDisabled = false
             }
             .fileImporter(
                 isPresented: Binding(
@@ -257,7 +260,7 @@ struct PhoneDebugView: View {
                 }
 
                 if !receiver.isWatchReachable {
-                    Text("请保持 Watch App 打开，并确认 iPhone 与 Watch 已连接。")
+                    Text("Watch 未处于即时连接时，命令会先排队；打开 Watch App 后会执行。")
                         .font(.footnote)
                         .foregroundStyle(.orange)
                 }
@@ -498,11 +501,6 @@ struct PhoneDebugView: View {
     }
 
     private func beginCountdownAndRecording() {
-        guard receiver.isWatchReachable else {
-            receiver.setLastMessage("请先打开 Watch App，确认手表可连接。")
-            return
-        }
-
         countdownTimer?.invalidate()
 
         let label = normalizedGestureName
@@ -658,6 +656,11 @@ struct PhoneDebugView: View {
     private func handleImportedFile(_ url: URL, target: FileImportTarget) {
         switch target {
         case .audio:
+            guard FileImportTarget.isSupportedAudio(url) else {
+                receiver.setLastMessage("暂不支持该音频格式：\(url.pathExtension)")
+                AppDiagnostics.record("phone.audio.import.unsupported", ["file": url.lastPathComponent])
+                return
+            }
             selectedAudioFileName = url.lastPathComponent
             _ = receiver.sendAudioFile(url)
             AppDiagnostics.record("phone.audio.imported", ["file": url.lastPathComponent])
@@ -782,7 +785,7 @@ private enum FileImportTarget {
     var allowedContentTypes: [UTType] {
         switch self {
         case .audio:
-            return Self.audioTypes
+            return [.item]
         case .profile:
             return [.json]
         }
@@ -797,11 +800,11 @@ private enum FileImportTarget {
         }
     }
 
-    private static var audioTypes: [UTType] {
-        let extensions = ["mp3", "m4a", "wav", "caf", "aiff", "aif", "aac"]
-        let explicit = extensions.compactMap { UTType(filenameExtension: $0) }
-        return [.audio] + explicit
+    static func isSupportedAudio(_ url: URL) -> Bool {
+        supportedAudioExtensions.contains(url.pathExtension.lowercased())
     }
+
+    private static let supportedAudioExtensions = ["mp3", "m4a", "wav", "caf", "aiff", "aif", "aac"]
 }
 
 private struct ProductHeader: View {

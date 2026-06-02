@@ -5,15 +5,18 @@ import MotionSoundCore
 #endif
 
 struct MotionDebugView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var soundPlayer = WatchSoundPlayer()
     @StateObject private var recorder: WatchMotionRecorder
     @StateObject private var fileSender = WatchConnectivityFileSender()
+    @StateObject private var runtimeSession = WatchRuntimeSessionController()
     @State private var label = "punch"
     @State private var soundFileName = ""
     @State private var kind = GestureKind.burst
     @State private var exportedText = ""
     @State private var remoteCaptureState = "idle"
     @State private var remoteRecordingTimeoutTask: Task<Void, Never>?
+    @State private var runtimeStartTask: Task<Void, Never>?
 
     private let remoteRecordingLimitSeconds: UInt64 = 20
 
@@ -46,6 +49,12 @@ struct MotionDebugView: View {
                     Spacer()
                     Text(watchConnectionText)
                         .foregroundStyle(fileSender.isPhoneReachable ? .green : .secondary)
+                }
+                HStack {
+                    Text("监听")
+                    Spacer()
+                    Text(runtimeSession.isRunning ? "保持中" : runtimeSession.statusText)
+                        .foregroundStyle(runtimeSession.isRunning ? .green : .secondary)
                 }
                 HStack {
                     Text("动作")
@@ -111,9 +120,20 @@ struct MotionDebugView: View {
             fileSender.activate()
             fileSender.reloadReceivedSoundFiles()
             preloadReceivedSounds()
+            syncRuntimeSession(reason: "viewAppear")
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            AppDiagnostics.record("watch.scenePhase", ["phase": describe(newPhase)])
+            syncRuntimeSession(reason: "scenePhase.\(describe(newPhase))")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .watchApplicationDidBecomeActive)) { _ in
+            scheduleRuntimeStart(reason: "applicationDidBecomeActive", requireActiveScene: false)
         }
         .onChange(of: fileSender.receivedSoundFiles) {
             preloadReceivedSounds()
+        }
+        .onChange(of: fileSender.runtimePrepareRequestCount) {
+            syncRuntimeSession(reason: "phonePrepareRuntime")
         }
         .onChange(of: fileSender.lastReceivedProfileURL) {
             recorder.reloadSavedProfiles()
@@ -123,7 +143,10 @@ struct MotionDebugView: View {
         }
         .onDisappear {
             AppDiagnostics.record("watch.debugView.onDisappear")
+            runtimeStartTask?.cancel()
+            runtimeStartTask = nil
             recorder.stopLiveUpdates()
+            runtimeSession.stop(reason: "viewDisappear")
         }
     }
 
@@ -302,6 +325,7 @@ struct MotionDebugView: View {
                 AppDiagnostics.record("watch.remoteRecording.restart", ["label": label])
             }
             recorder.startRecording()
+            syncRuntimeSession(reason: "remoteRecording")
             scheduleRemoteRecordingTimeout(sampleRole: command.sampleRole)
             AppDiagnostics.record("watch.remoteRecording.start", ["label": label, "kind": kind.rawValue])
             remoteCaptureState = "recording"
@@ -393,5 +417,50 @@ struct MotionDebugView: View {
         guard let value else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func syncRuntimeSession(reason: String) {
+        switch scenePhase {
+        case .active:
+            scheduleRuntimeStart(reason: reason, requireActiveScene: true)
+        case .background:
+            runtimeStartTask?.cancel()
+            runtimeStartTask = nil
+            runtimeSession.stop(reason: "scenePhase.background")
+        case .inactive:
+            AppDiagnostics.record("watch.runtime.start.deferred", ["phase": "inactive", "reason": reason])
+            break
+        @unknown default:
+            break
+        }
+    }
+
+    private func scheduleRuntimeStart(reason: String, requireActiveScene: Bool) {
+        runtimeStartTask?.cancel()
+        runtimeStartTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled else { return }
+            if requireActiveScene, scenePhase != .active {
+                AppDiagnostics.record(
+                    "watch.runtime.start.cancelled",
+                    ["phase": describe(scenePhase), "reason": reason]
+                )
+                return
+            }
+            runtimeSession.start(reason: reason)
+        }
+    }
+
+    private func describe(_ phase: ScenePhase) -> String {
+        switch phase {
+        case .active:
+            return "active"
+        case .inactive:
+            return "inactive"
+        case .background:
+            return "background"
+        @unknown default:
+            return "unknown"
+        }
     }
 }

@@ -22,6 +22,8 @@
 		AA0000000000000000000013 /* MotionBurstGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000113 /* MotionBurstGate.swift */; };
 		AA0000000000000000000014 /* AppDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000114 /* AppDiagnostics.swift */; };
 		AA0000000000000000000015 /* MotionSoundWatch.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000100 /* MotionSoundWatch.app */; };
+		AA0000000000000000000016 /* WatchRuntimeSessionController.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000115 /* WatchRuntimeSessionController.swift */; };
+		AA0000000000000000000017 /* WatchAppLifecycleDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000116 /* WatchAppLifecycleDelegate.swift */; };
 		BB0000000000000000000001 /* MotionSoundPhoneApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000101 /* MotionSoundPhoneApp.swift */; };
 		BB0000000000000000000002 /* PhoneDebugView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000102 /* PhoneDebugView.swift */; };
 		BB0000000000000000000003 /* PhoneConnectivityReceiver.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000103 /* PhoneConnectivityReceiver.swift */; };
@@ -73,10 +75,14 @@
 		AA0000000000000000000112 /* WatchConnectivityFileSender.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchConnectivityFileSender.swift; sourceTree = "<group>"; };
 		AA0000000000000000000113 /* MotionBurstGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MotionBurstGate.swift; path = Sources/MotionSoundCore/MotionBurstGate.swift; sourceTree = SOURCE_ROOT; };
 		AA0000000000000000000114 /* AppDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AppDiagnostics.swift; path = Sources/MotionSoundCore/AppDiagnostics.swift; sourceTree = SOURCE_ROOT; };
+		AA0000000000000000000115 /* WatchRuntimeSessionController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchRuntimeSessionController.swift; sourceTree = "<group>"; };
+		AA0000000000000000000116 /* WatchAppLifecycleDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchAppLifecycleDelegate.swift; sourceTree = "<group>"; };
+		AA0000000000000000000117 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		BB0000000000000000000100 /* MotionSoundPhone.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MotionSoundPhone.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		BB0000000000000000000101 /* MotionSoundPhoneApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotionSoundPhoneApp.swift; sourceTree = "<group>"; };
 		BB0000000000000000000102 /* PhoneDebugView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneDebugView.swift; sourceTree = "<group>"; };
 		BB0000000000000000000103 /* PhoneConnectivityReceiver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneConnectivityReceiver.swift; sourceTree = "<group>"; };
+		BB0000000000000000000104 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -116,6 +122,9 @@
 				AA0000000000000000000103 /* WatchMotionRecorder.swift */,
 				AA0000000000000000000104 /* WatchSoundPlayer.swift */,
 				AA0000000000000000000112 /* WatchConnectivityFileSender.swift */,
+				AA0000000000000000000115 /* WatchRuntimeSessionController.swift */,
+				AA0000000000000000000116 /* WatchAppLifecycleDelegate.swift */,
+				AA0000000000000000000117 /* Info.plist */,
 			);
 			path = WatchAppPrototype;
 			sourceTree = "<group>";
@@ -150,6 +159,7 @@
 				BB0000000000000000000101 /* MotionSoundPhoneApp.swift */,
 				BB0000000000000000000102 /* PhoneDebugView.swift */,
 				BB0000000000000000000103 /* PhoneConnectivityReceiver.swift */,
+				BB0000000000000000000104 /* Info.plist */,
 			);
 			path = iPhoneAppPrototype;
 			sourceTree = "<group>";
@@ -267,6 +277,8 @@
 				AA0000000000000000000013 /* MotionBurstGate.swift in Sources */,
 				AA0000000000000000000014 /* AppDiagnostics.swift in Sources */,
 				AA0000000000000000000012 /* WatchConnectivityFileSender.swift in Sources */,
+				AA0000000000000000000016 /* WatchRuntimeSessionController.swift in Sources */,
+				AA0000000000000000000017 /* WatchAppLifecycleDelegate.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -422,12 +434,8 @@
 				DEVELOPMENT_ASSET_PATHS = "";
 				DEVELOPMENT_TEAM = RYFZ58VU4L;
 				ENABLE_PREVIEWS = YES;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = MotionSound;
-				INFOPLIST_KEY_NSMotionUsageDescription = "MotionSound uses Apple Watch motion data to record and recognize your custom gestures.";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
-				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.zhongsuhua.MotionSoundPhone;
-				INFOPLIST_KEY_WKRunsIndependentlyOfCompanionApp = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = WatchAppPrototype/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -455,12 +463,8 @@
 				DEVELOPMENT_ASSET_PATHS = "";
 				DEVELOPMENT_TEAM = RYFZ58VU4L;
 				ENABLE_PREVIEWS = YES;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = MotionSound;
-				INFOPLIST_KEY_NSMotionUsageDescription = "MotionSound uses Apple Watch motion data to record and recognize your custom gestures.";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
-				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.zhongsuhua.MotionSoundPhone;
-				INFOPLIST_KEY_WKRunsIndependentlyOfCompanionApp = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = WatchAppPrototype/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -486,10 +490,8 @@
 				DEVELOPMENT_ASSET_PATHS = "";
 				DEVELOPMENT_TEAM = RYFZ58VU4L;
 				ENABLE_PREVIEWS = YES;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = "MotionSound Phone";
-				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = iPhoneAppPrototype/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -515,10 +517,8 @@
 				DEVELOPMENT_ASSET_PATHS = "";
 				DEVELOPMENT_TEAM = RYFZ58VU4L;
 				ENABLE_PREVIEWS = YES;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = "MotionSound Phone";
-				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = iPhoneAppPrototype/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
