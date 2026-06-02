@@ -1,3 +1,4 @@
+import AVFoundation
 import Charts
 import SceneKit
 import SwiftUI
@@ -30,6 +31,7 @@ struct PhoneDebugView: View {
     @State private var trimPlaybackTask: Task<Void, Never>?
     @State private var isPreviewPlaying = false
     @State private var editingAsset: PhoneGestureAsset?
+    @State private var showingDiagnostics = false
 
     private var captureFiles: [ReceivedSyncedFile] {
         let csvFiles = receiver.receivedFiles
@@ -100,7 +102,7 @@ struct PhoneDebugView: View {
                     ProductHeader(
                         title: connectionTitle,
                         subtitle: connectionSubtitle,
-                        detail: receiver.lastMessage
+                        detail: nil
                     )
                     if currentStep != .library {
                         StepProgressView(currentStep: currentStep)
@@ -112,6 +114,15 @@ struct PhoneDebugView: View {
             .background(Color(.systemGroupedBackground))
             .navigationTitle("MotionSound")
             .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showingDiagnostics = true
+                        AppDiagnostics.record("phone.diagnostics.opened")
+                    } label: {
+                        Label("诊断", systemImage: "stethoscope")
+                    }
+                }
+
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         receiver.activate()
@@ -172,6 +183,16 @@ struct PhoneDebugView: View {
                     receiver.setLastMessage(error.localizedDescription)
                     AppDiagnostics.record(error: error, event: target.errorEvent)
                 }
+            }
+            .sheet(isPresented: $showingDiagnostics) {
+                PhoneDiagnosticsView(
+                    receiver: receiver,
+                    currentStep: currentStep,
+                    savedProfiles: savedProfiles,
+                    localAudioFiles: localAudioFiles,
+                    captureFiles: captureFiles,
+                    previewSamples: previewSamples
+                )
             }
         }
     }
@@ -595,7 +616,7 @@ struct PhoneDebugView: View {
             return "请保持 Watch 上的 MotionSound 打开。"
         }
         if receiver.activationStateDescription == "activated" {
-            return "iPhone 已启用 WatchConnectivity，但还没把手表端识别为本 App 的 companion。"
+            return "请确认手表端 App 已安装并打开。"
         }
         return "请先安装并打开 Watch App。"
     }
@@ -997,10 +1018,19 @@ struct PhoneDebugView: View {
                 return
             }
             do {
-                let savedURL = try copyImportedAudioToDocuments(url)
+                let importResult = try copyImportedAudioToDocuments(url)
+                let savedURL = importResult.fileURL
                 reloadLocalAudioFiles()
                 selectLocalAudio(savedURL)
-                AppDiagnostics.record("phone.audio.imported", ["file": savedURL.lastPathComponent])
+                receiver.setLastMessage("已导入音效：\(savedURL.lastPathComponent)")
+                AppDiagnostics.record(
+                    "phone.audio.imported",
+                    [
+                        "file": savedURL.lastPathComponent,
+                        "duration": String(format: "%.3f", importResult.duration),
+                        "size": importResult.fileSize,
+                    ]
+                )
             } catch {
                 receiver.setLastMessage(error.localizedDescription)
                 AppDiagnostics.record(error: error, event: "phone.audio.import.error", ["file": url.lastPathComponent])
@@ -1033,7 +1063,7 @@ struct PhoneDebugView: View {
         }
     }
 
-    private func copyImportedAudioToDocuments(_ url: URL) throws -> URL {
+    private func copyImportedAudioToDocuments(_ url: URL) throws -> AudioImportResult {
         let didAccess = url.startAccessingSecurityScopedResource()
         defer {
             if didAccess {
@@ -1041,6 +1071,7 @@ struct PhoneDebugView: View {
             }
         }
 
+        let metadata = try validateAudioFile(url)
         let documents = try FileManager.default.url(
             for: .documentDirectory,
             in: .userDomainMask,
@@ -1052,7 +1083,33 @@ struct PhoneDebugView: View {
             fileName: url.lastPathComponent
         )
         try FileManager.default.copyItem(at: url, to: destination)
-        return destination
+        return AudioImportResult(
+            fileURL: destination,
+            duration: metadata.duration,
+            fileSize: metadata.fileSize
+        )
+    }
+
+    private func validateAudioFile(_ url: URL) throws -> AudioImportMetadata {
+        let player = try AVAudioPlayer(contentsOf: url)
+        let duration = player.duration
+        guard duration.isFinite, duration > 0 else {
+            throw AudioImportError.invalidDuration
+        }
+
+        let fileSize = ((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize) ?? 0
+        if duration > 30 {
+            AppDiagnostics.record(
+                "phone.audio.import.longFile",
+                [
+                    "file": url.lastPathComponent,
+                    "duration": String(format: "%.3f", duration),
+                    "size": fileSize,
+                ]
+            )
+        }
+
+        return AudioImportMetadata(duration: duration, fileSize: fileSize)
     }
 
     private func availableAudioDestinationURL(directory: URL, fileName: String) -> URL {
@@ -1249,7 +1306,9 @@ private enum FileImportTarget {
     var allowedContentTypes: [UTType] {
         switch self {
         case .audio:
-            return [.data, .content, .item, .audio]
+            return [.audio] + Self.supportedAudioExtensions.compactMap {
+                UTType(filenameExtension: $0)
+            }
         case .profile:
             return [.json]
         }
@@ -1271,10 +1330,126 @@ private enum FileImportTarget {
     private static let supportedAudioExtensions = ["mp3", "m4a", "wav", "caf", "aiff", "aif", "aac"]
 }
 
+private struct AudioImportResult {
+    var fileURL: URL
+    var duration: Double
+    var fileSize: Int
+}
+
+private struct AudioImportMetadata {
+    var duration: Double
+    var fileSize: Int
+}
+
+private enum AudioImportError: LocalizedError {
+    case invalidDuration
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidDuration:
+            return "这个音频文件无法读取有效时长，请换一个 MP3、WAV、M4A 或 AAC 文件。"
+        }
+    }
+}
+
+private struct PhoneDiagnosticsView: View {
+    @ObservedObject var receiver: PhoneConnectivityReceiver
+    var currentStep: SetupStep
+    var savedProfiles: [PhoneGestureAsset]
+    var localAudioFiles: [URL]
+    var captureFiles: [ReceivedSyncedFile]
+    var previewSamples: [MotionSample]
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("连接") {
+                    DiagnosticsRow(label: "状态", value: receiver.activationStateDescription)
+                    DiagnosticsRow(label: "Watch App", value: receiver.isWatchAppInstalled ? "已安装" : "未确认")
+                    DiagnosticsRow(label: "即时连接", value: receiver.isWatchReachable ? "是" : "否")
+                    if let message = receiver.lastMessage, !message.isEmpty {
+                        DiagnosticsText(label: "最近消息", value: message)
+                    }
+                }
+
+                Section("动作与音频") {
+                    DiagnosticsRow(label: "当前步骤", value: currentStep.title)
+                    DiagnosticsRow(label: "已保存动作", value: "\(savedProfiles.count)")
+                    DiagnosticsRow(label: "本机音效", value: "\(localAudioFiles.count)")
+                    DiagnosticsRow(label: "录制样本", value: "\(captureFiles.count)")
+                    DiagnosticsRow(label: "预览采样点", value: "\(previewSamples.count)")
+                }
+
+                if let status = receiver.lastRecordingStatus {
+                    Section("最近录制") {
+                        DiagnosticsRow(label: "动作", value: status.label.isEmpty ? "未命名" : status.label)
+                        DiagnosticsRow(label: "状态", value: status.state)
+                        DiagnosticsRow(label: "采样点", value: "\(status.samples)")
+                        DiagnosticsRow(label: "CSV", value: status.csvQueued ? "已排队" : "未排队")
+                        if let fileName = status.fileName, !fileName.isEmpty {
+                            DiagnosticsText(label: "文件", value: fileName)
+                        }
+                        if let error = status.errorMessage, !error.isEmpty {
+                            DiagnosticsText(label: "错误", value: error)
+                        }
+                    }
+                }
+
+                Section("日志") {
+                    DiagnosticsText(label: "iPhone 日志位置", value: "Documents/MotionSoundLogs/app.log")
+                    DiagnosticsText(label: "Watch 触发日志", value: "用 scripts/fetch_app_logs.sh watch 导出 MotionSoundTriggerLogs")
+                }
+            }
+            .navigationTitle("诊断")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("完成") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct DiagnosticsRow: View {
+    var label: String
+    var value: String
+
+    var body: some View {
+        HStack {
+            Text(label)
+            Spacer()
+            Text(value)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.trailing)
+        }
+        .font(.subheadline)
+    }
+}
+
+private struct DiagnosticsText: View {
+    var label: String
+    var value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label)
+                .font(.subheadline)
+            Text(value)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+        }
+    }
+}
+
 private struct ProductHeader: View {
     var title: String
     var subtitle: String
-    var detail: String?
+    var detail: String? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {

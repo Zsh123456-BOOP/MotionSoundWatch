@@ -43,78 +43,22 @@ struct MotionDebugView: View {
                 .padding(.vertical, 4)
             }
 
-            Section {
-                HStack {
-                    Text("iPhone")
-                    Spacer()
-                    Text(watchConnectionText)
-                        .foregroundStyle(fileSender.isPhoneReachable ? .green : .secondary)
-                }
-                HStack {
-                    Text("监听")
-                    Spacer()
-                    Text(runtimeSession.isRunning ? "保持中" : runtimeSession.statusText)
-                        .foregroundStyle(runtimeSession.isRunning ? .green : .secondary)
-                }
-                HStack {
-                    Text("动作")
-                    Spacer()
-                    Text("\(recorder.loadedProfileCount)")
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                }
-                HStack {
-                    Text("音效")
-                    Spacer()
-                    Text("\(soundPlayer.preloadedCount)")
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                }
-                if recorder.isRecording {
-                    HStack {
-                        Text("采样")
-                        Spacer()
-                        Text("\(recorder.samples.count)")
-                            .monospacedDigit()
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-
             if recorder.triggerCount > 0 {
                 Section {
                     HStack {
-                        Text("触发")
+                        Text("触发次数")
                         Spacer()
                         Text("\(recorder.triggerCount)")
                             .font(.title3.weight(.semibold))
                             .monospacedDigit()
                     }
-                    HStack {
-                        Text("音频")
-                        Spacer()
-                        Text(triggerAudioStatusText)
-                            .foregroundStyle(recorder.lastTriggerAudioPlayed ? .green : .orange)
-                    }
-                    HStack {
-                        Text("有声/无声")
-                        Spacer()
-                        Text("\(recorder.audioPlayedTriggerCount)/\(recorder.audioMissingTriggerCount)")
-                            .monospacedDigit()
-                            .foregroundStyle(.secondary)
-                    }
-                    HStack {
-                        Text("音量")
-                        Spacer()
-                        Text(outputVolumeText)
-                            .monospacedDigit()
-                            .foregroundStyle(.secondary)
-                    }
                     if let profileName = recorder.lastTriggeredProfileName {
-                        Text("最近：\(profileName)")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
+                        HStack {
+                            Text("最近触发")
+                            Spacer()
+                            Text(profileName)
+                                .multilineTextAlignment(.trailing)
+                        }
                     }
                     if let event = recorder.lastRecognitionEvent,
                        event.triggered,
@@ -127,9 +71,9 @@ struct MotionDebugView: View {
                         recorder.markLastTriggerAsFalse()
                     }
                 }
-            } else if let summary = recorder.lastRecognitionSummary {
+            } else if recorder.loadedProfileCount > 0 {
                 Section {
-                    Text(summary)
+                    Text("做动作后，这里会显示最近触发和次数。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -273,10 +217,6 @@ struct MotionDebugView: View {
         if let transfer = fileSender.lastTransferMessage,
            !transfer.contains("队列") {
             return transfer
-        }
-        if let assessment = recorder.lastAssessment,
-           assessment.sampleCount > 0 {
-            return "已采集 \(assessment.sampleCount) 个采样点"
         }
         return nil
     }
