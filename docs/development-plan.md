@@ -555,6 +555,8 @@ Watch App
 
 ## 当前实现状态
 
+下一阶段产品、测试音效、UI 简化、音效序列和复杂动作规划见 `docs/next-stage-product-plan.md`。
+
 已完成：
 
 - `MotionSoundCore` Swift Package。
