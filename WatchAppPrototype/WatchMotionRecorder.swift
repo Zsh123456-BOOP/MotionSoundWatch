@@ -41,6 +41,7 @@ final class WatchMotionRecorder: ObservableObject {
     private var standardNegativeTemplates: [MotionTemplate] = []
     private var standardLabel: String?
     private var standardKind: GestureKind?
+    private var lastMotionHeartbeatAt: TimeInterval = 0
 
     init(soundPlayer: WatchSoundPlayer? = nil) {
         self.soundPlayer = soundPlayer
@@ -372,6 +373,7 @@ final class WatchMotionRecorder: ObservableObject {
 
         let sample = rawSample.makeSample(start: recordingStartTimestamp)
         latestSample = sample
+        recordMotionHeartbeatIfNeeded(sample: sample)
         if let segment = segmenter.ingest(sample) {
             lastSegment = segment
             AppDiagnostics.record(
@@ -413,12 +415,235 @@ final class WatchMotionRecorder: ObservableObject {
                     )
                 }
             }
+            persistRecognitionTraceIfNeeded(
+                segment: segment,
+                candidate: candidate,
+                rejectionReason: evaluation.burstGateRejectionReason,
+                audioPlayed: audioPlayed,
+                triggered: lastRecognitionEvent?.triggered == true
+            )
         }
 
         guard isRecording else { return }
         samples.append(sample)
         lastAssessment = validator.assess(samples)
         estimatedSampleRate = lastAssessment?.estimatedSampleRate ?? 0
+    }
+
+    private func persistRecognitionTraceIfNeeded(
+        segment: GestureSegment,
+        candidate: RecognitionCandidate?,
+        rejectionReason: BurstGateRejectionReason?,
+        audioPlayed: Bool,
+        triggered: Bool
+    ) {
+        do {
+            let directory = try recognitionTraceDirectory()
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+            let now = Date()
+            let baseName = recognitionTraceBaseName(
+                date: now,
+                outcome: recognitionOutcome(triggered: triggered, candidate: candidate, rejectionReason: rejectionReason),
+                profileName: candidate?.profile.name
+            )
+            let csvURL = directory.appendingPathComponent("\(baseName).csv")
+            let jsonURL = directory.appendingPathComponent("\(baseName).json")
+
+            try MotionSampleCSVCodec().encodeData(segment.samples).write(to: csvURL, options: [.atomic])
+            let metadata = recognitionTraceMetadata(
+                date: now,
+                segment: segment,
+                candidate: candidate,
+                rejectionReason: rejectionReason,
+                audioPlayed: audioPlayed,
+                triggered: triggered,
+                csvFileName: csvURL.lastPathComponent
+            )
+            let data = try JSONSerialization.data(withJSONObject: metadata, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: jsonURL, options: [.atomic])
+            pruneRecognitionTraceDirectory(directory, keepingNewestFilePairs: 80)
+            AppDiagnostics.record(
+                "watch.recognition.traceSaved",
+                [
+                    "csv": csvURL.lastPathComponent,
+                    "metadata": jsonURL.lastPathComponent,
+                    "samples": segment.samples.count,
+                    "triggered": triggered,
+                    "profile": candidate?.profile.name ?? "",
+                ]
+            )
+        } catch {
+            AppDiagnostics.record(error: error, event: "watch.recognition.traceSave.error")
+        }
+    }
+
+    private func recognitionTraceDirectory() throws -> URL {
+        let documents = try FileManager.default.url(
+            for: .documentDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+        return documents.appendingPathComponent("MotionSoundTriggerLogs", isDirectory: true)
+    }
+
+    private func recognitionTraceBaseName(date: Date, outcome: String, profileName: String?) -> String {
+        let timestampFormatter = DateFormatter()
+        timestampFormatter.calendar = Calendar(identifier: .gregorian)
+        timestampFormatter.locale = Locale(identifier: "en_US_POSIX")
+        timestampFormatter.timeZone = TimeZone(secondsFromGMT: 0)
+        timestampFormatter.dateFormat = "yyyyMMdd-HHmmss-SSS"
+
+        let profilePart = sanitizeTraceFileName(profileName ?? "no-profile")
+        return "\(timestampFormatter.string(from: date))-\(outcome)-\(profilePart)"
+    }
+
+    private func recognitionOutcome(
+        triggered: Bool,
+        candidate: RecognitionCandidate?,
+        rejectionReason: BurstGateRejectionReason?
+    ) -> String {
+        if recognitionRuntime.profiles.isEmpty {
+            return "no-profiles"
+        }
+        if triggered {
+            return "triggered"
+        }
+        if rejectionReason != nil {
+            return "rejected"
+        }
+        if candidate == nil {
+            return "no-candidate"
+        }
+        return "candidate-rejected"
+    }
+
+    private func recognitionTraceMetadata(
+        date: Date,
+        segment: GestureSegment,
+        candidate: RecognitionCandidate?,
+        rejectionReason: BurstGateRejectionReason?,
+        audioPlayed: Bool,
+        triggered: Bool,
+        csvFileName: String
+    ) -> [String: Any] {
+        let timestampFormatter = ISO8601DateFormatter()
+        timestampFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        var metadata: [String: Any] = [
+            "schemaVersion": 1,
+            "createdAt": timestampFormatter.string(from: date),
+            "csvFileName": csvFileName,
+            "outcome": recognitionOutcome(triggered: triggered, candidate: candidate, rejectionReason: rejectionReason),
+            "triggered": triggered,
+            "audioPlayed": audioPlayed,
+            "profileCount": recognitionRuntime.profiles.count,
+            "segmentKind": segment.kind.rawValue,
+            "sampleCount": segment.samples.count,
+            "duration": segment.duration,
+            "startTimestamp": segment.startTimestamp,
+            "endTimestamp": segment.endTimestamp,
+            "peakEnergy": segment.peakEnergy,
+            "peakAcceleration": segment.features.peakAcceleration,
+            "peakRotationRate": segment.features.peakRotationRate,
+            "peakJerk": segment.features.peakJerk,
+            "meanEnergy": segment.features.meanEnergy,
+            "dominantAxis": segment.features.dominantAxis,
+            "wearContext": [
+                "wristLocation": currentWearContext().wristLocation,
+                "crownOrientation": currentWearContext().crownOrientation,
+                "watchModel": currentWearContext().watchModel ?? "",
+                "osVersion": currentWearContext().osVersion ?? "",
+            ],
+        ]
+
+        if let rejectionReason {
+            metadata["rejectionReason"] = rejectionReason.rawValue
+        }
+        if let candidate {
+            metadata["candidate"] = [
+                "profileID": candidate.profile.id.uuidString,
+                "profileName": candidate.profile.name,
+                "profileKind": candidate.profile.kind.rawValue,
+                "distance": candidate.distance,
+                "threshold": candidate.profile.acceptanceThreshold,
+                "confidence": candidate.confidence,
+                "margin": candidate.margin ?? NSNull(),
+                "marginThreshold": candidate.profile.marginThreshold,
+                "secondBestDistance": candidate.secondBestDistance ?? NSNull(),
+                "shouldTrigger": candidate.shouldTrigger,
+                "soundFileName": candidate.profile.sound?.fileName ?? "",
+                "soundVolume": candidate.profile.sound?.volume ?? 0,
+            ]
+        }
+        return metadata
+    }
+
+    private func sanitizeTraceFileName(_ value: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        let scalars = value.unicodeScalars.map { scalar in
+            allowed.contains(scalar) ? Character(scalar) : "-"
+        }
+        let compact = String(scalars)
+            .split(separator: "-")
+            .joined(separator: "-")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-_"))
+        return compact.isEmpty ? "gesture" : compact
+    }
+
+    private func pruneRecognitionTraceDirectory(_ directory: URL, keepingNewestFilePairs limit: Int) {
+        do {
+            let jsonFiles = try FileManager.default.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+            )
+            .filter { $0.pathExtension == "json" }
+            .sorted { lhs, rhs in
+                modificationDate(lhs) > modificationDate(rhs)
+            }
+
+            for jsonURL in jsonFiles.dropFirst(limit) {
+                let csvURL = jsonURL.deletingPathExtension().appendingPathExtension("csv")
+                try? FileManager.default.removeItem(at: jsonURL)
+                try? FileManager.default.removeItem(at: csvURL)
+            }
+        } catch {
+            AppDiagnostics.record(error: error, event: "watch.recognition.tracePrune.error")
+        }
+    }
+
+    private func modificationDate(_ url: URL) -> Date {
+        ((try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate) ?? .distantPast
+    }
+
+    private func recordMotionHeartbeatIfNeeded(sample: MotionSample) {
+        guard isLive else { return }
+        let now = sample.timestamp
+        guard now - lastMotionHeartbeatAt >= 2 else { return }
+        lastMotionHeartbeatAt = now
+
+        let accelerationMagnitude = sqrt(
+            sample.userAcceleration.x * sample.userAcceleration.x
+                + sample.userAcceleration.y * sample.userAcceleration.y
+                + sample.userAcceleration.z * sample.userAcceleration.z
+        )
+        let rotationMagnitude = sqrt(
+            sample.rotationRate.x * sample.rotationRate.x
+                + sample.rotationRate.y * sample.rotationRate.y
+                + sample.rotationRate.z * sample.rotationRate.z
+        )
+        AppDiagnostics.record(
+            "watch.motion.heartbeat",
+            [
+                "timestamp": sample.timestamp,
+                "acceleration": accelerationMagnitude,
+                "rotation": rotationMagnitude,
+                "isRecording": isRecording,
+                "profileCount": recognitionRuntime.profiles.count,
+                "loadedProfileCount": loadedProfileCount,
+            ]
+        )
     }
 
     private func updateRecognitionSummary(

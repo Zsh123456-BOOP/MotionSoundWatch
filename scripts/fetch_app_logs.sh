@@ -45,4 +45,15 @@ xcrun devicectl device copy from \
   --source Documents/MotionSoundLogs \
   --destination "$destination"
 
+if xcrun devicectl device copy from \
+  --device "$device_id" \
+  --domain-type appDataContainer \
+  --domain-identifier "$bundle_id" \
+  --source Documents/MotionSoundTriggerLogs \
+  --destination "$destination" >/dev/null 2>&1; then
+  :
+else
+  echo "No MotionSoundTriggerLogs directory found on ${target}." >&2
+fi
+
 echo "$destination"
