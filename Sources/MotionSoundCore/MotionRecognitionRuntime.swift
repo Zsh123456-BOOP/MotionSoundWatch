@@ -71,10 +71,56 @@ public struct GestureRecognitionRuntime: Sendable {
     }
 
     public mutating func replaceProfiles(_ profiles: [GestureProfile]) {
-        self.profiles = profiles
+        self.profiles = profiles.map(runtimeAdjustedProfile)
         lastTriggerTimes = lastTriggerTimes.filter { id, _ in
             profiles.contains { $0.id == id }
         }
+    }
+
+    private func runtimeAdjustedProfile(_ profile: GestureProfile) -> GestureProfile {
+        guard profile.signature != nil else {
+            return profile
+        }
+
+        var adjusted = profile
+        var thresholds = adjusted.thresholds ?? ThresholdProfile()
+        let isSingleTemplate = adjusted.templates.count <= 1
+        let minimumTriggerScore: Double
+        let minimumMarginScore: Double
+
+        switch adjusted.signature?.primaryKind {
+        case .impulse:
+            minimumTriggerScore = isSingleTemplate ? 0.80 : 0.72
+            minimumMarginScore = isSingleTemplate ? 0.14 : 0.08
+        case .rotation:
+            minimumTriggerScore = isSingleTemplate ? 0.78 : 0.70
+            minimumMarginScore = isSingleTemplate ? 0.16 : 0.08
+        case .oscillation:
+            minimumTriggerScore = isSingleTemplate ? 0.76 : 0.68
+            minimumMarginScore = isSingleTemplate ? 0.14 : 0.08
+        case .hold:
+            minimumTriggerScore = isSingleTemplate ? 0.80 : 0.72
+            minimumMarginScore = isSingleTemplate ? 0.12 : 0.08
+        case .sweep:
+            minimumTriggerScore = isSingleTemplate ? 0.78 : 0.70
+            minimumMarginScore = isSingleTemplate ? 0.14 : 0.08
+        case .pause:
+            minimumTriggerScore = 0.84
+            minimumMarginScore = 0.16
+        case .free, nil:
+            minimumTriggerScore = isSingleTemplate ? 0.82 : 0.74
+            minimumMarginScore = isSingleTemplate ? 0.16 : 0.10
+        }
+
+        thresholds.triggerScore = max(thresholds.triggerScore, minimumTriggerScore)
+        thresholds.marginScore = max(thresholds.marginScore, minimumMarginScore)
+        adjusted.thresholds = thresholds
+        adjusted.cooldownSeconds = max(adjusted.cooldownSeconds, isSingleTemplate ? 1.4 : 1.0)
+        if var policy = adjusted.triggerPolicy {
+            policy.cooldownSeconds = max(policy.cooldownSeconds, adjusted.cooldownSeconds)
+            adjusted.triggerPolicy = policy
+        }
+        return adjusted
     }
 
     public mutating func ingest(

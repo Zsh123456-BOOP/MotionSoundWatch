@@ -50,6 +50,8 @@ final class WatchMotionRecorder: ObservableObject {
     )
     private var recognitionRuntime = GestureRecognitionRuntime()
     private var recordingStartTimestamp: TimeInterval?
+    private var recordingPreviousRawTimestamp: TimeInterval?
+    private var recordingElapsedTimestamp: TimeInterval = 0
     private var liveStartTimestamp: TimeInterval?
     private var standardTemplates: [MotionTemplate] = []
     private var standardNegativeTemplates: [MotionTemplate] = []
@@ -124,6 +126,8 @@ final class WatchMotionRecorder: ObservableObject {
         isRecording = false
         liveStartTimestamp = nil
         recordingStartTimestamp = nil
+        recordingPreviousRawTimestamp = nil
+        recordingElapsedTimestamp = 0
         firstMotionSampleLogged = false
         AppDiagnostics.record("watch.motion.stopLiveUpdates")
     }
@@ -132,6 +136,8 @@ final class WatchMotionRecorder: ObservableObject {
         samples.removeAll(keepingCapacity: true)
         lastAssessment = nil
         recordingStartTimestamp = nil
+        recordingPreviousRawTimestamp = nil
+        recordingElapsedTimestamp = 0
         estimatedSampleRate = 0
         lastSegment = nil
         savedProfileURL = nil
@@ -521,10 +527,38 @@ final class WatchMotionRecorder: ObservableObject {
         }
 
         guard isRecording else { return }
-        let recordingSample = rawSample.makeSample(start: recordingStartTimestamp)
+        let recordingSample = normalizedRecordingSample(from: rawSample)
         samples.append(recordingSample)
         lastAssessment = validator.assess(samples)
         estimatedSampleRate = lastAssessment?.estimatedSampleRate ?? 0
+    }
+
+    private func normalizedRecordingSample(from rawSample: RawMotionSample) -> MotionSample {
+        let nominalInterval = motionManager.deviceMotionUpdateInterval > 0
+            ? motionManager.deviceMotionUpdateInterval
+            : 0.02
+        if let previous = recordingPreviousRawTimestamp {
+            let rawDelta = rawSample.timestamp - previous
+            if rawDelta > 0, rawDelta <= 0.20 {
+                recordingElapsedTimestamp += rawDelta
+            } else {
+                recordingElapsedTimestamp += nominalInterval
+                if rawDelta > 0.50 {
+                    AppDiagnostics.record(
+                        "watch.recording.timestampGap.clamped",
+                        [
+                            "rawDelta": rawDelta,
+                            "nominalDelta": nominalInterval,
+                            "sampleCount": samples.count,
+                        ]
+                    )
+                }
+            }
+        } else {
+            recordingElapsedTimestamp = 0
+        }
+        recordingPreviousRawTimestamp = rawSample.timestamp
+        return rawSample.makeSample(timestamp: recordingElapsedTimestamp)
     }
 
     private func scheduleMotionCallbackDiagnostic(previousCount: Int) {
@@ -1004,6 +1038,16 @@ private struct RawMotionSample: Sendable {
     func makeSample(start: TimeInterval?) -> MotionSample {
         MotionSample(
             timestamp: timestamp - (start ?? timestamp),
+            userAcceleration: userAcceleration,
+            rotationRate: rotationRate,
+            gravity: gravity,
+            attitude: attitude
+        )
+    }
+
+    func makeSample(timestamp: TimeInterval) -> MotionSample {
+        MotionSample(
+            timestamp: timestamp,
             userAcceleration: userAcceleration,
             rotationRate: rotationRate,
             gravity: gravity,

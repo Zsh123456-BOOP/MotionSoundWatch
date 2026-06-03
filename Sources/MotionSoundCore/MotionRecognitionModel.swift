@@ -546,10 +546,9 @@ public struct MotionTokenizer: Sendable {
             return .hold
         }
 
-        if features.integratedRotationAngle >= .pi * 0.65,
-           features.rotationAxisStability >= 0.48,
-           features.duration >= 0.45 {
-            return .rotation
+        if (features.peakAcc >= 1.6 || features.peakJerk >= 32 || features.peakGyro >= 6.0),
+           features.duration <= 2.2 {
+            return .impulse
         }
 
         if features.zeroCrossingCount >= 3,
@@ -558,9 +557,11 @@ public struct MotionTokenizer: Sendable {
             return .oscillation
         }
 
-        if (features.peakAcc >= 1.2 || features.peakJerk >= 28 || features.peakGyro >= 4.0),
-           features.duration <= 1.6 {
-            return .impulse
+        if features.integratedRotationAngle >= .pi * 1.15,
+           features.rotationAxisStability >= 0.55,
+           features.zeroCrossingCount <= max(5, Int(features.duration * 2.5)),
+           features.duration >= 0.45 {
+            return .rotation
         }
 
         if features.directionalityScore >= 0.42,
@@ -674,12 +675,14 @@ public struct GestureSignatureBuilder: Sendable {
             base = templateCount >= 3 ? 0.70 : 0.76
         }
         let strictAdjustment = (strictness - 0.5) * 0.14
+        let singleTemplateAdjustment = templateCount <= 1 ? 0.05 : 0
+        let marginScore = templateCount >= 3 ? 0.06 : (templateCount == 2 ? 0.08 : 0.14)
         return ThresholdProfile(
-            triggerScore: max(0.52, min(0.9, base + strictAdjustment)),
+            triggerScore: max(0.52, min(0.92, base + strictAdjustment + singleTemplateAdjustment)),
             rejectScore: max(0.35, base - 0.22),
-            marginScore: templateCount >= 2 ? 0.05 : 0,
+            marginScore: marginScore,
             minEnergy: signature.primaryKind == .impulse ? 0.25 : nil,
-            minAngle: signature.rotation.map { max(.pi * 0.35, $0.totalAngleRadians * 0.55) },
+            minAngle: signature.rotation.map { max(.pi * 0.75, $0.totalAngleRadians * 0.70) },
             minOscillationCount: signature.oscillation.map { max(0.5, $0.count * 0.55) },
             minHoldDuration: signature.hold.map { max(0.25, $0.duration * 0.65) },
             strictness: strictness
@@ -714,7 +717,7 @@ public struct GestureSignatureBuilder: Sendable {
     }
 
     private func makeRotationSignature(features: [GestureSampleFeatures]) -> RotationSignature? {
-        let rotations = features.filter { tokenizer.classify($0) == .rotation || $0.integratedRotationAngle >= .pi * 0.65 }
+        let rotations = features.filter { tokenizer.classify($0) == .rotation || ($0.integratedRotationAngle >= .pi * 1.15 && $0.rotationAxisStability >= 0.55) }
         guard !rotations.isEmpty else { return nil }
         let angle = average(rotations.map(\.integratedRotationAngle))
         return RotationSignature(
@@ -877,6 +880,10 @@ public struct MotionRecognitionRouter: Sendable {
                 let secondScore = second.recognitionScore ?? second.confidence
                 best?.margin = bestScore - secondScore
                 best?.secondBestDistance = second.distance
+                if let marginScore = bestCandidate.profile.thresholds?.marginScore,
+                   bestScore - secondScore < marginScore {
+                    best?.rejectReason = .marginTooSmall
+                }
             }
         }
 
@@ -907,6 +914,15 @@ public struct MotionRecognitionRouter: Sendable {
         let score: Double
         let rejectReason: RejectReason?
 
+        if isHardTypeMismatch(signature: signature, token: token, routedKind: kind, features: features) {
+            return makeCandidateAndReport(
+                profile: profile,
+                kind: kind,
+                score: 0.25,
+                rejectReason: .typeMismatch
+            )
+        }
+
         switch kind {
         case .impulse:
             (score, rejectReason) = impulseScore(features: features, signature: signature.impulse)
@@ -920,6 +936,20 @@ public struct MotionRecognitionRouter: Sendable {
             (score, rejectReason) = fallbackScore(profile: profile, samples: segment.samples)
         }
 
+        return makeCandidateAndReport(
+            profile: profile,
+            kind: kind,
+            score: score,
+            rejectReason: rejectReason
+        )
+    }
+
+    private func makeCandidateAndReport(
+        profile: GestureProfile,
+        kind: MotionTokenKind,
+        score: Double,
+        rejectReason: RejectReason?
+    ) -> (candidate: RecognitionCandidate, report: CandidateRecognitionReport) {
         let threshold = profile.thresholds?.triggerScore ?? 0.68
         let distance = 1 - score
         let candidate = RecognitionCandidate(
@@ -956,7 +986,40 @@ public struct MotionRecognitionRouter: Sendable {
         if token.kind == .free {
             return signature.primaryKind
         }
+        if token.kind == .impulse, signature.impulse != nil {
+            return .impulse
+        }
+        if token.kind == .hold, signature.hold != nil {
+            return .hold
+        }
         return signature.primaryKind
+    }
+
+    private func isHardTypeMismatch(
+        signature: GestureSignature,
+        token: MotionToken?,
+        routedKind: MotionTokenKind,
+        features: GestureSampleFeatures
+    ) -> Bool {
+        guard let token else { return false }
+        guard token.kind != .free else { return false }
+        guard token.kind != signature.primaryKind, !signature.secondaryKinds.contains(token.kind) else {
+            return false
+        }
+
+        switch (signature.primaryKind, token.kind) {
+        case (.rotation, .oscillation):
+            let requiredAngle = signature.rotation.map { max(.pi * 0.75, $0.totalAngleRadians * 0.70) } ?? .pi
+            return features.integratedRotationAngle < requiredAngle
+        case (.oscillation, .impulse):
+            return signature.impulse == nil
+        case (.impulse, .rotation), (.impulse, .oscillation), (.rotation, .impulse):
+            return true
+        case (.hold, _):
+            return token.kind != .hold
+        default:
+            return routedKind != token.kind
+        }
     }
 
     private func impulseScore(features: GestureSampleFeatures, signature: ImpulseSignature?) -> (Double, RejectReason?) {
@@ -979,11 +1042,12 @@ public struct MotionRecognitionRouter: Sendable {
             return (0.25, .rotationAngleTooSmall)
         }
         let angleScore = ratioScore(value: features.integratedRotationAngle, reference: signature.totalAngleRadians, lower: 0.48, upper: 1.85)
-        let axisScore = clamp(features.rotationAxisStability / max(signature.axisStability * 0.75, 0.25))
+        let axisAlignment = abs(dot(features.dominantRotationAxis, signature.axis))
+        let axisScore = clamp(features.rotationAxisStability / max(signature.axisStability * 0.75, 0.25)) * axisAlignment
         let durationScore = ratioScore(value: features.duration, reference: signature.duration, lower: 0.35, upper: 2.6)
         let directionScore = features.signedRotationAngle.sign == signature.direction.sign ? 1.0 : 0.60
         let speedScore = ratioScore(value: features.meanGyro, reference: max(signature.angularSpeedMean, 0.05), lower: 0.20, upper: 3.4)
-        let score = angleScore * 0.34 + axisScore * 0.22 + durationScore * 0.16 + directionScore * 0.18 + speedScore * 0.10
+        let score = angleScore * 0.30 + axisScore * 0.28 + durationScore * 0.13 + directionScore * 0.18 + speedScore * 0.11
         let reason: RejectReason? = axisScore < 0.45 ? .rotationAxisUnstable : (score >= 0.55 ? nil : .scoreBelowThreshold)
         return (clamp(score), reason)
     }

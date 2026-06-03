@@ -607,6 +607,63 @@ import Foundation
     #expect(event.logEntry.candidateReports.first?.rejectReason == .rotationAngleTooSmall)
 }
 
+@Test func rotationRecognizerRejectsDifferentRotationAxis() {
+    let template = MotionTemplateBuilder().makeTemplate(
+        label: "turn-z",
+        kind: .sequence,
+        samples: syntheticRotation(duration: 1.2, angle: .pi * 2, axis: 2)
+    )
+    let profile = GestureProfileBuilder().makeProfile(name: "turn-z", kind: .sequence, templates: [template])
+    let samples = syntheticRotation(duration: 1.2, angle: .pi * 2, axis: 0)
+    let segment = GestureSegment(
+        kind: .sequence,
+        samples: samples,
+        startTimestamp: 30,
+        endTimestamp: 31.2,
+        peakTimestamp: 30.6,
+        peakEnergy: 0.8,
+        features: MotionEnergyAnalyzer().features(for: samples)
+    )
+    var runtime = GestureRecognitionRuntime(profiles: [profile])
+
+    let event = runtime.recognize(segment: segment, now: 31.3)
+
+    #expect(event.triggered == false)
+    #expect(event.candidate?.recognizerKind == .rotation)
+    #expect(event.logEntry.rejectReason == .rotationAxisUnstable)
+}
+
+@Test func signatureProfilesRequireRuntimeMarginForSingleTemplate() {
+    let builder = MotionTemplateBuilder()
+    let xProfile = GestureProfileBuilder().makeProfile(
+        name: "turn-x",
+        kind: .sequence,
+        templates: [builder.makeTemplate(label: "turn-x", kind: .sequence, samples: syntheticRotation(duration: 1.2, angle: .pi * 2, axis: 0))]
+    )
+    let nearXProfile = GestureProfileBuilder().makeProfile(
+        name: "turn-x-near",
+        kind: .sequence,
+        templates: [builder.makeTemplate(label: "turn-x-near", kind: .sequence, samples: syntheticRotation(duration: 1.3, angle: .pi * 2.05, axis: 0))]
+    )
+    let samples = syntheticRotation(duration: 1.25, angle: .pi * 2.02, axis: 0)
+    let segment = GestureSegment(
+        kind: .sequence,
+        samples: samples,
+        startTimestamp: 40,
+        endTimestamp: 41.25,
+        peakTimestamp: 40.6,
+        peakEnergy: 0.8,
+        features: MotionEnergyAnalyzer().features(for: samples)
+    )
+    var runtime = GestureRecognitionRuntime(profiles: [xProfile, nearXProfile])
+
+    let event = runtime.recognize(segment: segment, now: 41.3)
+
+    #expect(event.triggered == false)
+    #expect(event.candidate?.rejectReason == .marginTooSmall)
+    #expect(event.logEntry.rejectReason == .marginTooSmall)
+}
+
 @Test func profileFileStoreSavesListsLoadsAndDeletesArchives() throws {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("MotionSoundCoreTests-\(UUID().uuidString)", isDirectory: true)
