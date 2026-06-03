@@ -468,7 +468,11 @@ final class WatchMotionRecorder: ObservableObject {
                 now: liveSample.timestamp,
                 wearContext: currentWearContext(),
                 audioPlayed: audioPlayed,
-                burstGateRejectionReason: evaluation.burstGateRejectionReason
+                burstGateRejectionReason: evaluation.burstGateRejectionReason,
+                tokens: evaluation.tokens,
+                classifiedKind: evaluation.classifiedKind,
+                candidateReports: evaluation.candidateReports,
+                rejectReason: evaluation.rejectReason
             )
             if lastRecognitionEvent?.triggered == true {
                 if let profileID = lastRecognitionEvent?.profile?.id {
@@ -507,6 +511,10 @@ final class WatchMotionRecorder: ObservableObject {
                 segment: segment,
                 candidate: candidate,
                 rejectionReason: evaluation.burstGateRejectionReason,
+                rejectReason: evaluation.rejectReason,
+                tokens: evaluation.tokens,
+                classifiedKind: evaluation.classifiedKind,
+                candidateReports: evaluation.candidateReports,
                 audioPlayed: audioPlayed,
                 triggered: lastRecognitionEvent?.triggered == true
             )
@@ -562,6 +570,10 @@ final class WatchMotionRecorder: ObservableObject {
         segment: GestureSegment,
         candidate: RecognitionCandidate?,
         rejectionReason: BurstGateRejectionReason?,
+        rejectReason: RejectReason?,
+        tokens: [MotionToken],
+        classifiedKind: MotionTokenKind?,
+        candidateReports: [CandidateRecognitionReport],
         audioPlayed: Bool,
         triggered: Bool
     ) {
@@ -593,6 +605,10 @@ final class WatchMotionRecorder: ObservableObject {
                 segment: segment,
                 candidate: candidate,
                 rejectionReason: rejectionReason,
+                rejectReason: rejectReason,
+                tokens: tokens,
+                classifiedKind: classifiedKind,
+                candidateReports: candidateReports,
                 audioPlayed: audioPlayed,
                 triggered: triggered,
                 csvFileName: csvURL.lastPathComponent
@@ -696,6 +712,10 @@ final class WatchMotionRecorder: ObservableObject {
         segment: GestureSegment,
         candidate: RecognitionCandidate?,
         rejectionReason: BurstGateRejectionReason?,
+        rejectReason: RejectReason?,
+        tokens: [MotionToken],
+        classifiedKind: MotionTokenKind?,
+        candidateReports: [CandidateRecognitionReport],
         audioPlayed: Bool,
         triggered: Bool,
         csvFileName: String
@@ -711,6 +731,7 @@ final class WatchMotionRecorder: ObservableObject {
             "audioPlayed": audioPlayed,
             "profileCount": recognitionRuntime.profiles.count,
             "segmentKind": segment.kind.rawValue,
+            "classifiedKind": classifiedKind?.rawValue ?? "",
             "sampleCount": segment.samples.count,
             "duration": segment.duration,
             "startTimestamp": segment.startTimestamp,
@@ -732,13 +753,53 @@ final class WatchMotionRecorder: ObservableObject {
         if let rejectionReason {
             metadata["rejectionReason"] = rejectionReason.rawValue
         }
+        if let rejectReason {
+            metadata["rejectReason"] = rejectReason.rawValue
+        }
+        metadata["tokens"] = tokens.map { token in
+            [
+                "kind": token.kind.rawValue,
+                "startTime": token.startTime,
+                "endTime": token.endTime,
+                "duration": token.duration,
+                "direction": token.direction,
+                "magnitude": token.magnitude,
+                "confidence": token.confidence,
+                "mainAxis": [
+                    "x": token.mainAxis.x,
+                    "y": token.mainAxis.y,
+                    "z": token.mainAxis.z,
+                ],
+                "peakAcc": token.peakAcc ?? NSNull(),
+                "peakGyro": token.peakGyro ?? NSNull(),
+                "integratedAngle": token.integratedAngle ?? NSNull(),
+                "oscillationCount": token.oscillationCount ?? NSNull(),
+                "holdStability": token.holdStability ?? NSNull(),
+            ] as [String: Any]
+        }
+        metadata["candidateReports"] = candidateReports.map { report in
+            [
+                "profileID": report.profileID.uuidString,
+                "profileName": report.profileName,
+                "recognizerKind": report.recognizerKind.rawValue,
+                "score": report.score,
+                "threshold": report.threshold,
+                "margin": report.margin ?? NSNull(),
+                "shouldTrigger": report.shouldTrigger,
+                "rejectReason": report.rejectReason?.rawValue ?? "",
+            ] as [String: Any]
+        }
         if let candidate {
             metadata["candidate"] = [
                 "profileID": candidate.profile.id.uuidString,
                 "profileName": candidate.profile.name,
                 "profileKind": candidate.profile.kind.rawValue,
+                "recognizerKind": candidate.recognizerKind?.rawValue ?? "",
+                "recognitionScore": candidate.recognitionScore ?? NSNull(),
+                "rejectReason": candidate.rejectReason?.rawValue ?? "",
                 "distance": candidate.distance,
                 "threshold": candidate.profile.acceptanceThreshold,
+                "scoreThreshold": candidate.profile.thresholds?.triggerScore ?? NSNull(),
                 "confidence": candidate.confidence,
                 "margin": candidate.margin ?? NSNull(),
                 "marginThreshold": candidate.profile.marginThreshold,

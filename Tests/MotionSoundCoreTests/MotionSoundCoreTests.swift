@@ -540,6 +540,73 @@ import Foundation
     #expect(decoded.profiles[0].soundSequence?.map(\.fileName) == ["第1次.wav", "第2次.wav", "第3次.mp3"])
 }
 
+@Test func signatureBuilderClassifiesRotationProfile() {
+    let template = MotionTemplateBuilder().makeTemplate(
+        label: "turn",
+        kind: .sequence,
+        samples: syntheticRotation(duration: 1.2, angle: .pi * 2)
+    )
+    let profile = GestureProfileBuilder().makeProfile(name: "turn", kind: .sequence, templates: [template])
+
+    #expect(profile.signature?.primaryKind == .rotation)
+    #expect((profile.signature?.rotation?.totalAngleRadians ?? 0) > .pi * 1.5)
+    #expect(profile.thresholds?.minAngle != nil)
+}
+
+@Test func rotationRecognizerAcceptsSlowerSameCircle() {
+    let template = MotionTemplateBuilder().makeTemplate(
+        label: "turn",
+        kind: .sequence,
+        samples: syntheticRotation(duration: 1.2, angle: .pi * 2)
+    )
+    let profile = GestureProfileBuilder().makeProfile(name: "turn", kind: .sequence, templates: [template])
+    let samples = syntheticRotation(duration: 3.0, angle: .pi * 2.05)
+    let segment = GestureSegment(
+        kind: .sequence,
+        samples: samples,
+        startTimestamp: 10,
+        endTimestamp: 13,
+        peakTimestamp: 11.5,
+        peakEnergy: 0.8,
+        features: MotionEnergyAnalyzer().features(for: samples)
+    )
+    var runtime = GestureRecognitionRuntime(profiles: [profile])
+
+    let event = runtime.recognize(segment: segment, now: 13.1)
+
+    #expect(event.triggered)
+    #expect(event.candidate?.recognizerKind == .rotation)
+    #expect(event.logEntry.classifiedKind == .rotation)
+    #expect(event.logEntry.tokens.first?.integratedAngle ?? 0 > .pi * 1.5)
+}
+
+@Test func rotationRecognizerExplainsAngleTooSmallRejection() {
+    let template = MotionTemplateBuilder().makeTemplate(
+        label: "turn",
+        kind: .sequence,
+        samples: syntheticRotation(duration: 1.2, angle: .pi * 2)
+    )
+    let profile = GestureProfileBuilder().makeProfile(name: "turn", kind: .sequence, templates: [template])
+    let samples = syntheticRotation(duration: 1.0, angle: .pi * 0.35)
+    let segment = GestureSegment(
+        kind: .sequence,
+        samples: samples,
+        startTimestamp: 20,
+        endTimestamp: 21,
+        peakTimestamp: 20.5,
+        peakEnergy: 0.2,
+        features: MotionEnergyAnalyzer().features(for: samples)
+    )
+    var runtime = GestureRecognitionRuntime(profiles: [profile])
+
+    let event = runtime.recognize(segment: segment, now: 21.1)
+
+    #expect(event.triggered == false)
+    #expect(event.candidate?.recognizerKind == .rotation)
+    #expect(event.logEntry.rejectReason == .rotationAngleTooSmall)
+    #expect(event.logEntry.candidateReports.first?.rejectReason == .rotationAngleTooSmall)
+}
+
 @Test func profileFileStoreSavesListsLoadsAndDeletesArchives() throws {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("MotionSoundCoreTests-\(UUID().uuidString)", isDirectory: true)
@@ -899,6 +966,35 @@ private func syntheticSequence(
                 y: amplitude * sin(angle * 0.5) * 0.8,
                 z: amplitude * cos(angle * 1.2) * 0.35
             )
+        )
+    }
+}
+
+private func syntheticRotation(
+    duration: Double,
+    angle: Double,
+    sampleRate: Double = 50,
+    axis: Int = 2
+) -> [MotionSample] {
+    let count = max(12, Int(duration * sampleRate))
+    let angularVelocity = angle / duration
+    return (0..<count).map { index in
+        let progress = Double(index) / Double(count - 1)
+        let timestamp = progress * duration
+        let wobble = 0.03 * sin(progress * .pi * 4)
+        let rotation: MotionVector3
+        switch axis {
+        case 0:
+            rotation = MotionVector3(x: angularVelocity, y: wobble, z: wobble * 0.5)
+        case 1:
+            rotation = MotionVector3(x: wobble, y: angularVelocity, z: wobble * 0.5)
+        default:
+            rotation = MotionVector3(x: wobble, y: wobble * 0.5, z: angularVelocity)
+        }
+        return MotionSample(
+            timestamp: timestamp,
+            userAcceleration: MotionVector3(x: wobble * 0.2, y: wobble * 0.1, z: 0.02 * cos(progress * .pi * 2)),
+            rotationRate: rotation
         )
     }
 }

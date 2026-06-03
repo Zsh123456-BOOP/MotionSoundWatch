@@ -23,13 +23,25 @@ public struct GestureRecognitionEvent: Equatable, Sendable {
 public struct RecognitionEvaluation: Equatable, Sendable {
     public var candidate: RecognitionCandidate?
     public var burstGateRejectionReason: BurstGateRejectionReason?
+    public var tokens: [MotionToken]
+    public var classifiedKind: MotionTokenKind?
+    public var candidateReports: [CandidateRecognitionReport]
+    public var rejectReason: RejectReason?
 
     public init(
         candidate: RecognitionCandidate?,
-        burstGateRejectionReason: BurstGateRejectionReason? = nil
+        burstGateRejectionReason: BurstGateRejectionReason? = nil,
+        tokens: [MotionToken] = [],
+        classifiedKind: MotionTokenKind? = nil,
+        candidateReports: [CandidateRecognitionReport] = [],
+        rejectReason: RejectReason? = nil
     ) {
         self.candidate = candidate
         self.burstGateRejectionReason = burstGateRejectionReason
+        self.tokens = tokens
+        self.classifiedKind = classifiedKind
+        self.candidateReports = candidateReports
+        self.rejectReason = rejectReason
     }
 }
 
@@ -38,6 +50,7 @@ public struct GestureRecognitionRuntime: Sendable {
     public var matcher: MotionTemplateMatcher
     public var segmenter: MotionGestureSegmenter
     public var burstGate: MotionBurstGate
+    public var router: MotionRecognitionRouter
     public private(set) var lastTriggerTimes: [UUID: Double]
     public private(set) var logs: [RecognitionLogEntry]
 
@@ -45,12 +58,14 @@ public struct GestureRecognitionRuntime: Sendable {
         profiles: [GestureProfile] = [],
         matcher: MotionTemplateMatcher = MotionTemplateMatcher(),
         segmenter: MotionGestureSegmenter = MotionGestureSegmenter(),
-        burstGate: MotionBurstGate = MotionBurstGate()
+        burstGate: MotionBurstGate = MotionBurstGate(),
+        router: MotionRecognitionRouter = MotionRecognitionRouter()
     ) {
         self.profiles = profiles
         self.matcher = matcher
         self.segmenter = segmenter
         self.burstGate = burstGate
+        self.router = router
         self.lastTriggerTimes = [:]
         self.logs = []
     }
@@ -96,7 +111,11 @@ public struct GestureRecognitionRuntime: Sendable {
             batteryLevel: batteryLevel,
             wearContext: wearContext,
             audioPlayed: audioPlayed,
-            burstGateRejectionReason: evaluation.burstGateRejectionReason
+            burstGateRejectionReason: evaluation.burstGateRejectionReason,
+            tokens: evaluation.tokens,
+            classifiedKind: evaluation.classifiedKind,
+            candidateReports: evaluation.candidateReports,
+            rejectReason: evaluation.rejectReason
         )
     }
 
@@ -105,32 +124,30 @@ public struct GestureRecognitionRuntime: Sendable {
     }
 
     public func evaluate(segment: GestureSegment, now: Double? = nil) -> RecognitionEvaluation {
-        let matchingProfiles = profiles.filter { $0.kind == segment.kind || $0.kind == .combo }
-        var burstGateRejectionReason: BurstGateRejectionReason?
-        let gatedProfiles = matchingProfiles.filter { profile in
-            let decision = burstGate.decision(for: segment, profile: profile)
-            if decision.isAllowed {
-                return true
-            }
-            if burstGateRejectionReason == nil {
-                burstGateRejectionReason = decision.reason
-            }
-            return false
-        }
-
-        let candidate = matcher.bestMatch(
-            profiles: gatedProfiles,
-            candidateSamples: segment.samples,
+        let routed = router.evaluate(
+            segment: segment,
+            profiles: profiles,
             lastTriggerTimes: lastTriggerTimes,
-            now: now
+            now: now,
+            burstGate: burstGate
         )
-        let acceptedCandidate = candidate.flatMap { candidate in
+        var acceptedCandidate = routed.candidate.flatMap { candidate in
             strictCandidateGateAllows(candidate, for: segment) ? candidate : nil
         }
+        let strictRejectReason: RejectReason? = routed.candidate != nil && acceptedCandidate == nil
+            ? .scoreBelowThreshold
+            : routed.rejectReason
 
+        if let candidate = acceptedCandidate, !candidate.shouldTrigger {
+            acceptedCandidate = candidate
+        }
         return RecognitionEvaluation(
             candidate: acceptedCandidate,
-            burstGateRejectionReason: acceptedCandidate == nil ? burstGateRejectionReason : nil
+            burstGateRejectionReason: acceptedCandidate?.shouldTrigger == true ? nil : routed.burstGateRejectionReason,
+            tokens: routed.tokens,
+            classifiedKind: routed.classifiedKind,
+            candidateReports: routed.candidateReports,
+            rejectReason: acceptedCandidate?.shouldTrigger == true ? nil : strictRejectReason
         )
     }
 
@@ -149,6 +166,9 @@ public struct GestureRecognitionRuntime: Sendable {
         }
 
         let profile = candidate.profile
+        guard profile.signature == nil else {
+            return true
+        }
         guard profile.templates.count <= 1, profile.negativeTemplates.isEmpty else {
             return true
         }
@@ -238,7 +258,11 @@ public struct GestureRecognitionRuntime: Sendable {
         batteryLevel: Double? = nil,
         wearContext: WearContext? = nil,
         audioPlayed: Bool = false,
-        burstGateRejectionReason: BurstGateRejectionReason? = nil
+        burstGateRejectionReason: BurstGateRejectionReason? = nil,
+        tokens: [MotionToken] = [],
+        classifiedKind: MotionTokenKind? = nil,
+        candidateReports: [CandidateRecognitionReport] = [],
+        rejectReason: RejectReason? = nil
     ) -> GestureRecognitionEvent {
         let shouldTrigger = candidate?.shouldTrigger == true
 
@@ -253,7 +277,11 @@ public struct GestureRecognitionRuntime: Sendable {
             audioPlayed: shouldTrigger && audioPlayed,
             batteryLevel: batteryLevel,
             wearContext: wearContext,
-            burstGateRejectionReason: burstGateRejectionReason
+            burstGateRejectionReason: burstGateRejectionReason,
+            tokens: tokens,
+            classifiedKind: classifiedKind,
+            candidateReports: candidateReports,
+            rejectReason: rejectReason
         )
         logs.append(logEntry)
 
@@ -277,7 +305,11 @@ public struct GestureRecognitionRuntime: Sendable {
         audioPlayed: Bool,
         batteryLevel: Double?,
         wearContext: WearContext?,
-        burstGateRejectionReason: BurstGateRejectionReason?
+        burstGateRejectionReason: BurstGateRejectionReason?,
+        tokens: [MotionToken],
+        classifiedKind: MotionTokenKind?,
+        candidateReports: [CandidateRecognitionReport],
+        rejectReason: RejectReason?
     ) -> RecognitionLogEntry {
         RecognitionLogEntry(
             timestamp: segment.endTimestamp,
@@ -294,7 +326,11 @@ public struct GestureRecognitionRuntime: Sendable {
             audioPlayed: audioPlayed,
             batteryLevel: batteryLevel,
             wearContext: wearContext,
-            burstGateRejectionReason: burstGateRejectionReason
+            burstGateRejectionReason: burstGateRejectionReason,
+            tokens: tokens,
+            classifiedKind: classifiedKind,
+            candidateReports: candidateReports,
+            rejectReason: rejectReason
         )
     }
 }

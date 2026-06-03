@@ -214,6 +214,9 @@ public struct GestureProfile: Codable, Equatable, Identifiable, Sendable {
     public var triggerTiming: TriggerTiming
     public var customDelayMilliseconds: Int?
     public var wearContext: WearContext?
+    public var signature: GestureSignature?
+    public var thresholds: ThresholdProfile?
+    public var triggerPolicy: TriggerPolicy?
     public var quality: GestureQuality
     public var createdAt: Date
     public var updatedAt: Date
@@ -235,6 +238,9 @@ public struct GestureProfile: Codable, Equatable, Identifiable, Sendable {
         triggerTiming: TriggerTiming? = nil,
         customDelayMilliseconds: Int? = nil,
         wearContext: WearContext? = nil,
+        signature: GestureSignature? = nil,
+        thresholds: ThresholdProfile? = nil,
+        triggerPolicy: TriggerPolicy? = nil,
         quality: GestureQuality = GestureQuality(score: 0.5),
         createdAt: Date = Date(),
         updatedAt: Date = Date()
@@ -255,6 +261,9 @@ public struct GestureProfile: Codable, Equatable, Identifiable, Sendable {
         self.triggerTiming = triggerTiming ?? Self.defaultTriggerTiming(for: kind)
         self.customDelayMilliseconds = customDelayMilliseconds
         self.wearContext = wearContext
+        self.signature = signature
+        self.thresholds = thresholds
+        self.triggerPolicy = triggerPolicy
         self.quality = quality
         self.createdAt = createdAt
         self.updatedAt = updatedAt
@@ -360,11 +369,42 @@ public struct RecognitionCandidate: Equatable, Sendable {
     public var margin: Double?
     public var confidence: Double
     public var templateID: UUID
+    public var recognitionScore: Double?
+    public var recognizerKind: MotionTokenKind?
+    public var rejectReason: RejectReason?
 
     public var shouldTrigger: Bool {
-        let passesDistance = distance <= profile.acceptanceThreshold
-        let passesMargin = (margin ?? .infinity) >= profile.marginThreshold
-        return passesDistance && passesMargin
+        if let recognitionScore, let thresholds = profile.thresholds {
+            let passesScore = recognitionScore >= thresholds.triggerScore
+            let passesMargin = (margin ?? .infinity) >= thresholds.marginScore
+            return passesScore && passesMargin
+        } else {
+            let passesDistance = distance <= profile.acceptanceThreshold
+            let passesMargin = (margin ?? .infinity) >= profile.marginThreshold
+            return passesDistance && passesMargin
+        }
+    }
+
+    public init(
+        profile: GestureProfile,
+        distance: Double,
+        secondBestDistance: Double? = nil,
+        margin: Double? = nil,
+        confidence: Double,
+        templateID: UUID,
+        recognitionScore: Double? = nil,
+        recognizerKind: MotionTokenKind? = nil,
+        rejectReason: RejectReason? = nil
+    ) {
+        self.profile = profile
+        self.distance = distance
+        self.secondBestDistance = secondBestDistance
+        self.margin = margin
+        self.confidence = confidence
+        self.templateID = templateID
+        self.recognitionScore = recognitionScore
+        self.recognizerKind = recognizerKind
+        self.rejectReason = rejectReason
     }
 }
 

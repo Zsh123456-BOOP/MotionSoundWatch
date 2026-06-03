@@ -403,6 +403,10 @@ public struct RecognitionLogEntry: Codable, Equatable, Identifiable, Sendable {
     public var batteryLevel: Double?
     public var wearContext: WearContext?
     public var burstGateRejectionReason: BurstGateRejectionReason?
+    public var tokens: [MotionToken]
+    public var classifiedKind: MotionTokenKind?
+    public var candidateReports: [CandidateRecognitionReport]
+    public var rejectReason: RejectReason?
 
     public init(
         id: UUID = UUID(),
@@ -420,7 +424,11 @@ public struct RecognitionLogEntry: Codable, Equatable, Identifiable, Sendable {
         audioPlayed: Bool,
         batteryLevel: Double? = nil,
         wearContext: WearContext? = nil,
-        burstGateRejectionReason: BurstGateRejectionReason? = nil
+        burstGateRejectionReason: BurstGateRejectionReason? = nil,
+        tokens: [MotionToken] = [],
+        classifiedKind: MotionTokenKind? = nil,
+        candidateReports: [CandidateRecognitionReport] = [],
+        rejectReason: RejectReason? = nil
     ) {
         self.id = id
         self.timestamp = timestamp
@@ -438,5 +446,9 @@ public struct RecognitionLogEntry: Codable, Equatable, Identifiable, Sendable {
         self.batteryLevel = batteryLevel
         self.wearContext = wearContext
         self.burstGateRejectionReason = burstGateRejectionReason
+        self.tokens = tokens
+        self.classifiedKind = classifiedKind
+        self.candidateReports = candidateReports
+        self.rejectReason = rejectReason
     }
 }

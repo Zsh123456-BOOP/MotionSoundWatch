@@ -24,6 +24,7 @@
 		AA0000000000000000000015 /* MotionSoundWatch.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000100 /* MotionSoundWatch.app */; };
 		AA0000000000000000000016 /* WatchRuntimeSessionController.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000115 /* WatchRuntimeSessionController.swift */; };
 		AA0000000000000000000017 /* WatchAppLifecycleDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000116 /* WatchAppLifecycleDelegate.swift */; };
+		AA0000000000000000000018 /* MotionRecognitionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000118 /* MotionRecognitionModel.swift */; };
 		BB0000000000000000000001 /* MotionSoundPhoneApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000101 /* MotionSoundPhoneApp.swift */; };
 		BB0000000000000000000002 /* PhoneDebugView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000102 /* PhoneDebugView.swift */; };
 		BB0000000000000000000003 /* PhoneConnectivityReceiver.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000103 /* PhoneConnectivityReceiver.swift */; };
@@ -34,6 +35,7 @@
 		BB0000000000000000000007 /* MotionPersistence.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000109 /* MotionPersistence.swift */; };
 		BB0000000000000000000008 /* MotionBurstGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000113 /* MotionBurstGate.swift */; };
 		BB0000000000000000000009 /* AppDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000114 /* AppDiagnostics.swift */; };
+		BB0000000000000000000011 /* MotionRecognitionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000118 /* MotionRecognitionModel.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -79,6 +81,7 @@
 		AA0000000000000000000115 /* WatchRuntimeSessionController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchRuntimeSessionController.swift; sourceTree = "<group>"; };
 		AA0000000000000000000116 /* WatchAppLifecycleDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchAppLifecycleDelegate.swift; sourceTree = "<group>"; };
 		AA0000000000000000000117 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		AA0000000000000000000118 /* MotionRecognitionModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MotionRecognitionModel.swift; path = Sources/MotionSoundCore/MotionRecognitionModel.swift; sourceTree = SOURCE_ROOT; };
 		BB0000000000000000000100 /* MotionSoundPhone.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MotionSoundPhone.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		BB0000000000000000000101 /* MotionSoundPhoneApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotionSoundPhoneApp.swift; sourceTree = "<group>"; };
 		BB0000000000000000000102 /* PhoneDebugView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneDebugView.swift; sourceTree = "<group>"; };
@@ -137,6 +140,7 @@
 				AA0000000000000000000105 /* MotionSoundCore.swift */,
 				AA0000000000000000000106 /* MotionPipeline.swift */,
 				AA0000000000000000000107 /* MotionProfiles.swift */,
+				AA0000000000000000000118 /* MotionRecognitionModel.swift */,
 				AA0000000000000000000109 /* MotionPersistence.swift */,
 				AA0000000000000000000110 /* MotionRecognitionRuntime.swift */,
 				AA0000000000000000000111 /* MotionFeedback.swift */,
@@ -274,6 +278,7 @@
 				AA0000000000000000000005 /* MotionSoundCore.swift in Sources */,
 				AA0000000000000000000006 /* MotionPipeline.swift in Sources */,
 				AA0000000000000000000007 /* MotionProfiles.swift in Sources */,
+				AA0000000000000000000018 /* MotionRecognitionModel.swift in Sources */,
 				AA0000000000000000000009 /* MotionPersistence.swift in Sources */,
 				AA0000000000000000000010 /* MotionRecognitionRuntime.swift in Sources */,
 				AA0000000000000000000011 /* MotionFeedback.swift in Sources */,
@@ -296,6 +301,7 @@
 				BB0000000000000000000004 /* MotionSoundCore.swift in Sources */,
 				BB0000000000000000000005 /* MotionPipeline.swift in Sources */,
 				BB0000000000000000000006 /* MotionProfiles.swift in Sources */,
+				BB0000000000000000000011 /* MotionRecognitionModel.swift in Sources */,
 				BB0000000000000000000007 /* MotionPersistence.swift in Sources */,
 				BB0000000000000000000008 /* MotionBurstGate.swift in Sources */,
 				BB0000000000000000000009 /* AppDiagnostics.swift in Sources */,

@@ -191,13 +191,16 @@ public struct GestureQualityEvaluator: Sendable {
 public struct GestureProfileBuilder: Sendable {
     public var matcher: MotionTemplateMatcher
     public var evaluator: GestureQualityEvaluator
+    public var signatureBuilder: GestureSignatureBuilder
 
     public init(
         matcher: MotionTemplateMatcher = MotionTemplateMatcher(),
-        evaluator: GestureQualityEvaluator = GestureQualityEvaluator()
+        evaluator: GestureQualityEvaluator = GestureQualityEvaluator(),
+        signatureBuilder: GestureSignatureBuilder = GestureSignatureBuilder()
     ) {
         self.matcher = matcher
         self.evaluator = evaluator
+        self.signatureBuilder = signatureBuilder
     }
 
     public func makeProfile(
@@ -221,6 +224,12 @@ public struct GestureProfileBuilder: Sendable {
             negativeTemplates: negativeTemplates,
             existingProfiles: existingProfiles
         )
+        let signature = signatureBuilder.makeSignature(templates: templates)
+        let thresholds = signatureBuilder.makeThresholds(
+            signature: signature,
+            templateCount: templates.count,
+            strictness: strictness
+        )
 
         return GestureProfile(
             name: name,
@@ -233,10 +242,33 @@ public struct GestureProfileBuilder: Sendable {
             strictness: strictness,
             sound: sound,
             wearContext: wearContext,
+            signature: signature,
+            thresholds: thresholds,
+            triggerPolicy: TriggerPolicy(
+                cooldownSeconds: cooldownSeconds,
+                playTiming: playTiming(for: signature.primaryKind),
+                soundPolicy: .restartIfPlaying,
+                allowRepeatedTrigger: true
+            ),
             quality: report.quality,
             createdAt: createdAt,
             updatedAt: createdAt
         )
+    }
+
+    private func playTiming(for kind: MotionTokenKind) -> PlayTiming {
+        switch kind {
+        case .impulse:
+            return .atImpulsePeak
+        case .rotation:
+            return .afterRotationCompleted
+        case .oscillation:
+            return .afterOscillationCountReached
+        case .hold:
+            return .afterHold
+        case .sweep, .pause, .free:
+            return .afterSegmentEnd
+        }
     }
 }
 
