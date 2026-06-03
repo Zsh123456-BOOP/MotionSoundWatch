@@ -374,6 +374,9 @@ public struct RecognitionCandidate: Equatable, Sendable {
     public var rejectReason: RejectReason?
 
     public var shouldTrigger: Bool {
+        guard rejectReason == nil else {
+            return false
+        }
         if let recognitionScore, let thresholds = profile.thresholds {
             let passesScore = recognitionScore >= thresholds.triggerScore
             let passesMargin = (margin ?? .infinity) >= thresholds.marginScore
@@ -584,12 +587,16 @@ private func normalize(_ samples: [MotionSample]) -> [MotionFeatureFrame] {
 
     let columns = raw[0].indices.map { column in raw.map { $0[column] } }
     let means = columns.map { values in values.reduce(0, +) / Double(values.count) }
-    let scales = columns.map { values in
-        max(values.map { abs($0) }.max() ?? 1, 0.001)
+    let centered = raw.map { row in
+        row.indices.map { row[$0] - means[$0] }
     }
+    let scale = max(
+        centered.flatMap { $0 }.map { abs($0) }.max() ?? 1,
+        0.001
+    )
 
-    return raw.map { row in
-        MotionFeatureFrame(values: row.indices.map { (row[$0] - means[$0]) / scales[$0] })
+    return centered.map { row in
+        MotionFeatureFrame(values: row.map { $0 / scale })
     }
 }
 

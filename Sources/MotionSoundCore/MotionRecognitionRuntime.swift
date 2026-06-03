@@ -115,6 +115,7 @@ public struct GestureRecognitionRuntime: Sendable {
         thresholds.triggerScore = max(thresholds.triggerScore, minimumTriggerScore)
         thresholds.marginScore = max(thresholds.marginScore, minimumMarginScore)
         adjusted.thresholds = thresholds
+        adjusted.marginThreshold = max(adjusted.marginThreshold, isSingleTemplate ? 0.08 : 0.05)
         adjusted.cooldownSeconds = max(adjusted.cooldownSeconds, isSingleTemplate ? 1.4 : 1.0)
         if var policy = adjusted.triggerPolicy {
             policy.cooldownSeconds = max(policy.cooldownSeconds, adjusted.cooldownSeconds)

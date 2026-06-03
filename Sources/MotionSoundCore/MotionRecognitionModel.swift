@@ -839,34 +839,13 @@ public struct MotionRecognitionRouter: Sendable {
                 continue
             }
 
-            if let signature = profile.signature {
-                let result = score(profile: profile, signature: signature, segment: segment, tokens: tokens)
-                reports.append(result.report)
-                candidates.append(result.candidate)
-            } else if profile.kind == segment.kind || profile.kind == .combo {
-                guard let legacy = matcher.bestMatch(
-                    profiles: [profile],
-                    candidateSamples: segment.samples,
-                    lastTriggerTimes: lastTriggerTimes,
-                    now: now
-                ) else {
-                    reports.append(report(profile: profile, kind: .free, score: 0, reason: .scoreBelowThreshold))
-                    continue
-                }
-                reports.append(CandidateRecognitionReport(
-                    profileID: profile.id,
-                    profileName: profile.name,
-                    recognizerKind: .free,
-                    score: legacy.confidence,
-                    threshold: 1 - profile.acceptanceThreshold,
-                    margin: legacy.margin,
-                    shouldTrigger: legacy.shouldTrigger,
-                    rejectReason: legacy.shouldTrigger ? nil : .scoreBelowThreshold
-                ))
-                candidates.append(legacy)
-            } else {
-                reports.append(report(profile: profile, kind: classifiedKind, score: 0, reason: .typeMismatch))
+            guard let result = trajectoryScore(profile: profile, segment: segment, tokens: tokens) else {
+                reports.append(report(profile: profile, kind: classifiedKind, score: 0, reason: .scoreBelowThreshold))
+                continue
             }
+
+            reports.append(result.report)
+            candidates.append(result.candidate)
         }
 
         let sortedCandidates = candidates.sorted {
@@ -878,12 +857,25 @@ public struct MotionRecognitionRouter: Sendable {
             if let second {
                 let bestScore = bestCandidate.recognitionScore ?? bestCandidate.confidence
                 let secondScore = second.recognitionScore ?? second.confidence
-                best?.margin = bestScore - secondScore
+                let scoreMargin = bestScore - secondScore
+                best?.margin = scoreMargin
                 best?.secondBestDistance = second.distance
-                if let marginScore = bestCandidate.profile.thresholds?.marginScore,
-                   bestScore - secondScore < marginScore {
+
+                let requiredMargin: Double
+                if bestCandidate.recognitionScore != nil, let thresholds = bestCandidate.profile.thresholds {
+                    requiredMargin = thresholds.marginScore
+                } else {
+                    requiredMargin = max(
+                        bestCandidate.profile.marginThreshold,
+                        bestCandidate.profile.thresholds?.marginScore ?? 0
+                    )
+                }
+
+                if scoreMargin < requiredMargin {
                     best?.rejectReason = .marginTooSmall
                 }
+            } else {
+                best?.margin = nil
             }
         }
 
@@ -900,6 +892,93 @@ public struct MotionRecognitionRouter: Sendable {
             rejectReason: accepted?.shouldTrigger == true ? nil : rejectReason,
             burstGateRejectionReason: firstBurstGateReason
         )
+    }
+
+    private func trajectoryScore(
+        profile: GestureProfile,
+        segment: GestureSegment,
+        tokens: [MotionToken]
+    ) -> (candidate: RecognitionCandidate, report: CandidateRecognitionReport)? {
+        guard var match = matcher.bestMatch(
+            profiles: [profile],
+            candidateSamples: segment.samples
+        ) else {
+            return nil
+        }
+
+        let kind = explanatoryKind(profile: profile, tokens: tokens)
+        let rejectReason = trajectoryRejectReason(profile: profile, segment: segment, tokens: tokens, match: match)
+        match.margin = nil
+        if let rejectReason {
+            match.rejectReason = rejectReason
+        }
+        match.recognizerKind = kind
+
+        let report = CandidateRecognitionReport(
+            profileID: profile.id,
+            profileName: profile.name,
+            recognizerKind: kind,
+            score: match.confidence,
+            threshold: 1 - profile.acceptanceThreshold,
+            margin: match.margin,
+            shouldTrigger: match.shouldTrigger,
+            rejectReason: match.shouldTrigger ? nil : rejectReason
+        )
+        return (match, report)
+    }
+
+    private func explanatoryKind(profile: GestureProfile, tokens: [MotionToken]) -> MotionTokenKind {
+        let token = tokens.first
+        guard let signature = profile.signature else {
+            return token?.kind ?? .free
+        }
+        return routeKind(signature: signature, token: token)
+    }
+
+    private func trajectoryRejectReason(
+        profile: GestureProfile,
+        segment: GestureSegment,
+        tokens: [MotionToken],
+        match: RecognitionCandidate
+    ) -> RejectReason? {
+        if let signature = profile.signature {
+            let tokenResult = score(profile: profile, signature: signature, segment: segment, tokens: tokens)
+            if let hardRejectReason = hardTrajectoryVetoReason(tokenResult.candidate.rejectReason) {
+                return hardRejectReason
+            }
+            if match.distance > profile.acceptanceThreshold {
+                return tokenResult.candidate.rejectReason ?? .scoreBelowThreshold
+            }
+        } else if match.distance > profile.acceptanceThreshold {
+            return .scoreBelowThreshold
+        }
+        return nil
+    }
+
+    private func hardTrajectoryVetoReason(_ rejectReason: RejectReason?) -> RejectReason? {
+        switch rejectReason {
+        case .rotationAngleTooSmall,
+             .rotationAxisUnstable,
+             .rotationDirectionMismatch,
+             .oscillationCountTooLow,
+             .holdTooShort,
+             .holdNotStable:
+            return rejectReason
+        case .none,
+             .noCandidate,
+             .segmentTooShort,
+             .segmentTooLong,
+             .lowEnergy,
+             .typeMismatch,
+             .impulsePeakTooWeak,
+             .impulseDirectionMismatch,
+             .oscillationNotPeriodic,
+             .scoreBelowThreshold,
+             .marginTooSmall,
+             .cooldownActive,
+             .audioMissing:
+            return nil
+        }
     }
 
     private func score(
