@@ -24,6 +24,7 @@ final class WatchMotionRecorder: ObservableObject {
     @Published private(set) var audioPlayedTriggerCount = 0
     @Published private(set) var audioMissingTriggerCount = 0
     @Published private(set) var lastTriggeredProfileName: String?
+    @Published private(set) var lastTriggeredSound: SoundAsset?
     @Published private(set) var lastTriggerAudioPlayed = false
     @Published private(set) var lastTriggerDate: Date?
     @Published private(set) var lastBurstGateRejectionReason: BurstGateRejectionReason?
@@ -40,7 +41,13 @@ final class WatchMotionRecorder: ObservableObject {
     private let profileBuilder = GestureProfileBuilder()
     private let feedbackEngine = GestureFeedbackEngine()
     private let soundPlayer: WatchSoundPlayer?
-    private var segmenter = MotionGestureSegmenter()
+    private var segmenter = MotionGestureSegmenter(
+        configuration: GestureSegmenterConfiguration(
+            postRollDuration: 0.05,
+            endConfirmationDuration: 0.12,
+            cooldownDuration: 0.22
+        )
+    )
     private var recognitionRuntime = GestureRecognitionRuntime()
     private var recordingStartTimestamp: TimeInterval?
     private var liveStartTimestamp: TimeInterval?
@@ -48,7 +55,10 @@ final class WatchMotionRecorder: ObservableObject {
     private var standardNegativeTemplates: [MotionTemplate] = []
     private var standardLabel: String?
     private var standardKind: GestureKind?
+    private var triggerCountsByProfileID: [UUID: Int] = [:]
     private var lastMotionHeartbeatAt: TimeInterval = 0
+    private var lastNoProfileSummaryLogAt: TimeInterval = -.infinity
+    private var lastNonCandidateTraceAt: TimeInterval = -.infinity
     private var motionCallbackCount = 0
     private var firstMotionSampleLogged = false
     private var motionStartDiagnosticTask: Task<Void, Never>?
@@ -139,7 +149,10 @@ final class WatchMotionRecorder: ObservableObject {
             let store = try GestureProfileFileStore.appDocumentsStore()
             let profiles = deduplicateProfiles(try store.list().flatMap(\.archive.profiles))
             recognitionRuntime.replaceProfiles(profiles)
-            soundPlayer?.preload(sounds: profiles.map(\.sound))
+            triggerCountsByProfileID = triggerCountsByProfileID.filter { id, _ in
+                profiles.contains { $0.id == id }
+            }
+            soundPlayer?.preload(profileSounds: profiles)
             loadedProfileCount = profiles.count
             lastFeedbackMessage = nil
             AppDiagnostics.record("watch.profiles.reload", ["count": profiles.count])
@@ -444,8 +457,9 @@ final class WatchMotionRecorder: ObservableObject {
             let candidate = evaluation.candidate
             lastBurstGateRejectionReason = evaluation.burstGateRejectionReason
             updateRecognitionSummary(segment: segment, candidate: candidate, rejectionReason: evaluation.burstGateRejectionReason)
+            let soundToPlay = candidate?.shouldTrigger == true ? nextSound(for: candidate?.profile) : nil
             let audioPlayRequested = candidate?.shouldTrigger == true
-                ? (soundPlayer?.play(sound: candidate?.profile.sound) ?? false)
+                ? (soundPlayer?.play(sound: soundToPlay) ?? false)
                 : false
             let audioPlayed = audioPlayRequested && (soundPlayer?.lastAudiblePlaySucceeded ?? audioPlayRequested)
             lastRecognitionEvent = recognitionRuntime.record(
@@ -457,6 +471,9 @@ final class WatchMotionRecorder: ObservableObject {
                 burstGateRejectionReason: evaluation.burstGateRejectionReason
             )
             if lastRecognitionEvent?.triggered == true {
+                if let profileID = lastRecognitionEvent?.profile?.id {
+                    triggerCountsByProfileID[profileID, default: 0] += 1
+                }
                 triggerCount += 1
                 if audioPlayed {
                     audioPlayedTriggerCount += 1
@@ -464,6 +481,7 @@ final class WatchMotionRecorder: ObservableObject {
                     audioMissingTriggerCount += 1
                 }
                 lastTriggeredProfileName = lastRecognitionEvent?.profile?.name
+                lastTriggeredSound = soundToPlay
                 lastTriggerAudioPlayed = audioPlayed
                 lastTriggerDate = Date()
                 WKInterfaceDevice.current().play(.success)
@@ -473,6 +491,8 @@ final class WatchMotionRecorder: ObservableObject {
                         "profile": lastRecognitionEvent?.profile?.name ?? "",
                         "audioPlayed": audioPlayed,
                         "audioPlayRequested": audioPlayRequested,
+                        "sound": soundToPlay?.fileName ?? "",
+                        "profileTriggerCount": lastRecognitionEvent?.profile.map { triggerCountsByProfileID[$0.id, default: 0] } ?? 0,
                         "triggerCount": triggerCount,
                         "audioPlayedTriggerCount": audioPlayedTriggerCount,
                         "audioMissingTriggerCount": audioMissingTriggerCount,
@@ -545,6 +565,15 @@ final class WatchMotionRecorder: ObservableObject {
         audioPlayed: Bool,
         triggered: Bool
     ) {
+        guard shouldPersistRecognitionTrace(
+            segment: segment,
+            candidate: candidate,
+            rejectionReason: rejectionReason,
+            triggered: triggered
+        ) else {
+            return
+        }
+
         do {
             let directory = try recognitionTraceDirectory()
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -584,6 +613,41 @@ final class WatchMotionRecorder: ObservableObject {
         } catch {
             AppDiagnostics.record(error: error, event: "watch.recognition.traceSave.error")
         }
+    }
+
+    private func shouldPersistRecognitionTrace(
+        segment: GestureSegment,
+        candidate: RecognitionCandidate?,
+        rejectionReason: BurstGateRejectionReason?,
+        triggered: Bool
+    ) -> Bool {
+        if triggered || candidate != nil || rejectionReason != nil {
+            return true
+        }
+
+        guard !recognitionRuntime.profiles.isEmpty else {
+            return false
+        }
+
+        guard segment.endTimestamp - lastNonCandidateTraceAt >= 5 else {
+            return false
+        }
+        lastNonCandidateTraceAt = segment.endTimestamp
+        return true
+    }
+
+    private func nextSound(for profile: GestureProfile?) -> SoundAsset? {
+        guard let profile else { return nil }
+        let sequence = profile.soundSequence?.filter {
+            !$0.fileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        } ?? []
+        guard !sequence.isEmpty else {
+            return profile.sound
+        }
+
+        let currentCount = triggerCountsByProfileID[profile.id, default: 0]
+        let index = min(currentCount, sequence.count - 1)
+        return sequence[index]
     }
 
     private func recognitionTraceDirectory() throws -> URL {
@@ -681,6 +745,8 @@ final class WatchMotionRecorder: ObservableObject {
                 "secondBestDistance": candidate.secondBestDistance ?? NSNull(),
                 "shouldTrigger": candidate.shouldTrigger,
                 "soundFileName": candidate.profile.sound?.fileName ?? "",
+                "playedSoundFileName": triggered ? (lastTriggeredSound?.fileName ?? "") : "",
+                "soundSequenceCount": candidate.profile.soundSequence?.count ?? 0,
                 "soundVolume": candidate.profile.sound?.volume ?? 0,
             ]
         }
@@ -761,14 +827,17 @@ final class WatchMotionRecorder: ObservableObject {
     ) {
         if recognitionRuntime.profiles.isEmpty {
             lastRecognitionSummary = "已检测到动作，但 Watch 没有已同步动作。"
-            AppDiagnostics.record(
-                "watch.recognition.noProfiles",
-                [
-                    "segmentKind": segment.kind.rawValue,
-                    "duration": segment.duration,
-                    "peak": segment.features.peakAcceleration,
-                ]
-            )
+            if segment.endTimestamp - lastNoProfileSummaryLogAt >= 10 {
+                lastNoProfileSummaryLogAt = segment.endTimestamp
+                AppDiagnostics.record(
+                    "watch.recognition.noProfiles",
+                    [
+                        "segmentKind": segment.kind.rawValue,
+                        "duration": segment.duration,
+                        "peak": segment.features.peakAcceleration,
+                    ]
+                )
+            }
             return
         }
 

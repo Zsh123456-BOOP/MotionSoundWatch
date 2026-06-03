@@ -209,6 +209,7 @@ public struct GestureProfile: Codable, Equatable, Identifiable, Sendable {
     public var cooldownSeconds: Double
     public var strictness: Double
     public var sound: SoundAsset?
+    public var soundSequence: [SoundAsset]?
     public var audioAssetName: String?
     public var triggerTiming: TriggerTiming
     public var customDelayMilliseconds: Int?
@@ -229,6 +230,7 @@ public struct GestureProfile: Codable, Equatable, Identifiable, Sendable {
         cooldownSeconds: Double = 0.8,
         strictness: Double = 0.5,
         sound: SoundAsset? = nil,
+        soundSequence: [SoundAsset]? = nil,
         audioAssetName: String? = nil,
         triggerTiming: TriggerTiming? = nil,
         customDelayMilliseconds: Int? = nil,
@@ -248,6 +250,7 @@ public struct GestureProfile: Codable, Equatable, Identifiable, Sendable {
         self.cooldownSeconds = cooldownSeconds
         self.strictness = strictness
         self.sound = sound
+        self.soundSequence = soundSequence
         self.audioAssetName = audioAssetName
         self.triggerTiming = triggerTiming ?? Self.defaultTriggerTiming(for: kind)
         self.customDelayMilliseconds = customDelayMilliseconds

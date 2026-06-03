@@ -21,6 +21,9 @@ final class WatchSoundPlayer: ObservableObject {
     private var watchKitPlayers: [String: WKAudioFilePlayer] = [:]
 
     func configureAudioSession() {
+        if isReady {
+            return
+        }
         do {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playback, mode: .default, policy: .longFormAudio, options: [])
@@ -94,6 +97,13 @@ final class WatchSoundPlayer: ObservableObject {
 
     func preload(sounds: [SoundAsset?]) {
         sounds.forEach { preload(sound: $0) }
+    }
+
+    func preload(profileSounds profiles: [GestureProfile]) {
+        for profile in profiles {
+            preload(sound: profile.sound)
+            preload(sounds: profile.soundSequence ?? [])
+        }
     }
 
     @discardableResult

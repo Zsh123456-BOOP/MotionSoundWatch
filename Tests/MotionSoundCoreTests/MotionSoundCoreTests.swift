@@ -514,6 +514,32 @@ import Foundation
     #expect(decoded.profiles[0].templates.count == 2)
 }
 
+@Test func profileArchivePreservesSoundSequence() throws {
+    let template = MotionTemplateBuilder().makeTemplate(
+        label: "combo",
+        kind: .sequence,
+        samples: syntheticSequence(duration: 1.2, amplitude: 1.0)
+    )
+    var profile = GestureProfileBuilder().makeProfile(
+        name: "combo",
+        kind: .sequence,
+        templates: [template],
+        sound: SoundAsset(fileName: "第1次.wav", duration: 0.3)
+    )
+    profile.soundSequence = [
+        SoundAsset(fileName: "第1次.wav", duration: 0.3),
+        SoundAsset(fileName: "第2次.wav", duration: 0.4),
+        SoundAsset(fileName: "第3次.mp3", duration: 0.5),
+    ]
+    let archive = GestureProfileArchive(profiles: [profile])
+    let codec = GestureProfileCodec()
+
+    let decoded = try codec.decode(try codec.encode(archive))
+
+    #expect(decoded.profiles[0].sound?.fileName == "第1次.wav")
+    #expect(decoded.profiles[0].soundSequence?.map(\.fileName) == ["第1次.wav", "第2次.wav", "第3次.mp3"])
+}
+
 @Test func profileFileStoreSavesListsLoadsAndDeletesArchives() throws {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("MotionSoundCoreTests-\(UUID().uuidString)", isDirectory: true)

@@ -18,6 +18,7 @@ struct PhoneDebugView: View {
     @State private var trimEndFraction = 0.95
     @State private var playbackFraction = 0.0
     @State private var selectedAudioFileName = ""
+    @State private var selectedAudioSequenceFileNames: [String] = []
     @State private var volume = 1.0
     @State private var soundStartFraction = 0.0
     @State private var triggerTiming = "atEnd"
@@ -477,10 +478,10 @@ struct PhoneDebugView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 8))
 
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(selectedAudioFileName.isEmpty ? "还未选择音效" : selectedAudioFileName)
+                        Text(selectedAudioSummaryText)
                             .font(.headline)
                             .lineLimit(2)
-                        Text("后续接入 DSWaveformImage 后，这里显示音频波形和播放进度。")
+                        Text("先试听，再加入触发顺序；连续触发时会按顺序播放。")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
@@ -498,30 +499,69 @@ struct PhoneDebugView: View {
                         Text("本机音效")
                             .font(.subheadline.weight(.semibold))
                         ForEach(localAudioFiles, id: \.path) { url in
-                            Button {
-                                selectLocalAudio(url)
-                            } label: {
-                                HStack(spacing: 10) {
-                                    Image(systemName: selectedAudioFileName == url.lastPathComponent ? "checkmark.circle.fill" : "waveform")
-                                        .foregroundStyle(selectedAudioFileName == url.lastPathComponent ? Color.accentColor : .secondary)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(url.lastPathComponent)
-                                            .font(.subheadline.weight(.medium))
-                                            .lineLimit(1)
-                                        Text(localAudioFileDetail(url))
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    Spacer()
+                            HStack(spacing: 10) {
+                                Image(systemName: audioSelectionIcon(for: url))
+                                    .foregroundStyle(isAudioSelected(url) ? Color.accentColor : .secondary)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(url.lastPathComponent)
+                                        .font(.subheadline.weight(.medium))
+                                        .lineLimit(1)
+                                    Text(localAudioFileDetail(url))
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
                                 }
-                                .contentShape(Rectangle())
+                                Spacer()
+                                Button {
+                                    previewAudio(url)
+                                } label: {
+                                    Image(systemName: "play.fill")
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+
+                                Button {
+                                    toggleSoundSequence(url)
+                                } label: {
+                                    Image(systemName: isAudioSelected(url) ? "minus.circle" : "plus.circle")
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
                             }
-                            .buttonStyle(.plain)
                             .padding(10)
                             .background(Color(.tertiarySystemGroupedBackground))
                             .clipShape(RoundedRectangle(cornerRadius: 8))
                         }
                     }
+                }
+
+                if !selectedAudioSequenceFileNames.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("连续触发顺序")
+                            .font(.subheadline.weight(.semibold))
+                        ForEach(Array(selectedAudioSequenceFileNames.enumerated()), id: \.offset) { index, name in
+                            HStack(spacing: 10) {
+                                Text("\(index + 1)")
+                                    .font(.caption.weight(.semibold))
+                                    .frame(width: 24, height: 24)
+                                    .background(Color.accentColor.opacity(0.12))
+                                    .clipShape(Circle())
+                                Text(name)
+                                    .font(.subheadline)
+                                    .lineLimit(1)
+                                Spacer()
+                                Button {
+                                    removeSequenceSound(at: index)
+                                } label: {
+                                    Image(systemName: "xmark")
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            }
+                        }
+                    }
+                    .padding(12)
+                    .background(Color(.tertiarySystemGroupedBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
 
                 VStack(alignment: .leading, spacing: 10) {
@@ -801,6 +841,7 @@ struct PhoneDebugView: View {
             gesture: normalizedGestureName,
             kind: "burst",
             soundFileName: selectedAudioFileName,
+            soundSequenceFileNames: selectedSoundNames,
             primarySamplesOverride: trimmedSamples,
             cooldownSeconds: cooldownSeconds,
             triggerTimingRawValue: triggerTiming,
@@ -809,8 +850,10 @@ struct PhoneDebugView: View {
             replacingName: editingAsset?.profile.name
         )
         if let result {
-            if let audioURL = localAudioFiles.first(where: { $0.lastPathComponent == selectedAudioFileName }) {
-                _ = receiver.sendAudioFile(audioURL)
+            for name in selectedSoundNames {
+                if let audioURL = localAudioFiles.first(where: { $0.lastPathComponent == name }) {
+                    _ = receiver.sendAudioFile(audioURL)
+                }
             }
             reloadSavedProfiles()
             let didQueueLibraryReplace = receiver.sendProfileLibrarySnapshot()
@@ -879,6 +922,7 @@ struct PhoneDebugView: View {
         trimEndFraction = 0.95
         playbackFraction = 0
         selectedAudioFileName = ""
+        selectedAudioSequenceFileNames = []
         soundStartFraction = 0
         triggerTiming = TriggerTiming.atEnd.rawValue
         cooldownSeconds = 1.2
@@ -965,6 +1009,7 @@ struct PhoneDebugView: View {
     private func applyAsset(_ asset: PhoneGestureAsset) {
         recordingLabel = asset.profile.name
         selectedAudioFileName = asset.profile.sound?.fileName ?? ""
+        selectedAudioSequenceFileNames = asset.profile.soundSequence?.map(\.fileName) ?? []
         volume = Double(asset.profile.sound?.volume ?? 1)
         triggerTiming = asset.profile.triggerTiming.rawValue
         cooldownSeconds = asset.profile.cooldownSeconds
@@ -1138,9 +1183,64 @@ struct PhoneDebugView: View {
 
     private func selectLocalAudio(_ url: URL) {
         selectedAudioFileName = url.lastPathComponent
-        _ = receiver.sendAudioFile(url)
         receiver.setLastMessage("已选择音效：\(url.lastPathComponent)")
         AppDiagnostics.record("phone.audio.localSelected", ["file": url.lastPathComponent])
+    }
+
+    private var selectedSoundNames: [String] {
+        if !selectedAudioSequenceFileNames.isEmpty {
+            return selectedAudioSequenceFileNames
+        }
+        return selectedAudioFileName.isEmpty ? [] : [selectedAudioFileName]
+    }
+
+    private var selectedAudioSummaryText: String {
+        if selectedAudioSequenceFileNames.count > 1 {
+            return "\(selectedAudioSequenceFileNames.count) 段音效"
+        }
+        return selectedSoundNames.first ?? "还未选择音效"
+    }
+
+    private func previewAudio(_ url: URL) {
+        _ = receiver.previewAudioFile(url, volume: Float(volume))
+    }
+
+    private func toggleSoundSequence(_ url: URL) {
+        let name = url.lastPathComponent
+        if let index = selectedAudioSequenceFileNames.firstIndex(of: name) {
+            selectedAudioSequenceFileNames.remove(at: index)
+            if selectedAudioFileName == name {
+                selectedAudioFileName = selectedAudioSequenceFileNames.first ?? ""
+            }
+        } else {
+            selectedAudioSequenceFileNames.append(name)
+            selectedAudioFileName = selectedAudioSequenceFileNames.first ?? name
+        }
+        if selectedAudioSequenceFileNames.count == 1 {
+            selectedAudioFileName = selectedAudioSequenceFileNames[0]
+        }
+        receiver.setLastMessage("已更新音效顺序：\(selectedAudioSequenceFileNames.count) 段")
+        AppDiagnostics.record(
+            "phone.audio.sequenceUpdated",
+            [
+                "count": selectedAudioSequenceFileNames.count,
+                "file": name,
+            ]
+        )
+    }
+
+    private func removeSequenceSound(at index: Int) {
+        guard selectedAudioSequenceFileNames.indices.contains(index) else { return }
+        selectedAudioSequenceFileNames.remove(at: index)
+        selectedAudioFileName = selectedAudioSequenceFileNames.first ?? ""
+    }
+
+    private func isAudioSelected(_ url: URL) -> Bool {
+        selectedSoundNames.contains(url.lastPathComponent)
+    }
+
+    private func audioSelectionIcon(for url: URL) -> String {
+        isAudioSelected(url) ? "checkmark.circle.fill" : "waveform"
     }
 
     private func reloadLocalAudioFiles() {
@@ -1191,6 +1291,7 @@ struct PhoneDebugView: View {
         trimEndFraction = 0.95
         playbackFraction = 0
         selectedAudioFileName = ""
+        selectedAudioSequenceFileNames = []
         editingAsset = nil
         currentStep = .create
         AppDiagnostics.record("phone.wizard.reset")
@@ -1878,7 +1979,12 @@ private struct PhoneGestureAsset: Identifiable, Equatable {
     var deduplicationKey: String { "\(profile.name.lowercased())|\(profile.kind.rawValue)" }
     var templateCount: Int { profile.templates.count }
     var sampleCount: Int { profile.templates.map(\.samples.count).reduce(0, +) }
-    var soundName: String { profile.sound?.fileName ?? "未绑定音效" }
+    var soundName: String {
+        if let sequence = profile.soundSequence, sequence.count > 1 {
+            return "\(sequence.count) 段音效"
+        }
+        return profile.sound?.fileName ?? "未绑定音效"
+    }
     var isLegacyUntitled: Bool {
         profile.name.trimmingCharacters(in: .whitespacesAndNewlines)
             .caseInsensitiveCompare("untitled") == .orderedSame

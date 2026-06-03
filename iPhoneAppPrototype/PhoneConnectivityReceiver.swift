@@ -322,6 +322,20 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
     }
 
     @discardableResult
+    func previewAudioFile(_ sourceURL: URL, volume: Float = 1) -> Bool {
+        let played = soundPlayer.play(fileName: sourceURL.lastPathComponent, volume: volume)
+        lastMessage = played ? "正在试听：\(sourceURL.lastPathComponent)" : "试听失败：\(sourceURL.lastPathComponent)"
+        AppDiagnostics.record(
+            "phone.audio.preview",
+            [
+                "file": sourceURL.lastPathComponent,
+                "played": played,
+            ]
+        )
+        return played
+    }
+
+    @discardableResult
     func sendProfileFile(_ sourceURL: URL) -> Bool {
         sendFile(sourceURL, kind: .gestureProfile, queuedMessagePrefix: "已加入 Profile 发送队列")
     }
@@ -355,6 +369,7 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
         gesture: String,
         kind kindRawValue: String,
         soundFileName: String? = nil,
+        soundSequenceFileNames: [String] = [],
         primarySamplesOverride: [MotionSample]? = nil,
         cooldownSeconds: Double = 0.8,
         triggerTimingRawValue: String = TriggerTiming.atEnd.rawValue,
@@ -426,7 +441,8 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
                 return nil
             }
 
-            let sound = normalizedSoundAsset(fileName: soundFileName, volume: volume)
+            let sounds = normalizedSoundAssets(fileNames: soundSequenceFileNames, volume: volume)
+            let sound = sounds.first ?? normalizedSoundAsset(fileName: soundFileName, volume: volume)
             var profile = GestureProfileBuilder().makeProfile(
                 name: trimmedGesture,
                 kind: effectiveKind,
@@ -435,6 +451,7 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
                 sound: sound,
                 cooldownSeconds: cooldownSeconds
             )
+            profile.soundSequence = sounds.count > 1 ? sounds : nil
             if let triggerTiming = TriggerTiming(rawValue: triggerTimingRawValue) {
                 profile.triggerTiming = triggerTiming
             }
@@ -508,6 +525,7 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
                     "effectiveKind": effectiveKind.rawValue,
                     "templates": primaryTemplates.count,
                     "negativeTemplates": 0,
+                    "soundSequenceCount": profile.soundSequence?.count ?? 0,
                     "queued": didQueueTransfer,
                 ]
             )
@@ -712,6 +730,18 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
         let trimmed = fileName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         return SoundAsset(fileName: trimmed, duration: 0, volume: Float(max(0, min(1, volume))))
+    }
+
+    private func normalizedSoundAssets(fileNames: [String], volume: Double = 1) -> [SoundAsset] {
+        var seen: Set<String> = []
+        return fileNames.compactMap { fileName in
+            let trimmed = fileName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            let key = trimmed.lowercased()
+            guard !seen.contains(key) else { return nil }
+            seen.insert(key)
+            return SoundAsset(fileName: trimmed, duration: 0, volume: Float(max(0, min(1, volume))))
+        }
     }
 
     nonisolated private static func effectiveKind(
