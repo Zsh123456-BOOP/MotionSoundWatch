@@ -371,6 +371,7 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
         soundFileName: String? = nil,
         soundSequenceFileNames: [String] = [],
         primarySamplesOverride: [MotionSample]? = nil,
+        baseTemplates: [MotionTemplate] = [],
         cooldownSeconds: Double = 0.8,
         triggerTimingRawValue: String = TriggerTiming.atEnd.rawValue,
         volume: Double = 1,
@@ -399,6 +400,7 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
                 requestedKind: requestedKind,
                 primarySamples: primarySamplesOverride
             )
+            primaryTemplates.append(contentsOf: baseTemplates)
 
             if let primarySamplesOverride, !primarySamplesOverride.isEmpty {
                 primaryTemplates.append(templateBuilder.makeTemplate(
@@ -424,7 +426,7 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
 
                 switch parsed.role {
                 case "sample", "positive", "watch", "unknown":
-                    if primarySamplesOverride == nil {
+                    if primarySamplesOverride == nil, baseTemplates.isEmpty {
                         primaryTemplates.append(templateBuilder.makeTemplate(
                             label: trimmedGesture,
                             kind: effectiveKind,
@@ -524,6 +526,7 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
                     "requestedKind": requestedKind.rawValue,
                     "effectiveKind": effectiveKind.rawValue,
                     "templates": primaryTemplates.count,
+                    "baseTemplates": baseTemplates.count,
                     "negativeTemplates": 0,
                     "soundSequenceCount": profile.soundSequence?.count ?? 0,
                     "queued": didQueueTransfer,

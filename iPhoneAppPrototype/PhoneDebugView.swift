@@ -32,6 +32,7 @@ struct PhoneDebugView: View {
     @State private var trimPlaybackTask: Task<Void, Never>?
     @State private var isPreviewPlaying = false
     @State private var editingAsset: PhoneGestureAsset?
+    @State private var isAppendingRecording = false
     @State private var showingDiagnostics = false
 
     private var captureFiles: [ReceivedSyncedFile] {
@@ -223,7 +224,7 @@ struct PhoneDebugView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("\(savedProfiles.count) 个动作")
                             .font(.title3.weight(.semibold))
-                        Text("保存后的动作会显示在这里，可继续补录、换声音或重新同步到 Watch。")
+                        Text("保存后的动作会显示在这里。建议每个动作补录 3 次以上，识别会更稳。")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
@@ -272,7 +273,7 @@ struct PhoneDebugView: View {
                         .foregroundStyle(.red)
                 }
 
-                Text("系统会根据录制片段自动判断短促或连续动作。")
+                Text("创建后可在动作列表点“补录”，把第 2、第 3 次录制追加到同一个动作。")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -293,7 +294,7 @@ struct PhoneDebugView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(normalizedGestureName)
                             .font(.title3.weight(.semibold))
-                        Text("系统自动识别短促/连续")
+                        Text(recordingSubtitle)
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
@@ -410,6 +411,12 @@ struct PhoneDebugView: View {
 
                     CaptureStats(samples: trimmedSamples)
 
+                    if let editingAsset, isAppendingRecording {
+                        Text("保存后会追加为第 \(editingAsset.templateCount + 1) 次录制；建议至少录到 3 次。")
+                            .font(.footnote.weight(.medium))
+                            .foregroundStyle(.secondary)
+                    }
+
                     HStack(spacing: 10) {
                         Button {
                             toggleTrimPlayback()
@@ -462,7 +469,7 @@ struct PhoneDebugView: View {
                             .foregroundStyle(.red)
                     }
 
-                    Text("系统会按当前裁剪片段自动保存为\(automaticKindText)。")
+                    Text(soundStepSummaryText)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -584,7 +591,7 @@ struct PhoneDebugView: View {
 
                 StepNavigationBar(
                     backTitle: "返回裁剪",
-                    nextTitle: editingAsset == nil ? "保存并同步" : "保存修改",
+                    nextTitle: soundStepSaveTitle,
                     canGoNext: !trimmedSamples.isEmpty && !normalizedGestureName.isEmpty && nameConflict == nil
                 ) {
                     currentStep = .trim
@@ -610,7 +617,7 @@ struct PhoneDebugView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                PrimaryActionButton(title: editingAsset == nil ? "保存并同步到 Watch" : "保存修改并同步", systemImage: "applewatch") {
+                PrimaryActionButton(title: soundStepSaveTitle, systemImage: "applewatch") {
                     syncProfile()
                 }
                 .disabled(trimmedSamples.isEmpty)
@@ -663,6 +670,30 @@ struct PhoneDebugView: View {
 
     private var automaticKindText: String {
         "自适应动作"
+    }
+
+    private var recordingSubtitle: String {
+        guard let editingAsset, isAppendingRecording else {
+            return "系统自动识别短促/连续"
+        }
+        return "补录第 \(editingAsset.templateCount + 1) 次"
+    }
+
+    private var soundStepSummaryText: String {
+        guard let editingAsset else {
+            return "系统会按当前裁剪片段自动保存为\(automaticKindText)。"
+        }
+        if isAppendingRecording {
+            return "保存后会保留原有 \(editingAsset.templateCount) 个模板，并追加当前裁剪片段。"
+        }
+        return "保存后会保留原有 \(editingAsset.templateCount) 个模板，只更新名称、声音和触发设置。"
+    }
+
+    private var soundStepSaveTitle: String {
+        if editingAsset == nil {
+            return "保存并同步"
+        }
+        return isAppendingRecording ? "追加录制并同步" : "保存修改"
     }
 
     private var captureDuration: Double {
@@ -839,10 +870,11 @@ struct PhoneDebugView: View {
 
         let result = receiver.generateAndSendProfile(
             gesture: normalizedGestureName,
-            kind: "burst",
+            kind: editingAsset?.profile.kind.rawValue ?? "burst",
             soundFileName: selectedAudioFileName,
             soundSequenceFileNames: selectedSoundNames,
-            primarySamplesOverride: trimmedSamples,
+            primarySamplesOverride: syncPrimarySamplesOverride,
+            baseTemplates: syncBaseTemplates,
             cooldownSeconds: cooldownSeconds,
             triggerTimingRawValue: triggerTiming,
             volume: volume,
@@ -850,6 +882,7 @@ struct PhoneDebugView: View {
             replacingName: editingAsset?.profile.name
         )
         if let result {
+            let wasAppendingRecording = isAppendingRecording
             for name in selectedSoundNames {
                 if let audioURL = localAudioFiles.first(where: { $0.lastPathComponent == name }) {
                     _ = receiver.sendAudioFile(audioURL)
@@ -859,9 +892,10 @@ struct PhoneDebugView: View {
             let didQueueLibraryReplace = receiver.sendProfileLibrarySnapshot()
             currentStep = .library
             editingAsset = nil
+            isAppendingRecording = false
             receiver.setLastMessage(
                 didQueueLibraryReplace || result.didQueueTransfer
-                    ? "已保存动作，并以 iPhone 动作列表替换 Watch 动作库。"
+                    ? profileSavedMessage(result, wasAppendingRecording: wasAppendingRecording)
                     : "已保存动作，但同步队列未建立。"
             )
         }
@@ -875,6 +909,26 @@ struct PhoneDebugView: View {
                     "saved": result != nil,
             ]
         )
+    }
+
+    private var syncPrimarySamplesOverride: [MotionSample]? {
+        if editingAsset == nil || isAppendingRecording {
+            return trimmedSamples
+        }
+        return nil
+    }
+
+    private var syncBaseTemplates: [MotionTemplate] {
+        guard let editingAsset else { return [] }
+        return editingAsset.profile.templates
+    }
+
+    private func profileSavedMessage(_ result: ProfileSyncResult, wasAppendingRecording: Bool) -> String {
+        let templateCount = result.archive.profiles.first?.templates.count ?? 0
+        if wasAppendingRecording {
+            return "已追加第 \(templateCount) 次录制，并同步到 Watch。"
+        }
+        return "已保存动作，并以 iPhone 动作列表替换 Watch 动作库。"
     }
 
     private func reloadSavedProfiles() {
@@ -927,12 +981,14 @@ struct PhoneDebugView: View {
         triggerTiming = TriggerTiming.atEnd.rawValue
         cooldownSeconds = 1.2
         editingAsset = nil
+        isAppendingRecording = false
         stopTrimPlayback()
         AppDiagnostics.record("phone.wizard.newGesture")
     }
 
     private func openAssetForSound(_ asset: PhoneGestureAsset) {
         editingAsset = asset
+        isAppendingRecording = false
         applyAsset(asset)
         previewSamples = asset.profile.templates.first?.samples ?? []
         trimStartFraction = 0
@@ -945,6 +1001,7 @@ struct PhoneDebugView: View {
 
     private func prepareToRecord(_ asset: PhoneGestureAsset) {
         editingAsset = asset
+        isAppendingRecording = true
         applyAsset(asset)
         sampleRole = "sample"
         selectedCaptureURL = nil
@@ -1293,6 +1350,7 @@ struct PhoneDebugView: View {
         selectedAudioFileName = ""
         selectedAudioSequenceFileNames = []
         editingAsset = nil
+        isAppendingRecording = false
         currentStep = .create
         AppDiagnostics.record("phone.wizard.reset")
     }
