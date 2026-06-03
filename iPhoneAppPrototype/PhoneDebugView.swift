@@ -21,7 +21,7 @@ struct PhoneDebugView: View {
     @State private var volume = 1.0
     @State private var soundStartFraction = 0.0
     @State private var triggerTiming = "atEnd"
-    @State private var cooldownSeconds = 0.8
+    @State private var cooldownSeconds = 1.2
     @State private var localAudioFiles: [URL] = []
     @State private var countdownRemaining: Int?
     @State private var countdownTimer: Timer?
@@ -881,7 +881,7 @@ struct PhoneDebugView: View {
         selectedAudioFileName = ""
         soundStartFraction = 0
         triggerTiming = TriggerTiming.atEnd.rawValue
-        cooldownSeconds = 0.8
+        cooldownSeconds = 1.2
         editingAsset = nil
         stopTrimPlayback()
         AppDiagnostics.record("phone.wizard.newGesture")

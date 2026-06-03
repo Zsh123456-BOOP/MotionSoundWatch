@@ -74,7 +74,8 @@ import Foundation
         candidateSamples: syntheticBurst(duration: 0.76, amplitude: 1.05, phase: 0.04)
     )
 
-    #expect(calibration.threshold >= 0.55)
+    #expect(calibration.threshold >= 0.29)
+    #expect(calibration.threshold <= 0.31)
     #expect(match?.shouldTrigger == true)
 }
 
@@ -687,6 +688,38 @@ import Foundation
     #expect(event.triggered)
     #expect(event.logEntry.audioPlayed)
     #expect(event.profile?.sound?.fileName == "punch.wav")
+}
+
+@Test func singleTemplateLegacyProfileRejectsOverIntenseLooseMatch() {
+    let templateBuilder = MotionTemplateBuilder()
+    let template = templateBuilder.makeTemplate(
+        label: "transform",
+        kind: .combo,
+        samples: syntheticSequence(duration: 2.1, amplitude: 1.0)
+    )
+    let legacyProfile = GestureProfile(
+        name: "transform",
+        kind: .combo,
+        templates: [template],
+        acceptanceThreshold: 0.6,
+        cooldownSeconds: 0.3
+    )
+    let samples = syntheticSequence(duration: 2.1, amplitude: 2.2)
+    let segment = GestureSegment(
+        kind: .sequence,
+        samples: samples,
+        startTimestamp: 30,
+        endTimestamp: 32.1,
+        peakTimestamp: 31,
+        peakEnergy: 2.2,
+        features: MotionEnergyAnalyzer().features(for: samples)
+    )
+    var runtime = GestureRecognitionRuntime(profiles: [legacyProfile])
+
+    let event = runtime.recognize(segment: segment, now: 32.2, audioPlayed: true)
+
+    #expect(event.triggered == false)
+    #expect(event.profile == nil)
 }
 
 @Test func recognitionRuntimeSuppressesCooldownTrigger() {

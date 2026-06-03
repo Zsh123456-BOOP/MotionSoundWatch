@@ -124,10 +124,13 @@ public struct GestureRecognitionRuntime: Sendable {
             lastTriggerTimes: lastTriggerTimes,
             now: now
         )
+        let acceptedCandidate = candidate.flatMap { candidate in
+            strictCandidateGateAllows(candidate, for: segment) ? candidate : nil
+        }
 
         return RecognitionEvaluation(
-            candidate: candidate,
-            burstGateRejectionReason: candidate == nil ? burstGateRejectionReason : nil
+            candidate: acceptedCandidate,
+            burstGateRejectionReason: acceptedCandidate == nil ? burstGateRejectionReason : nil
         )
     }
 
@@ -138,6 +141,94 @@ public struct GestureRecognitionRuntime: Sendable {
 
     public func burstGateDecision(for segment: GestureSegment, profile: GestureProfile) -> BurstGateDecision {
         burstGate.decision(for: segment, profile: profile)
+    }
+
+    private func strictCandidateGateAllows(_ candidate: RecognitionCandidate, for segment: GestureSegment) -> Bool {
+        guard candidate.shouldTrigger else {
+            return true
+        }
+
+        let profile = candidate.profile
+        guard profile.templates.count <= 1, profile.negativeTemplates.isEmpty else {
+            return true
+        }
+
+        guard let template = profile.templates.first(where: { $0.id == candidate.templateID })
+            ?? profile.templates.first else {
+            return false
+        }
+
+        let strictThreshold = singleTemplateRuntimeThreshold(for: profile.kind)
+        guard candidate.distance <= min(profile.acceptanceThreshold, strictThreshold) else {
+            return false
+        }
+
+        guard durationLooksLikeTemplate(segment.duration, templateDuration: template.rawDuration, kind: profile.kind) else {
+            return false
+        }
+
+        guard intensityLooksLikeTemplate(segment.features, templateFeatures: template.features, kind: profile.kind) else {
+            return false
+        }
+
+        return true
+    }
+
+    private func singleTemplateRuntimeThreshold(for kind: GestureKind) -> Double {
+        switch kind {
+        case .burst:
+            return 0.30
+        case .sequence, .combo:
+            return 0.20
+        case .posture:
+            return 0.16
+        }
+    }
+
+    private func durationLooksLikeTemplate(_ duration: Double, templateDuration: Double, kind: GestureKind) -> Bool {
+        guard duration > 0, templateDuration > 0 else { return false }
+        let ratio = duration / templateDuration
+        switch kind {
+        case .burst:
+            return ratio >= 0.55 && ratio <= 1.55
+        case .sequence, .combo:
+            return ratio >= 0.70 && ratio <= 1.30
+        case .posture:
+            return ratio >= 0.85 && ratio <= 1.25
+        }
+    }
+
+    private func intensityLooksLikeTemplate(
+        _ features: GestureFeatures,
+        templateFeatures: GestureFeatures?,
+        kind: GestureKind
+    ) -> Bool {
+        guard let templateFeatures else { return false }
+        if features.dominantAxis != templateFeatures.dominantAxis,
+           features.peakAcceleration < 2.2 {
+            return false
+        }
+
+        let peakAccelerationRatio = safeRatio(features.peakAcceleration, templateFeatures.peakAcceleration)
+        let peakRotationRatio = safeRatio(features.peakRotationRate, templateFeatures.peakRotationRate)
+
+        switch kind {
+        case .burst:
+            return peakAccelerationRatio >= 0.45 && peakAccelerationRatio <= 2.25
+                && peakRotationRatio <= 2.6
+        case .sequence, .combo:
+            return peakAccelerationRatio >= 0.55 && peakAccelerationRatio <= 1.85
+                && peakRotationRatio <= 2.05
+        case .posture:
+            return peakAccelerationRatio <= 1.35 && peakRotationRatio <= 1.35
+        }
+    }
+
+    private func safeRatio(_ value: Double, _ reference: Double) -> Double {
+        guard reference > 0.0001 else {
+            return value > 0.0001 ? .infinity : 1
+        }
+        return value / reference
     }
 
     public mutating func record(
