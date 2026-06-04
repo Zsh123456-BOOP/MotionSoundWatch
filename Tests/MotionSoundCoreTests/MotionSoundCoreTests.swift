@@ -580,6 +580,44 @@ import Foundation
     #expect(event.logEntry.tokens.first?.integratedAngle ?? 0 > .pi * 1.5)
 }
 
+@Test func trajectoryRecognizerTreatsDistanceThresholdAsTriggerBoundary() {
+    let builder = MotionTemplateBuilder()
+    var profile = GestureProfileBuilder().makeProfile(
+        name: "turn",
+        kind: .sequence,
+        templates: [
+            builder.makeTemplate(label: "turn", kind: .sequence, samples: syntheticRotation(duration: 1.2, angle: .pi * 2.0)),
+            builder.makeTemplate(label: "turn", kind: .sequence, samples: syntheticRotation(duration: 1.25, angle: .pi * 2.04)),
+            builder.makeTemplate(label: "turn", kind: .sequence, samples: syntheticRotation(duration: 1.18, angle: .pi * 1.98)),
+        ]
+    )
+    let samples = syntheticRotation(duration: 1.55, angle: .pi * 2.08)
+    let measuredDistance = MotionTemplateMatcher()
+        .bestMatch(profiles: [profile], candidateSamples: samples)?
+        .distance ?? 0.2
+    profile.acceptanceThreshold = measuredDistance + 0.002
+    var thresholds = profile.thresholds ?? ThresholdProfile()
+    thresholds.triggerScore = 0.66
+    thresholds.rejectScore = 0.40
+    profile.thresholds = thresholds
+    let segment = GestureSegment(
+        kind: .sequence,
+        samples: samples,
+        startTimestamp: 50,
+        endTimestamp: 51.55,
+        peakTimestamp: 50.8,
+        peakEnergy: 0.8,
+        features: MotionEnergyAnalyzer().features(for: samples)
+    )
+    var runtime = GestureRecognitionRuntime(profiles: [profile])
+
+    let event = runtime.recognize(segment: segment, now: 51.6)
+
+    #expect((event.candidate?.distance ?? .infinity) <= profile.acceptanceThreshold)
+    #expect(event.triggered)
+    #expect((event.candidate?.recognitionScore ?? 0) >= (event.profile?.thresholds?.triggerScore ?? .infinity))
+}
+
 @Test func rotationRecognizerExplainsAngleTooSmallRejection() {
     let template = MotionTemplateBuilder().makeTemplate(
         label: "turn",

@@ -913,7 +913,11 @@ public struct MotionRecognitionRouter: Sendable {
         let rejectReason = trajectoryRejectReason(profile: profile, segment: segment, tokens: tokens, match: match)
         match.margin = nil
         if profile.signature != nil {
-            match.recognitionScore = match.confidence
+            match.recognitionScore = trajectoryTriggerScore(
+                distance: match.distance,
+                threshold: profile.acceptanceThreshold,
+                triggerScore: profile.thresholds?.triggerScore
+            )
         }
         if let rejectReason {
             match.rejectReason = rejectReason
@@ -925,7 +929,7 @@ public struct MotionRecognitionRouter: Sendable {
             profileID: profile.id,
             profileName: profile.name,
             recognizerKind: kind,
-            score: match.confidence,
+            score: match.recognitionScore ?? match.confidence,
             threshold: scoreThreshold,
             margin: match.margin,
             shouldTrigger: match.shouldTrigger,
@@ -953,17 +957,25 @@ public struct MotionRecognitionRouter: Sendable {
             if let hardRejectReason = hardTrajectoryVetoReason(tokenResult.candidate.rejectReason) {
                 return hardRejectReason
             }
-            let scoreThreshold = profile.thresholds?.triggerScore ?? (1 - profile.acceptanceThreshold)
-            if match.confidence < scoreThreshold {
+            if match.distance > profile.acceptanceThreshold {
                 return tokenResult.candidate.rejectReason ?? .scoreBelowThreshold
             }
-            if match.distance > profile.acceptanceThreshold {
+            let semanticScore = tokenResult.candidate.recognitionScore ?? tokenResult.candidate.confidence
+            let minimumSemanticScore = profile.thresholds?.rejectScore ?? 0.42
+            if semanticScore < minimumSemanticScore {
                 return tokenResult.candidate.rejectReason ?? .scoreBelowThreshold
             }
         } else if match.distance > profile.acceptanceThreshold {
             return .scoreBelowThreshold
         }
         return nil
+    }
+
+    private func trajectoryTriggerScore(distance: Double, threshold: Double, triggerScore: Double?) -> Double {
+        guard threshold > 0 else { return 0 }
+        let floor = triggerScore ?? 0.68
+        let normalizedDistance = max(0, distance / threshold)
+        return clamp(1 - normalizedDistance * (1 - floor))
     }
 
     private func hardTrajectoryVetoReason(_ rejectReason: RejectReason?) -> RejectReason? {
