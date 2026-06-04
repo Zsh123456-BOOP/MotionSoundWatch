@@ -942,6 +942,54 @@ import Foundation
     #expect(features.peakAcceleration > 1.0)
 }
 
+@Test func runtimeTrimsLongCandidateBeforeTrajectoryMatching() {
+    let builder = MotionTemplateBuilder()
+    let profile = GestureProfileBuilder().makeProfile(
+        name: "punch",
+        kind: .burst,
+        templates: [
+            builder.makeTemplate(label: "punch", kind: .burst, samples: syntheticBurst(duration: 0.7, amplitude: 1.0)),
+            builder.makeTemplate(label: "punch", kind: .burst, samples: syntheticBurst(duration: 0.73, amplitude: 1.04, phase: 0.03)),
+            builder.makeTemplate(label: "punch", kind: .burst, samples: syntheticBurst(duration: 0.68, amplitude: 0.97, phase: -0.03)),
+        ]
+    )
+    var samples: [MotionSample] = []
+    let interval = 0.02
+    for index in 0..<130 {
+        samples.append(flatSample(timestamp: Double(index) * interval, acceleration: 0.01, rotation: 0.01))
+    }
+    let offset = Double(samples.count) * interval
+    samples.append(contentsOf: syntheticBurst(duration: 0.72, amplitude: 1.02).map {
+        MotionSample(
+            timestamp: $0.timestamp + offset,
+            userAcceleration: $0.userAcceleration,
+            rotationRate: $0.rotationRate,
+            gravity: $0.gravity,
+            attitude: $0.attitude
+        )
+    })
+    let tailOffset = (samples.last?.timestamp ?? offset) + interval
+    for index in 0..<180 {
+        samples.append(flatSample(timestamp: tailOffset + Double(index) * interval, acceleration: 0.01, rotation: 0.01))
+    }
+    let segment = GestureSegment(
+        kind: .sequence,
+        samples: samples,
+        startTimestamp: samples.first?.timestamp ?? 0,
+        endTimestamp: samples.last?.timestamp ?? 0,
+        peakTimestamp: offset + 0.3,
+        peakEnergy: 1.2,
+        features: MotionEnergyAnalyzer().features(for: samples)
+    )
+    var runtime = GestureRecognitionRuntime(profiles: [profile])
+
+    let event = runtime.recognize(segment: segment, now: samples.last?.timestamp ?? 0)
+
+    #expect(event.triggered)
+    #expect(event.profile?.id == profile.id)
+    #expect(event.candidate?.distance ?? .infinity <= profile.acceptanceThreshold)
+}
+
 @Test func sampleCollectionPolicyRequiresThreeSamplesBeforeSaving() {
     let builder = MotionTemplateBuilder()
     let templates = [

@@ -800,15 +800,18 @@ public struct MotionRecognitionRouter: Sendable {
     public var tokenizer: MotionTokenizer
     public var extractor: MotionFeatureExtractor
     public var matcher: MotionTemplateMatcher
+    public var activityTrimmer: MotionSampleActivityTrimmer
 
     public init(
         tokenizer: MotionTokenizer = MotionTokenizer(),
         extractor: MotionFeatureExtractor = MotionFeatureExtractor(),
-        matcher: MotionTemplateMatcher = MotionTemplateMatcher()
+        matcher: MotionTemplateMatcher = MotionTemplateMatcher(),
+        activityTrimmer: MotionSampleActivityTrimmer = MotionSampleActivityTrimmer()
     ) {
         self.tokenizer = tokenizer
         self.extractor = extractor
         self.matcher = matcher
+        self.activityTrimmer = activityTrimmer
     }
 
     public func evaluate(
@@ -899,18 +902,20 @@ public struct MotionRecognitionRouter: Sendable {
         segment: GestureSegment,
         tokens: [MotionToken]
     ) -> (candidate: RecognitionCandidate, report: CandidateRecognitionReport)? {
+        let matchingSegment = trimmedSegment(segment, for: profile)
+        let matchingTokens = tokenizer.tokenize(segment: matchingSegment)
         guard var match = matcher.bestMatch(
             profiles: [profile],
-            candidateSamples: segment.samples
+            candidateSamples: matchingSegment.samples
         ) else {
             return nil
         }
 
         let tokenScore = profile.signature.map {
-            score(profile: profile, signature: $0, segment: segment, tokens: tokens)
+            score(profile: profile, signature: $0, segment: matchingSegment, tokens: matchingTokens)
         }
-        let kind = tokenScore?.candidate.recognizerKind ?? explanatoryKind(profile: profile, tokens: tokens)
-        let rejectReason = trajectoryRejectReason(profile: profile, segment: segment, tokens: tokens, match: match)
+        let kind = tokenScore?.candidate.recognizerKind ?? explanatoryKind(profile: profile, tokens: matchingTokens)
+        let rejectReason = trajectoryRejectReason(profile: profile, segment: matchingSegment, tokens: matchingTokens, match: match)
         match.margin = nil
         if profile.signature != nil {
             match.recognitionScore = trajectoryTriggerScore(
@@ -936,6 +941,56 @@ public struct MotionRecognitionRouter: Sendable {
             rejectReason: match.shouldTrigger ? nil : rejectReason
         )
         return (match, report)
+    }
+
+    private func trimmedSegment(_ segment: GestureSegment, for profile: GestureProfile) -> GestureSegment {
+        let kind = trimmingKind(for: profile)
+        let samples = activityTrimmer.trimForTemplate(segment.samples, requestedKind: kind)
+        guard samples.count >= 2,
+              let first = samples.first,
+              let last = samples.last else {
+            return segment
+        }
+        let features = MotionEnergyAnalyzer().features(for: samples)
+        let frames = MotionEnergyAnalyzer().frames(for: samples)
+        let peakFrame = frames.max(by: { $0.energy < $1.energy })
+        let segmentKind: GestureKind
+        switch kind {
+        case .posture:
+            segmentKind = .posture
+        case .combo:
+            segmentKind = .combo
+        case .sequence:
+            segmentKind = .sequence
+        case .burst:
+            segmentKind = features.duration <= 1.6 ? .burst : .sequence
+        }
+        return GestureSegment(
+            id: segment.id,
+            kind: segmentKind,
+            samples: samples,
+            startTimestamp: first.timestamp,
+            endTimestamp: last.timestamp,
+            peakTimestamp: peakFrame?.timestamp ?? segment.peakTimestamp,
+            peakEnergy: peakFrame?.energy ?? segment.peakEnergy,
+            features: features
+        )
+    }
+
+    private func trimmingKind(for profile: GestureProfile) -> GestureKind {
+        guard let primaryKind = profile.signature?.primaryKind else {
+            return profile.kind
+        }
+        switch primaryKind {
+        case .impulse, .sweep:
+            return .burst
+        case .rotation, .oscillation:
+            return .sequence
+        case .hold:
+            return .posture
+        case .pause, .free:
+            return profile.kind
+        }
     }
 
     private func explanatoryKind(profile: GestureProfile, tokens: [MotionToken]) -> MotionTokenKind {
