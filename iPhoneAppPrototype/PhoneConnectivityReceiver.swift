@@ -396,23 +396,30 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
             var primaryTemplates: [MotionTemplate] = []
             let csvCodec = MotionSampleCSVCodec()
             let templateBuilder = MotionTemplateBuilder()
+            let preparedPrimarySamples = primarySamplesOverride.map {
+                Self.preparedTemplateSamples($0, requestedKind: requestedKind)
+            }
             let effectiveKind = Self.effectiveKind(
                 requestedKind: requestedKind,
-                primarySamples: primarySamplesOverride
+                primarySamples: preparedPrimarySamples
             )
-            primaryTemplates.append(contentsOf: baseTemplates)
+            let preparedBaseTemplates = baseTemplates.map {
+                Self.preparedTemplate(from: $0, kind: effectiveKind, builder: templateBuilder)
+            }
+            primaryTemplates.append(contentsOf: preparedBaseTemplates)
 
-            if let primarySamplesOverride, !primarySamplesOverride.isEmpty {
+            if let preparedPrimarySamples, !preparedPrimarySamples.isEmpty {
                 primaryTemplates.append(templateBuilder.makeTemplate(
                     label: trimmedGesture,
                     kind: effectiveKind,
-                    samples: primarySamplesOverride
+                    samples: preparedPrimarySamples
                 ))
                 AppDiagnostics.record(
                     "phone.profile.primarySamplesOverride",
                     [
                         "gesture": trimmedGesture,
-                        "samples": primarySamplesOverride.count,
+                        "samples": preparedPrimarySamples.count,
+                        "rawSamples": primarySamplesOverride?.count ?? 0,
                         "requestedKind": requestedKind.rawValue,
                         "effectiveKind": effectiveKind.rawValue,
                     ]
@@ -427,10 +434,11 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
                 switch parsed.role {
                 case "sample", "positive", "watch", "unknown":
                     if primarySamplesOverride == nil, baseTemplates.isEmpty {
+                        let preparedSamples = Self.preparedTemplateSamples(samples, requestedKind: effectiveKind)
                         primaryTemplates.append(templateBuilder.makeTemplate(
                             label: trimmedGesture,
                             kind: effectiveKind,
-                            samples: samples
+                            samples: preparedSamples
                         ))
                     }
                 default:
@@ -527,6 +535,7 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
                     "effectiveKind": effectiveKind.rawValue,
                     "templates": primaryTemplates.count,
                     "baseTemplates": baseTemplates.count,
+                    "preparedBaseTemplates": preparedBaseTemplates.count,
                     "negativeTemplates": 0,
                     "soundSequenceCount": profile.soundSequence?.count ?? 0,
                     "queued": didQueueTransfer,
@@ -756,8 +765,35 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
         guard let first = primarySamples.first, let last = primarySamples.last else {
             return requestedKind
         }
+        let features = MotionFeatureExtractor().extract(primarySamples)
+        switch MotionTokenizer().classify(features) {
+        case .impulse, .sweep:
+            return .burst
+        case .hold:
+            return .posture
+        case .rotation, .oscillation:
+            return .sequence
+        case .pause, .free:
+            break
+        }
         let duration = max(0, last.timestamp - first.timestamp)
-        return duration <= 0.9 ? .burst : .sequence
+        return duration <= 1.6 ? .burst : .sequence
+    }
+
+    nonisolated private static func preparedTemplateSamples(
+        _ samples: [MotionSample],
+        requestedKind: GestureKind
+    ) -> [MotionSample] {
+        MotionSampleActivityTrimmer().trimForTemplate(samples, requestedKind: requestedKind)
+    }
+
+    nonisolated private static func preparedTemplate(
+        from template: MotionTemplate,
+        kind: GestureKind,
+        builder: MotionTemplateBuilder
+    ) -> MotionTemplate {
+        let samples = preparedTemplateSamples(template.samples, requestedKind: kind)
+        return builder.makeTemplate(label: template.label, kind: kind, samples: samples, createdAt: template.createdAt)
     }
 
     nonisolated private static func isLegacyUntitledProfile(_ profile: GestureProfile) -> Bool {

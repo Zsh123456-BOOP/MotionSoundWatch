@@ -906,20 +906,27 @@ public struct MotionRecognitionRouter: Sendable {
             return nil
         }
 
-        let kind = explanatoryKind(profile: profile, tokens: tokens)
+        let tokenScore = profile.signature.map {
+            score(profile: profile, signature: $0, segment: segment, tokens: tokens)
+        }
+        let kind = tokenScore?.candidate.recognizerKind ?? explanatoryKind(profile: profile, tokens: tokens)
         let rejectReason = trajectoryRejectReason(profile: profile, segment: segment, tokens: tokens, match: match)
         match.margin = nil
+        if profile.signature != nil {
+            match.recognitionScore = match.confidence
+        }
         if let rejectReason {
             match.rejectReason = rejectReason
         }
         match.recognizerKind = kind
 
+        let scoreThreshold = profile.thresholds?.triggerScore ?? (1 - profile.acceptanceThreshold)
         let report = CandidateRecognitionReport(
             profileID: profile.id,
             profileName: profile.name,
             recognizerKind: kind,
             score: match.confidence,
-            threshold: 1 - profile.acceptanceThreshold,
+            threshold: scoreThreshold,
             margin: match.margin,
             shouldTrigger: match.shouldTrigger,
             rejectReason: match.shouldTrigger ? nil : rejectReason
@@ -945,6 +952,10 @@ public struct MotionRecognitionRouter: Sendable {
             let tokenResult = score(profile: profile, signature: signature, segment: segment, tokens: tokens)
             if let hardRejectReason = hardTrajectoryVetoReason(tokenResult.candidate.rejectReason) {
                 return hardRejectReason
+            }
+            let scoreThreshold = profile.thresholds?.triggerScore ?? (1 - profile.acceptanceThreshold)
+            if match.confidence < scoreThreshold {
+                return tokenResult.candidate.rejectReason ?? .scoreBelowThreshold
             }
             if match.distance > profile.acceptanceThreshold {
                 return tokenResult.candidate.rejectReason ?? .scoreBelowThreshold

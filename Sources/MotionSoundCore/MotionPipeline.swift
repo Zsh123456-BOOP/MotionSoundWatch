@@ -171,6 +171,116 @@ public struct MotionEnergyAnalyzer: Sendable {
     }
 }
 
+public struct MotionSampleActivityTrimmer: Sendable {
+    public var energyAnalyzer: MotionEnergyAnalyzer
+    public var featureExtractor: MotionFeatureExtractor
+    public var tokenizer: MotionTokenizer
+    public var activePadding: Double
+    public var peakWindowBefore: Double
+    public var peakWindowAfter: Double
+
+    public init(
+        energyAnalyzer: MotionEnergyAnalyzer = MotionEnergyAnalyzer(),
+        featureExtractor: MotionFeatureExtractor = MotionFeatureExtractor(),
+        tokenizer: MotionTokenizer = MotionTokenizer(),
+        activePadding: Double = 0.25,
+        peakWindowBefore: Double = 0.45,
+        peakWindowAfter: Double = 0.95
+    ) {
+        self.energyAnalyzer = energyAnalyzer
+        self.featureExtractor = featureExtractor
+        self.tokenizer = tokenizer
+        self.activePadding = activePadding
+        self.peakWindowBefore = peakWindowBefore
+        self.peakWindowAfter = peakWindowAfter
+    }
+
+    public func trimForTemplate(_ samples: [MotionSample], requestedKind: GestureKind) -> [MotionSample] {
+        guard samples.count >= 8,
+              let firstSample = samples.first,
+              let lastSample = samples.last else {
+            return retimestamp(samples)
+        }
+
+        let frames = energyAnalyzer.frames(for: samples)
+        guard let peakFrame = frames.max(by: { $0.energy < $1.energy }),
+              peakFrame.energy >= 0.18 else {
+            return retimestamp(samples)
+        }
+
+        let threshold = max(0.16, peakFrame.energy * 0.18)
+        let activeFrames = frames.filter { $0.energy >= threshold }
+        guard let firstActive = activeFrames.first,
+              let lastActive = activeFrames.last else {
+            return retimestamp(samples)
+        }
+
+        let originalDuration = max(0, lastSample.timestamp - firstSample.timestamp)
+        let activeStart = max(firstSample.timestamp, firstActive.timestamp - activePadding)
+        let activeEnd = min(lastSample.timestamp, lastActive.timestamp + activePadding)
+        let activeSamples = clippedSamples(samples, start: activeStart, end: activeEnd)
+        let activeDuration = duration(activeSamples)
+
+        if shouldFocusOnPeak(
+            requestedKind: requestedKind,
+            originalDuration: originalDuration,
+            activeDuration: activeDuration,
+            activeSamples: activeSamples
+        ) {
+            return clippedSamples(
+                samples,
+                start: peakFrame.timestamp - peakWindowBefore,
+                end: peakFrame.timestamp + peakWindowAfter
+            )
+        }
+
+        return activeSamples
+    }
+
+    private func shouldFocusOnPeak(
+        requestedKind: GestureKind,
+        originalDuration: Double,
+        activeDuration: Double,
+        activeSamples: [MotionSample]
+    ) -> Bool {
+        guard requestedKind == .burst else { return false }
+        guard originalDuration > 3.0 || activeDuration > 2.2 else { return false }
+        guard duration(activeSamples) > peakWindowBefore + peakWindowAfter else { return false }
+
+        let features = featureExtractor.extract(activeSamples)
+        return tokenizer.classify(features) == .impulse
+            || features.peakAcc >= 1.6
+            || features.peakGyro >= 6.0
+            || features.peakJerk >= 32
+    }
+
+    private func clippedSamples(_ samples: [MotionSample], start: Double, end: Double) -> [MotionSample] {
+        let clipped = samples.filter { $0.timestamp >= start && $0.timestamp <= end }
+        if clipped.count >= 2 {
+            return retimestamp(clipped)
+        }
+        return retimestamp(samples)
+    }
+
+    private func retimestamp(_ samples: [MotionSample]) -> [MotionSample] {
+        guard let first = samples.first else { return [] }
+        return samples.map { sample in
+            MotionSample(
+                timestamp: max(0, sample.timestamp - first.timestamp),
+                userAcceleration: sample.userAcceleration,
+                rotationRate: sample.rotationRate,
+                gravity: sample.gravity,
+                attitude: sample.attitude
+            )
+        }
+    }
+
+    private func duration(_ samples: [MotionSample]) -> Double {
+        guard let first = samples.first, let last = samples.last else { return 0 }
+        return max(0, last.timestamp - first.timestamp)
+    }
+}
+
 public enum GestureSegmenterState: String, Codable, Equatable, Sendable {
     case idle
     case candidateStarted

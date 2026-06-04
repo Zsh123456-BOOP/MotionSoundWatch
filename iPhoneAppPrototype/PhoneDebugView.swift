@@ -13,6 +13,7 @@ struct PhoneDebugView: View {
     @State private var sampleRole = "sample"
     @State private var selectedCaptureURL: URL?
     @State private var previewSamples: [MotionSample] = []
+    @State private var acceptedRecordings: [AcceptedGestureRecording] = []
     @State private var previewMessage: String?
     @State private var trimStartFraction = 0.05
     @State private var trimEndFraction = 0.95
@@ -224,7 +225,7 @@ struct PhoneDebugView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("\(savedProfiles.count) 个动作")
                             .font(.title3.weight(.semibold))
-                        Text("保存后的动作会显示在这里。建议每个动作补录 3 次以上，识别会更稳。")
+                        Text("保存后的动作会显示在这里。新动作会引导录满 3 次；样本差异大时会继续录到 5 次。")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
@@ -273,7 +274,7 @@ struct PhoneDebugView: View {
                         .foregroundStyle(.red)
                 }
 
-                Text("创建后可在动作列表点“补录”，把第 2、第 3 次录制追加到同一个动作。")
+                Text("创建后先录同一个动作 3 次。每次录完都可以看 3D 轨迹和时间轴，确认后再进入下一次。")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -306,6 +307,8 @@ struct PhoneDebugView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                SampleCollectionStatusView(plan: currentSampleCollectionPlan)
 
                 if let countdownRemaining {
                     CountdownView(value: countdownRemaining)
@@ -411,11 +414,7 @@ struct PhoneDebugView: View {
 
                     CaptureStats(samples: trimmedSamples)
 
-                    if let editingAsset, isAppendingRecording {
-                        Text("保存后会追加为第 \(editingAsset.templateCount + 1) 次录制；建议至少录到 3 次。")
-                            .font(.footnote.weight(.medium))
-                            .foregroundStyle(.secondary)
-                    }
+                    SampleCollectionStatusView(plan: sampleCollectionPlan(including: trimmedSamples))
 
                     HStack(spacing: 10) {
                         Button {
@@ -442,14 +441,14 @@ struct PhoneDebugView: View {
 
                     StepNavigationBar(
                         backTitle: "返回录制",
-                        nextTitle: "下一步：配置声音",
+                        nextTitle: trimNextTitle,
                         canGoNext: !trimmedSamples.isEmpty
                     ) {
                         stopTrimPlayback()
                         currentStep = .record
                     } next: {
                         stopTrimPlayback()
-                        currentStep = .sound
+                        acceptTrimmedSampleAndContinueOrConfigureSound()
                     }
                 }
             }
@@ -592,7 +591,7 @@ struct PhoneDebugView: View {
                 StepNavigationBar(
                     backTitle: "返回裁剪",
                     nextTitle: soundStepSaveTitle,
-                    canGoNext: !trimmedSamples.isEmpty && !normalizedGestureName.isEmpty && nameConflict == nil
+                    canGoNext: canSaveProfile
                 ) {
                     currentStep = .trim
                 } next: {
@@ -607,7 +606,7 @@ struct PhoneDebugView: View {
             VStack(alignment: .leading, spacing: 14) {
                 SummaryRow(label: "动作", value: normalizedGestureName)
                 SummaryRow(label: "类型", value: automaticKindText)
-                SummaryRow(label: "片段", value: "\(trimmedSamples.count) 个采样点")
+                SummaryRow(label: "录制", value: "\(syncBaseTemplates.count) 次")
                 SummaryRow(label: "音效", value: selectedAudioFileName.isEmpty ? "未绑定" : selectedAudioFileName)
                 SummaryRow(label: "触发", value: triggerTiming == "atPeak" ? "峰值附近" : "动作结束")
                 SummaryRow(label: "保存类型", value: automaticKindText)
@@ -672,21 +671,27 @@ struct PhoneDebugView: View {
         "自适应动作"
     }
 
+    private var currentSampleCollectionPlan: GestureSampleCollectionPlan {
+        sampleCollectionPlan(including: nil)
+    }
+
     private var recordingSubtitle: String {
-        guard let editingAsset, isAppendingRecording else {
-            return "系统自动识别短促/连续"
+        let plan = currentSampleCollectionPlan
+        if let editingAsset, isAppendingRecording {
+            return "补录第 \(plan.acceptedCount + 1) 次，目标 \(plan.requiredCount) 次"
         }
-        return "补录第 \(editingAsset.templateCount + 1) 次"
+        return "第 \(plan.acceptedCount + 1) 次，目标 \(plan.requiredCount) 次"
     }
 
     private var soundStepSummaryText: String {
+        let plan = currentSampleCollectionPlan
         guard let editingAsset else {
-            return "系统会按当前裁剪片段自动保存为\(automaticKindText)。"
+            return "已确认 \(plan.acceptedCount) 次录制，系统会生成\(automaticKindText)模型。"
         }
         if isAppendingRecording {
-            return "保存后会保留原有 \(editingAsset.templateCount) 个模板，并追加当前裁剪片段。"
+            return "保存后会保留原有模板，并使用当前共 \(plan.acceptedCount) 次录制重新生成模型。"
         }
-        return "保存后会保留原有 \(editingAsset.templateCount) 个模板，只更新名称、声音和触发设置。"
+        return "当前动作已有 \(editingAsset.templateCount) 次录制；保存会同步名称、声音和触发设置。"
     }
 
     private var soundStepSaveTitle: String {
@@ -694,6 +699,21 @@ struct PhoneDebugView: View {
             return "保存并同步"
         }
         return isAppendingRecording ? "追加录制并同步" : "保存修改"
+    }
+
+    private var trimNextTitle: String {
+        let plan = sampleCollectionPlan(including: trimmedSamples)
+        if plan.needsMoreSamples {
+            return "保存本次，继续录第 \(plan.acceptedCount + 1) 次"
+        }
+        return "下一步：配置声音"
+    }
+
+    private var canSaveProfile: Bool {
+        !normalizedGestureName.isEmpty
+            && nameConflict == nil
+            && !syncBaseTemplates.isEmpty
+            && currentSampleCollectionPlan.isReady
     }
 
     private var captureDuration: Double {
@@ -867,6 +887,21 @@ struct PhoneDebugView: View {
             )
             return
         }
+        let collectionPlan = currentSampleCollectionPlan
+        guard collectionPlan.isReady else {
+            receiver.setLastMessage(collectionPlan.message)
+            currentStep = .record
+            AppDiagnostics.record(
+                "phone.profile.sampleCollection.incomplete",
+                [
+                    "label": normalizedGestureName,
+                    "accepted": collectionPlan.acceptedCount,
+                    "required": collectionPlan.requiredCount,
+                    "highDeviation": collectionPlan.hasHighDeviation,
+                ]
+            )
+            return
+        }
 
         let result = receiver.generateAndSendProfile(
             gesture: normalizedGestureName,
@@ -893,6 +928,7 @@ struct PhoneDebugView: View {
             currentStep = .library
             editingAsset = nil
             isAppendingRecording = false
+            acceptedRecordings = []
             receiver.setLastMessage(
                 didQueueLibraryReplace || result.didQueueTransfer
                     ? profileSavedMessage(result, wasAppendingRecording: wasAppendingRecording)
@@ -904,7 +940,7 @@ struct PhoneDebugView: View {
                 [
                     "label": normalizedGestureName,
                     "kind": automaticKindText,
-                    "samples": trimmedSamples.count,
+                    "recordings": syncBaseTemplates.count,
                     "sound": selectedAudioFileName,
                     "saved": result != nil,
             ]
@@ -912,15 +948,125 @@ struct PhoneDebugView: View {
     }
 
     private var syncPrimarySamplesOverride: [MotionSample]? {
-        if editingAsset == nil || isAppendingRecording {
-            return trimmedSamples
-        }
         return nil
     }
 
     private var syncBaseTemplates: [MotionTemplate] {
-        guard let editingAsset else { return [] }
-        return editingAsset.profile.templates
+        var templates: [MotionTemplate] = []
+        if let editingAsset {
+            templates.append(contentsOf: editingAsset.profile.templates)
+        }
+        if editingAsset == nil || isAppendingRecording {
+            templates.append(contentsOf: acceptedRecordingTemplates())
+        }
+        return templates
+    }
+
+    private func sampleCollectionPlan(including samples: [MotionSample]?) -> GestureSampleCollectionPlan {
+        GestureSampleCollectionPolicy().plan(
+            templates: collectionTemplates(including: samples),
+            existingProfiles: comparableExistingProfiles
+        )
+    }
+
+    private var comparableExistingProfiles: [GestureProfile] {
+        savedProfiles
+            .map(\.profile)
+            .filter { profile in
+                if let editingAsset {
+                    return profile.id != editingAsset.profile.id
+                }
+                return true
+            }
+    }
+
+    private func collectionTemplates(including samples: [MotionSample]?) -> [MotionTemplate] {
+        var templates: [MotionTemplate] = []
+        if let editingAsset {
+            templates.append(contentsOf: editingAsset.profile.templates)
+        }
+        templates.append(contentsOf: acceptedRecordingTemplates())
+
+        guard let samples, !samples.isEmpty else {
+            return templates
+        }
+
+        let current = makeRecordingTemplate(samples: samples)
+        guard let selectedCaptureURL else {
+            templates.append(current)
+            return templates
+        }
+
+        if let acceptedIndex = acceptedRecordings.firstIndex(where: { $0.sourceURL == selectedCaptureURL }) {
+            let baseCount = editingAsset?.profile.templates.count ?? 0
+            let templateIndex = baseCount + acceptedIndex
+            if templates.indices.contains(templateIndex) {
+                templates[templateIndex] = current
+            } else {
+                templates.append(current)
+            }
+        } else {
+            templates.append(current)
+        }
+        return templates
+    }
+
+    private func acceptedRecordingTemplates() -> [MotionTemplate] {
+        acceptedRecordings.map { makeRecordingTemplate(samples: $0.samples) }
+    }
+
+    private func makeRecordingTemplate(samples: [MotionSample]) -> MotionTemplate {
+        MotionTemplateBuilder().makeTemplate(
+            label: normalizedGestureName.isEmpty ? "gesture" : normalizedGestureName,
+            kind: editingAsset?.profile.kind ?? .burst,
+            samples: samples
+        )
+    }
+
+    private func acceptTrimmedSampleAndContinueOrConfigureSound() {
+        guard !trimmedSamples.isEmpty else { return }
+        acceptCurrentTrimmedRecording()
+        let plan = currentSampleCollectionPlan
+        receiver.setLastMessage(plan.message)
+        AppDiagnostics.record(
+            "phone.recording.sampleAccepted",
+            [
+                "label": normalizedGestureName,
+                "accepted": plan.acceptedCount,
+                "required": plan.requiredCount,
+                "highDeviation": plan.hasHighDeviation,
+                "ready": plan.isReady,
+            ]
+        )
+
+        if plan.needsMoreSamples {
+            prepareNextRecordingPass()
+        } else {
+            currentStep = .sound
+        }
+    }
+
+    private func acceptCurrentTrimmedRecording() {
+        let recording = AcceptedGestureRecording(
+            sourceURL: selectedCaptureURL,
+            samples: trimmedSamples
+        )
+        if let selectedCaptureURL,
+           let index = acceptedRecordings.firstIndex(where: { $0.sourceURL == selectedCaptureURL }) {
+            acceptedRecordings[index] = recording
+        } else {
+            acceptedRecordings.append(recording)
+        }
+    }
+
+    private func prepareNextRecordingPass() {
+        selectedCaptureURL = nil
+        previewSamples = []
+        previewMessage = nil
+        trimStartFraction = 0.05
+        trimEndFraction = 0.95
+        playbackFraction = 0
+        currentStep = .record
     }
 
     private func profileSavedMessage(_ result: ProfileSyncResult, wasAppendingRecording: Bool) -> String {
@@ -971,6 +1117,7 @@ struct PhoneDebugView: View {
         sampleRole = "sample"
         selectedCaptureURL = nil
         previewSamples = []
+        acceptedRecordings = []
         previewMessage = nil
         trimStartFraction = 0.05
         trimEndFraction = 0.95
@@ -990,6 +1137,7 @@ struct PhoneDebugView: View {
         editingAsset = asset
         isAppendingRecording = false
         applyAsset(asset)
+        acceptedRecordings = []
         previewSamples = asset.profile.templates.first?.samples ?? []
         trimStartFraction = 0
         trimEndFraction = 1
@@ -1006,6 +1154,7 @@ struct PhoneDebugView: View {
         sampleRole = "sample"
         selectedCaptureURL = nil
         previewSamples = []
+        acceptedRecordings = []
         previewMessage = nil
         currentStep = .record
         AppDiagnostics.record("phone.profile.prepareRecord", ["profile": asset.profile.name])
@@ -1343,6 +1492,7 @@ struct PhoneDebugView: View {
         sampleRole = "sample"
         selectedCaptureURL = nil
         previewSamples = []
+        acceptedRecordings = []
         previewMessage = nil
         trimStartFraction = 0.05
         trimEndFraction = 0.95
@@ -2029,6 +2179,44 @@ private struct SummaryRow: View {
     }
 }
 
+private struct AcceptedGestureRecording: Identifiable, Equatable {
+    var id = UUID()
+    var sourceURL: URL?
+    var samples: [MotionSample]
+}
+
+private struct SampleCollectionStatusView: View {
+    var plan: GestureSampleCollectionPlan
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: plan.isReady ? "checkmark.circle.fill" : "circle.dotted")
+                    .foregroundStyle(plan.isReady ? Color.green : Color.accentColor)
+                Text("\(plan.acceptedCount)/\(plan.requiredCount) 次录制")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Text(plan.isReady ? "可保存" : "继续录制")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(plan.isReady ? Color.green : Color.accentColor)
+            }
+            Text(plan.message)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if plan.hasHighDeviation {
+                Text("样本偏差较大，系统会多收集到 5 次，避免后续一做就误触或完全触发不了。")
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(12)
+        .background(Color(.tertiarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
 private struct PhoneGestureAsset: Identifiable, Equatable {
     var fileURL: URL
     var profile: GestureProfile
@@ -2210,7 +2398,8 @@ private enum MotionTrajectoryRenderer {
         }
 
         let cursorIndex = clampedIndex(fraction: playbackFraction, count: points.count)
-        let cursor = sphereNode(radius: 0.06, color: UIColor.systemRed)
+        let sampleIndex = clampedIndex(fraction: playbackFraction, count: samples.count)
+        let cursor = watchNode(sample: samples[sampleIndex])
         cursor.position = points[cursorIndex]
         root.addChildNode(cursor)
 
@@ -2311,6 +2500,46 @@ private enum MotionTrajectoryRenderer {
         material.emission.contents = color.withAlphaComponent(0.25)
         sphere.materials = [material]
         return SCNNode(geometry: sphere)
+    }
+
+    private static func watchNode(sample: MotionSample) -> SCNNode {
+        let root = SCNNode()
+
+        let forearm = SCNCylinder(radius: 0.035, height: 0.72)
+        let forearmMaterial = SCNMaterial()
+        forearmMaterial.diffuse.contents = UIColor.systemGray2.withAlphaComponent(0.82)
+        forearm.materials = [forearmMaterial]
+        let forearmNode = SCNNode(geometry: forearm)
+        forearmNode.position = SCNVector3(0, -0.42, -0.02)
+        root.addChildNode(forearmNode)
+
+        let body = SCNBox(width: 0.34, height: 0.24, length: 0.08, chamferRadius: 0.035)
+        let bodyMaterial = SCNMaterial()
+        bodyMaterial.diffuse.contents = UIColor.label
+        bodyMaterial.emission.contents = UIColor.systemBlue.withAlphaComponent(0.08)
+        body.materials = [bodyMaterial]
+        let bodyNode = SCNNode(geometry: body)
+        root.addChildNode(bodyNode)
+
+        let face = SCNBox(width: 0.26, height: 0.17, length: 0.012, chamferRadius: 0.018)
+        let faceMaterial = SCNMaterial()
+        faceMaterial.diffuse.contents = UIColor.systemBlue.withAlphaComponent(0.78)
+        faceMaterial.emission.contents = UIColor.systemBlue.withAlphaComponent(0.35)
+        face.materials = [faceMaterial]
+        let faceNode = SCNNode(geometry: face)
+        faceNode.position = SCNVector3(0, 0, 0.048)
+        root.addChildNode(faceNode)
+
+        if let attitude = sample.attitude {
+            root.orientation = SCNQuaternion(
+                Float(attitude.x),
+                Float(attitude.y),
+                Float(attitude.z),
+                Float(attitude.w)
+            )
+        }
+
+        return root
     }
 
     private static func addAxes(to root: SCNNode) {

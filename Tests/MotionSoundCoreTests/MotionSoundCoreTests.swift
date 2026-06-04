@@ -806,6 +806,41 @@ import Foundation
     #expect(runtime.lastTriggerTimes[profile.id] == 10.8)
 }
 
+@Test func routedRecognitionRejectsLowScoreEvenWhenTrajectoryDistancePasses() {
+    let templateBuilder = MotionTemplateBuilder()
+    var profile = GestureProfileBuilder().makeProfile(
+        name: "swing",
+        kind: .sequence,
+        templates: [
+            templateBuilder.makeTemplate(label: "swing", kind: .sequence, samples: syntheticSequence(duration: 1.0, amplitude: 1.0)),
+            templateBuilder.makeTemplate(label: "swing", kind: .sequence, samples: syntheticSequence(duration: 1.05, amplitude: 1.02)),
+            templateBuilder.makeTemplate(label: "swing", kind: .sequence, samples: syntheticSequence(duration: 0.95, amplitude: 0.98)),
+        ]
+    )
+    profile.acceptanceThreshold = 1.0
+    var thresholds = profile.thresholds!
+    thresholds.triggerScore = 0.98
+    profile.thresholds = thresholds
+
+    let samples = syntheticBurst(duration: 1.0, amplitude: 0.8)
+    let segment = GestureSegment(
+        kind: .sequence,
+        samples: samples,
+        startTimestamp: 0,
+        endTimestamp: 1,
+        peakTimestamp: 0.5,
+        peakEnergy: 1.0,
+        features: MotionEnergyAnalyzer().features(for: samples)
+    )
+
+    let evaluation = MotionRecognitionRouter().evaluate(segment: segment, profiles: [profile])
+
+    #expect((evaluation.candidate?.distance ?? .infinity) <= profile.acceptanceThreshold)
+    #expect(evaluation.candidate?.recognitionScore != nil)
+    #expect(evaluation.candidate?.shouldTrigger == false)
+    #expect(evaluation.rejectReason != nil)
+}
+
 @Test func recognitionRuntimeRecordsAudioPlaybackOutcome() {
     let templateBuilder = MotionTemplateBuilder()
     let template = templateBuilder.makeTemplate(
@@ -838,6 +873,82 @@ import Foundation
     #expect(event.triggered)
     #expect(event.logEntry.audioPlayed)
     #expect(event.profile?.sound?.fileName == "punch.wav")
+}
+
+@Test func activityTrimmerFocusesLongBurstRecording() {
+    var samples: [MotionSample] = []
+    let interval = 0.02
+    for index in 0..<120 {
+        samples.append(flatSample(timestamp: Double(index) * interval, acceleration: 0.01, rotation: 0.01))
+    }
+    let offset = Double(samples.count) * interval
+    samples.append(contentsOf: syntheticBurst(duration: 0.7, amplitude: 1.2).map {
+        MotionSample(
+            timestamp: $0.timestamp + offset,
+            userAcceleration: $0.userAcceleration,
+            rotationRate: $0.rotationRate,
+            gravity: $0.gravity
+        )
+    })
+    let tailOffset = (samples.last?.timestamp ?? offset) + interval
+    for index in 0..<160 {
+        samples.append(flatSample(timestamp: tailOffset + Double(index) * interval, acceleration: 0.01, rotation: 0.01))
+    }
+
+    let trimmed = MotionSampleActivityTrimmer().trimForTemplate(samples, requestedKind: .burst)
+    let features = MotionEnergyAnalyzer().features(for: trimmed)
+
+    #expect(trimmed.count < samples.count / 2)
+    #expect((trimmed.last?.timestamp ?? 0) - (trimmed.first?.timestamp ?? 0) < 1.6)
+    #expect(trimmed.first?.timestamp == 0)
+    #expect(features.peakAcceleration > 1.0)
+}
+
+@Test func sampleCollectionPolicyRequiresThreeSamplesBeforeSaving() {
+    let builder = MotionTemplateBuilder()
+    let templates = [
+        builder.makeTemplate(label: "punch", kind: .burst, samples: syntheticBurst(duration: 0.7, amplitude: 1.0)),
+        builder.makeTemplate(label: "punch", kind: .burst, samples: syntheticBurst(duration: 0.72, amplitude: 1.02, phase: 0.02)),
+    ]
+
+    let plan = GestureSampleCollectionPolicy().plan(templates: templates)
+
+    #expect(plan.acceptedCount == 2)
+    #expect(plan.requiredCount == 3)
+    #expect(plan.isReady == false)
+    #expect(plan.needsMoreSamples)
+}
+
+@Test func sampleCollectionPolicyAllowsThreeConsistentSamples() {
+    let builder = MotionTemplateBuilder()
+    let templates = [
+        builder.makeTemplate(label: "punch", kind: .burst, samples: syntheticBurst(duration: 0.7, amplitude: 1.0)),
+        builder.makeTemplate(label: "punch", kind: .burst, samples: syntheticBurst(duration: 0.72, amplitude: 1.02, phase: 0.02)),
+        builder.makeTemplate(label: "punch", kind: .burst, samples: syntheticBurst(duration: 0.68, amplitude: 0.98, phase: -0.02)),
+    ]
+
+    let plan = GestureSampleCollectionPolicy().plan(templates: templates)
+
+    #expect(plan.acceptedCount == 3)
+    #expect(plan.requiredCount == 3)
+    #expect(plan.isReady)
+    #expect(plan.hasHighDeviation == false)
+}
+
+@Test func sampleCollectionPolicyRequiresFiveWhenSamplesDiverge() {
+    let builder = MotionTemplateBuilder()
+    let templates = [
+        builder.makeTemplate(label: "mixed", kind: .sequence, samples: syntheticBurst(duration: 0.7, amplitude: 1.0)),
+        builder.makeTemplate(label: "mixed", kind: .sequence, samples: syntheticSequence(duration: 2.8, amplitude: 1.0)),
+        builder.makeTemplate(label: "mixed", kind: .sequence, samples: syntheticSequence(duration: 0.9, amplitude: 0.35)),
+    ]
+
+    let plan = GestureSampleCollectionPolicy().plan(templates: templates)
+
+    #expect(plan.acceptedCount == 3)
+    #expect(plan.requiredCount == 5)
+    #expect(plan.isReady == false)
+    #expect(plan.hasHighDeviation)
 }
 
 @Test func singleTemplateLegacyProfileRejectsOverIntenseLooseMatch() {

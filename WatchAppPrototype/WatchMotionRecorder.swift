@@ -61,6 +61,7 @@ final class WatchMotionRecorder: ObservableObject {
     private var lastMotionHeartbeatAt: TimeInterval = 0
     private var lastNoProfileSummaryLogAt: TimeInterval = -.infinity
     private var lastNonCandidateTraceAt: TimeInterval = -.infinity
+    private var recognitionSuppressedUntil: TimeInterval = 0
     private var motionCallbackCount = 0
     private var firstMotionSampleLogged = false
     private var motionStartDiagnosticTask: Task<Void, Never>?
@@ -129,6 +130,7 @@ final class WatchMotionRecorder: ObservableObject {
         recordingPreviousRawTimestamp = nil
         recordingElapsedTimestamp = 0
         firstMotionSampleLogged = false
+        recognitionSuppressedUntil = 0
         AppDiagnostics.record("watch.motion.stopLiveUpdates")
     }
 
@@ -143,6 +145,7 @@ final class WatchMotionRecorder: ObservableObject {
         savedProfileURL = nil
         savedRecordingURL = nil
         segmenter.reset()
+        lastRecognitionSummary = "录制中，已暂停动作触发。"
         isRecording = true
         if !isLive {
             startLiveUpdates()
@@ -215,12 +218,17 @@ final class WatchMotionRecorder: ObservableObject {
     func stopRecording() -> [MotionSample] {
         isRecording = false
         lastAssessment = validator.assess(samples)
+        segmenter.reset()
+        if let latestSample {
+            recognitionSuppressedUntil = latestSample.timestamp + 1.25
+        }
         AppDiagnostics.record(
             "watch.recording.stop",
             [
                 "samples": samples.count,
                 "duration": lastAssessment?.duration ?? 0,
                 "sampleRate": lastAssessment?.estimatedSampleRate ?? 0,
+                "recognitionSuppressedUntil": recognitionSuppressedUntil,
             ]
         )
         return samples
@@ -449,6 +457,19 @@ final class WatchMotionRecorder: ObservableObject {
         latestSample = liveSample
         recordFirstMotionSampleIfNeeded(rawSample: rawSample, sample: liveSample)
         recordMotionHeartbeatIfNeeded(sample: liveSample)
+
+        if isRecording {
+            let recordingSample = normalizedRecordingSample(from: rawSample)
+            samples.append(recordingSample)
+            lastAssessment = validator.assess(samples)
+            estimatedSampleRate = lastAssessment?.estimatedSampleRate ?? 0
+            return
+        }
+
+        guard liveSample.timestamp >= recognitionSuppressedUntil else {
+            return
+        }
+
         if let segment = segmenter.ingest(liveSample) {
             lastSegment = segment
             AppDiagnostics.record(
@@ -525,12 +546,6 @@ final class WatchMotionRecorder: ObservableObject {
                 triggered: lastRecognitionEvent?.triggered == true
             )
         }
-
-        guard isRecording else { return }
-        let recordingSample = normalizedRecordingSample(from: rawSample)
-        samples.append(recordingSample)
-        lastAssessment = validator.assess(samples)
-        estimatedSampleRate = lastAssessment?.estimatedSampleRate ?? 0
     }
 
     private func normalizedRecordingSample(from rawSample: RawMotionSample) -> MotionSample {
