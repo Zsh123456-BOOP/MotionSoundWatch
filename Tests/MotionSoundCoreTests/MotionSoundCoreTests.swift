@@ -514,6 +514,28 @@ import Foundation
     #expect(decoded.profiles[0].templates.count == 2)
 }
 
+@Test func profileCodecBackfillsStageAndPoseSignaturesForStoredProfiles() throws {
+    let templateBuilder = MotionTemplateBuilder()
+    let templates = [
+        templateBuilder.makeTemplate(label: "eye-pose", kind: .burst, samples: syntheticPoseImpulse(duration: 1.25, endGravity: MotionVector3(x: 0, y: -1, z: 0), terminalHold: 0.32)),
+        templateBuilder.makeTemplate(label: "eye-pose", kind: .burst, samples: syntheticPoseImpulse(duration: 1.28, endGravity: MotionVector3(x: 0.03, y: -0.99, z: 0), terminalHold: 0.34)),
+        templateBuilder.makeTemplate(label: "eye-pose", kind: .burst, samples: syntheticPoseImpulse(duration: 1.22, endGravity: MotionVector3(x: -0.03, y: -0.99, z: 0), terminalHold: 0.30)),
+    ]
+    var profile = GestureProfileBuilder().makeProfile(name: "eye-pose", kind: .burst, templates: templates)
+    profile.signature?.stages = nil
+    profile.signature?.pose = nil
+    profile.thresholds = nil
+    let archive = GestureProfileArchive(profiles: [profile])
+    let codec = GestureProfileCodec()
+
+    let decoded = try codec.decode(try codec.encode(archive))
+    let upgraded = decoded.profiles[0]
+
+    #expect(upgraded.signature?.stages?.contains { $0.kind == .hold } == true)
+    #expect(upgraded.signature?.pose != nil)
+    #expect(upgraded.thresholds != nil)
+}
+
 @Test func profileArchivePreservesSoundSequence() throws {
     let template = MotionTemplateBuilder().makeTemplate(
         label: "combo",
@@ -990,6 +1012,47 @@ import Foundation
     #expect(event.candidate?.distance ?? .infinity <= profile.acceptanceThreshold)
 }
 
+@Test func poseAndStageSignatureSeparateSimilarImpulseGestures() {
+    let builder = MotionTemplateBuilder()
+    let punchProfile = GestureProfileBuilder().makeProfile(
+        name: "punch",
+        kind: .burst,
+        templates: [
+            builder.makeTemplate(label: "punch", kind: .burst, samples: syntheticPoseImpulse(duration: 1.0, endGravity: MotionVector3(x: 0, y: 0, z: -1), terminalHold: 0.02)),
+            builder.makeTemplate(label: "punch", kind: .burst, samples: syntheticPoseImpulse(duration: 1.04, endGravity: MotionVector3(x: 0.02, y: 0, z: -1), terminalHold: 0.02)),
+            builder.makeTemplate(label: "punch", kind: .burst, samples: syntheticPoseImpulse(duration: 0.98, endGravity: MotionVector3(x: -0.02, y: 0, z: -1), terminalHold: 0.02)),
+        ]
+    )
+    let eyePoseProfile = GestureProfileBuilder().makeProfile(
+        name: "eye-pose",
+        kind: .burst,
+        templates: [
+            builder.makeTemplate(label: "eye-pose", kind: .burst, samples: syntheticPoseImpulse(duration: 1.25, endGravity: MotionVector3(x: 0, y: -1, z: 0), terminalHold: 0.32)),
+            builder.makeTemplate(label: "eye-pose", kind: .burst, samples: syntheticPoseImpulse(duration: 1.28, endGravity: MotionVector3(x: 0.03, y: -0.99, z: 0), terminalHold: 0.34)),
+            builder.makeTemplate(label: "eye-pose", kind: .burst, samples: syntheticPoseImpulse(duration: 1.22, endGravity: MotionVector3(x: -0.03, y: -0.99, z: 0), terminalHold: 0.30)),
+        ]
+    )
+    let samples = syntheticPoseImpulse(duration: 1.02, endGravity: MotionVector3(x: 0, y: 0, z: -1), terminalHold: 0.02)
+    let segment = GestureSegment(
+        kind: .sequence,
+        samples: samples,
+        startTimestamp: 0,
+        endTimestamp: samples.last?.timestamp ?? 1,
+        peakTimestamp: 0.42,
+        peakEnergy: 1.0,
+        features: MotionEnergyAnalyzer().features(for: samples)
+    )
+    var runtime = GestureRecognitionRuntime(profiles: [eyePoseProfile, punchProfile])
+
+    let event = runtime.recognize(segment: segment, now: 1.1)
+
+    #expect(eyePoseProfile.signature?.pose != nil)
+    #expect(eyePoseProfile.signature?.stages?.contains { $0.kind == .hold } == true)
+    #expect(event.triggered)
+    #expect(event.profile?.id == punchProfile.id)
+    #expect(event.logEntry.candidateReports.first { $0.profileID == eyePoseProfile.id }?.rejectReason != nil)
+}
+
 @Test func sampleCollectionPolicyRequiresThreeSamplesBeforeSaving() {
     let builder = MotionTemplateBuilder()
     let templates = [
@@ -1166,6 +1229,36 @@ private func syntheticYAxisBurst(
             timestamp: progress * duration,
             userAcceleration: MotionVector3(x: pulse * 0.2, y: pulse, z: -pulse * 0.1),
             rotationRate: MotionVector3(x: pulse * 0.1, y: pulse * 0.45, z: pulse * 0.2)
+        )
+    }
+}
+
+private func syntheticPoseImpulse(
+    duration: Double,
+    endGravity: MotionVector3,
+    terminalHold: Double,
+    amplitude: Double = 1.0,
+    sampleRate: Double = 50
+) -> [MotionSample] {
+    let count = max(16, Int(duration * sampleRate))
+    let movementDuration = max(0.25, duration - terminalHold)
+    let startGravity = MotionVector3(x: 0, y: 0, z: -1)
+    return (0..<count).map { index in
+        let progress = Double(index) / Double(count - 1)
+        let timestamp = progress * duration
+        let movementProgress = min(1, timestamp / movementDuration)
+        let pulse = timestamp <= movementDuration
+            ? amplitude * exp(-pow((movementProgress - 0.42) * 7, 2))
+            : 0
+        return MotionSample(
+            timestamp: timestamp,
+            userAcceleration: MotionVector3(x: pulse, y: pulse * 0.34, z: -pulse * 0.12),
+            rotationRate: MotionVector3(x: pulse * 0.12, y: pulse * 0.52, z: pulse * 0.22),
+            gravity: MotionVector3(
+                x: startGravity.x + (endGravity.x - startGravity.x) * movementProgress,
+                y: startGravity.y + (endGravity.y - startGravity.y) * movementProgress,
+                z: startGravity.z + (endGravity.z - startGravity.z) * movementProgress
+            )
         )
     }
 }

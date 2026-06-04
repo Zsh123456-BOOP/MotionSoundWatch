@@ -145,12 +145,16 @@ final class WatchMotionRecorder: ObservableObject {
         savedProfileURL = nil
         savedRecordingURL = nil
         segmenter.reset()
+        recognitionSuppressedUntil = (latestSample?.timestamp ?? 0) + 30
         lastRecognitionSummary = "录制中，已暂停动作触发。"
         isRecording = true
         if !isLive {
             startLiveUpdates()
         }
-        AppDiagnostics.record("watch.recording.start")
+        AppDiagnostics.record(
+            "watch.recording.start",
+            ["recognitionSuppressedUntil": recognitionSuppressedUntil]
+        )
     }
 
     func reloadSavedProfiles() {

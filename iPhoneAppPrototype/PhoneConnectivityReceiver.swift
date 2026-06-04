@@ -451,6 +451,18 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
                 return nil
             }
 
+            let localStore = try GestureProfileFileStore.appDocumentsStore()
+            let existingArchives = try localStore.list()
+            let existingProfiles = existingArchives.flatMap(\.archive.profiles)
+            let comparableExistingProfiles = existingProfiles.filter { existing in
+                if let replacingProfileID, existing.id == replacingProfileID {
+                    return false
+                }
+                if let replacingName, existing.name.caseInsensitiveCompare(replacingName) == .orderedSame {
+                    return false
+                }
+                return true
+            }
             let sounds = normalizedSoundAssets(fileNames: soundSequenceFileNames, volume: volume)
             let sound = sounds.first ?? normalizedSoundAsset(fileName: soundFileName, volume: volume)
             var profile = GestureProfileBuilder().makeProfile(
@@ -459,15 +471,13 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
                 templates: primaryTemplates,
                 negativeTemplates: [],
                 sound: sound,
+                existingProfiles: comparableExistingProfiles,
                 cooldownSeconds: cooldownSeconds
             )
             profile.soundSequence = sounds.count > 1 ? sounds : nil
             if let triggerTiming = TriggerTiming(rawValue: triggerTimingRawValue) {
                 profile.triggerTiming = triggerTiming
             }
-            let localStore = try GestureProfileFileStore.appDocumentsStore()
-            let existingArchives = try localStore.list()
-            let existingProfiles = existingArchives.flatMap(\.archive.profiles)
             if let conflict = existingProfiles.first(where: { existing in
                 guard existing.name.caseInsensitiveCompare(profile.name) == .orderedSame else {
                     return false

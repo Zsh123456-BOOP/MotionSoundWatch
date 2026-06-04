@@ -430,6 +430,41 @@ public struct GestureProfileCodec: Sendable {
     public func decode(_ data: Data) throws -> GestureProfileArchive {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        return try decoder.decode(GestureProfileArchive.self, from: data)
+        let archive = try decoder.decode(GestureProfileArchive.self, from: data)
+        return GestureProfileArchive(
+            schemaVersion: archive.schemaVersion,
+            profiles: archive.profiles.map(upgradeProfileIfNeeded),
+            exportedAt: archive.exportedAt
+        )
+    }
+
+    private func upgradeProfileIfNeeded(_ profile: GestureProfile) -> GestureProfile {
+        guard !profile.templates.isEmpty else {
+            return profile
+        }
+
+        let builder = GestureSignatureBuilder()
+        let rebuiltSignature = builder.makeSignature(templates: profile.templates)
+        var upgraded = profile
+        if var signature = upgraded.signature {
+            if signature.stages == nil || signature.stages?.isEmpty == true {
+                signature.stages = rebuiltSignature.stages
+            }
+            if signature.pose == nil {
+                signature.pose = rebuiltSignature.pose
+            }
+            upgraded.signature = signature
+        } else {
+            upgraded.signature = rebuiltSignature
+        }
+
+        if upgraded.thresholds == nil, let signature = upgraded.signature {
+            upgraded.thresholds = builder.makeThresholds(
+                signature: signature,
+                templateCount: upgraded.templates.count,
+                strictness: upgraded.strictness
+            )
+        }
+        return upgraded
     }
 }

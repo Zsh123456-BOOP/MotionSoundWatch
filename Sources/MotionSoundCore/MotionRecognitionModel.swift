@@ -29,6 +29,8 @@ public enum RejectReason: String, Codable, Equatable, Sendable {
     case marginTooSmall
     case cooldownActive
     case audioMissing
+    case poseMismatch
+    case stageMismatch
 }
 
 public enum PlayTiming: String, Codable, Equatable, Sendable {
@@ -207,10 +209,48 @@ public struct MotionTokenPattern: Codable, Equatable, Sendable {
     }
 }
 
+public struct MotionStageSignature: Codable, Equatable, Sendable {
+    public var kind: MotionTokenKind
+    public var minDuration: Double
+    public var maxDuration: Double
+    public var expectedMagnitude: Double
+
+    public init(kind: MotionTokenKind, minDuration: Double, maxDuration: Double, expectedMagnitude: Double) {
+        self.kind = kind
+        self.minDuration = minDuration
+        self.maxDuration = maxDuration
+        self.expectedMagnitude = expectedMagnitude
+    }
+}
+
+public struct MotionPoseSignature: Codable, Equatable, Sendable {
+    public var startGravity: MotionVector3
+    public var endGravity: MotionVector3
+    public var gravityDelta: MotionVector3
+    public var terminalHoldDuration: Double
+    public var confidence: Double
+
+    public init(
+        startGravity: MotionVector3,
+        endGravity: MotionVector3,
+        gravityDelta: MotionVector3,
+        terminalHoldDuration: Double,
+        confidence: Double
+    ) {
+        self.startGravity = startGravity
+        self.endGravity = endGravity
+        self.gravityDelta = gravityDelta
+        self.terminalHoldDuration = terminalHoldDuration
+        self.confidence = confidence
+    }
+}
+
 public struct GestureSignature: Codable, Equatable, Sendable {
     public var primaryKind: MotionTokenKind
     public var secondaryKinds: [MotionTokenKind]
     public var tokenPatterns: [MotionTokenPattern]
+    public var stages: [MotionStageSignature]?
+    public var pose: MotionPoseSignature?
     public var impulse: ImpulseSignature?
     public var rotation: RotationSignature?
     public var oscillation: OscillationSignature?
@@ -221,6 +261,8 @@ public struct GestureSignature: Codable, Equatable, Sendable {
         primaryKind: MotionTokenKind,
         secondaryKinds: [MotionTokenKind] = [],
         tokenPatterns: [MotionTokenPattern] = [],
+        stages: [MotionStageSignature]? = nil,
+        pose: MotionPoseSignature? = nil,
         impulse: ImpulseSignature? = nil,
         rotation: RotationSignature? = nil,
         oscillation: OscillationSignature? = nil,
@@ -230,6 +272,8 @@ public struct GestureSignature: Codable, Equatable, Sendable {
         self.primaryKind = primaryKind
         self.secondaryKinds = secondaryKinds
         self.tokenPatterns = tokenPatterns
+        self.stages = stages
+        self.pose = pose
         self.impulse = impulse
         self.rotation = rotation
         self.oscillation = oscillation
@@ -620,7 +664,29 @@ public struct MotionTokenizer: Sendable {
     }
 }
 
-public struct GestureSignatureBuilder: Sendable {
+public struct MotionStageObservation: Equatable, Sendable {
+    public var kind: MotionTokenKind
+    public var duration: Double
+    public var magnitude: Double
+
+    public init(kind: MotionTokenKind, duration: Double, magnitude: Double) {
+        self.kind = kind
+        self.duration = duration
+        self.magnitude = magnitude
+    }
+}
+
+public struct MotionStageMatchResult: Equatable, Sendable {
+    public var score: Double
+    public var rejectReason: RejectReason?
+
+    public init(score: Double, rejectReason: RejectReason? = nil) {
+        self.score = score
+        self.rejectReason = rejectReason
+    }
+}
+
+public struct MotionStageExtractor: Sendable {
     public var tokenizer: MotionTokenizer
     public var extractor: MotionFeatureExtractor
 
@@ -630,6 +696,282 @@ public struct GestureSignatureBuilder: Sendable {
     ) {
         self.tokenizer = tokenizer
         self.extractor = extractor
+    }
+
+    public func makeSignature(templates: [MotionTemplate]) -> [MotionStageSignature] {
+        let observations = templates.map { stages(for: $0.samples) }
+        guard let maxCount = observations.map(\.count).max(), maxCount > 0 else {
+            return []
+        }
+
+        var output: [MotionStageSignature] = []
+        for index in 0..<maxCount {
+            let values = observations.compactMap { stages in
+                stages.indices.contains(index) ? stages[index] : nil
+            }
+            guard values.count >= max(1, Int(ceil(Double(observations.count) * 0.55))) else {
+                continue
+            }
+            let kind = mostFrequentKind(values.map(\.kind))
+            let durations = values.filter { $0.kind == kind }.map(\.duration)
+            let magnitudes = values.filter { $0.kind == kind }.map(\.magnitude)
+            let duration = average(durations.isEmpty ? values.map(\.duration) : durations)
+            let magnitude = average(magnitudes.isEmpty ? values.map(\.magnitude) : magnitudes)
+            output.append(MotionStageSignature(
+                kind: kind,
+                minDuration: max(0.06, duration * 0.45),
+                maxDuration: max(0.16, duration * 1.9),
+                expectedMagnitude: magnitude
+            ))
+        }
+        return output
+    }
+
+    public func stages(for samples: [MotionSample]) -> [MotionStageObservation] {
+        guard samples.count >= 4 else { return [] }
+        if let holdStartIndex = terminalHoldStartIndex(samples),
+           holdStartIndex > samples.startIndex + 3,
+           holdStartIndex < samples.endIndex - 2 {
+            let movement = Array(samples[..<holdStartIndex])
+            let hold = Array(samples[holdStartIndex...])
+            var output = [stage(for: movement)]
+            output.append(MotionStageObservation(
+                kind: .hold,
+                duration: duration(hold),
+                magnitude: max(0.05, 1 - extractor.extract(hold).meanGyro)
+            ))
+            return output
+        }
+        return [stage(for: samples)]
+    }
+
+    public func match(signature: [MotionStageSignature]?, samples: [MotionSample]) -> MotionStageMatchResult? {
+        guard let signature, !signature.isEmpty else { return nil }
+        let observations = stages(for: samples)
+        guard !observations.isEmpty else {
+            return MotionStageMatchResult(score: 0, rejectReason: .stageMismatch)
+        }
+
+        let comparedCount = min(signature.count, observations.count)
+        var scores: [Double] = []
+        scores.reserveCapacity(comparedCount)
+
+        for index in 0..<comparedCount {
+            let expected = signature[index]
+            let observed = observations[index]
+            let kindScore = stageKindScore(expected: expected.kind, observed: observed.kind)
+            let durationScore = ratioScore(value: observed.duration, reference: max(0.01, (expected.minDuration + expected.maxDuration) * 0.5), lower: 0.45, upper: 1.9)
+            let magnitudeScore = ratioScore(value: observed.magnitude, reference: max(0.01, expected.expectedMagnitude), lower: 0.25, upper: 2.8)
+            scores.append(kindScore * 0.52 + durationScore * 0.24 + magnitudeScore * 0.24)
+        }
+
+        let missingPenalty = observations.count < signature.count ? 0.58 : 1.0
+        let extraPenalty = observations.count > signature.count + 1 ? 0.86 : 1.0
+        let score = clamp(average(scores) * missingPenalty * extraPenalty)
+        let expectsHold = signature.contains { $0.kind == .hold }
+        let observedHold = observations.contains { $0.kind == .hold }
+        let rejectReason: RejectReason? = expectsHold && !observedHold ? .stageMismatch : (score < 0.34 ? .stageMismatch : nil)
+        return MotionStageMatchResult(score: score, rejectReason: rejectReason)
+    }
+
+    private func stage(for samples: [MotionSample]) -> MotionStageObservation {
+        let features = extractor.extract(samples)
+        let kind = tokenizer.classify(features)
+        return MotionStageObservation(
+            kind: kind,
+            duration: features.duration,
+            magnitude: magnitude(kind: kind, features: features)
+        )
+    }
+
+    private func terminalHoldStartIndex(_ samples: [MotionSample]) -> Int? {
+        guard samples.count >= 8, let last = samples.last else { return nil }
+        var startIndex: Int?
+        for index in stride(from: samples.count - 1, through: 0, by: -1) {
+            let sample = samples[index]
+            let stable = sample.userAcceleration.magnitude <= 0.28 && sample.rotationRate.magnitude <= 0.72
+            if stable {
+                startIndex = index
+            } else if startIndex != nil {
+                break
+            }
+        }
+        guard let startIndex else { return nil }
+        let duration = max(0, last.timestamp - samples[startIndex].timestamp)
+        return duration >= 0.20 ? startIndex : nil
+    }
+
+    private func magnitude(kind: MotionTokenKind, features: GestureSampleFeatures) -> Double {
+        switch kind {
+        case .impulse:
+            return max(features.peakAcc, features.peakGyro * 0.2)
+        case .rotation:
+            return features.integratedRotationAngle
+        case .oscillation:
+            return features.oscillationCount
+        case .hold:
+            return features.holdDuration
+        case .sweep:
+            return features.directionalityScore
+        case .pause:
+            return features.duration
+        case .free:
+            return max(features.meanAcc, features.meanGyro * 0.25)
+        }
+    }
+
+    private func stageKindScore(expected: MotionTokenKind, observed: MotionTokenKind) -> Double {
+        if expected == observed {
+            return 1.0
+        }
+        switch (expected, observed) {
+        case (.impulse, .sweep), (.sweep, .impulse),
+             (.rotation, .oscillation), (.oscillation, .rotation):
+            return 0.58
+        case (.hold, _), (_, .hold):
+            return 0.18
+        default:
+            return 0.36
+        }
+    }
+
+    private func mostFrequentKind(_ kinds: [MotionTokenKind]) -> MotionTokenKind {
+        Dictionary(grouping: kinds, by: { $0 })
+            .max { $0.value.count < $1.value.count }?
+            .key ?? .free
+    }
+
+    private func duration(_ samples: [MotionSample]) -> Double {
+        guard let first = samples.first, let last = samples.last else { return 0 }
+        return max(0, last.timestamp - first.timestamp)
+    }
+}
+
+public struct MotionPoseSummary: Equatable, Sendable {
+    public var startGravity: MotionVector3
+    public var endGravity: MotionVector3
+    public var gravityDelta: MotionVector3
+    public var terminalHoldDuration: Double
+
+    public init(
+        startGravity: MotionVector3,
+        endGravity: MotionVector3,
+        gravityDelta: MotionVector3,
+        terminalHoldDuration: Double
+    ) {
+        self.startGravity = startGravity
+        self.endGravity = endGravity
+        self.gravityDelta = gravityDelta
+        self.terminalHoldDuration = terminalHoldDuration
+    }
+}
+
+public struct MotionPoseMatchResult: Equatable, Sendable {
+    public var score: Double
+    public var rejectReason: RejectReason?
+
+    public init(score: Double, rejectReason: RejectReason? = nil) {
+        self.score = score
+        self.rejectReason = rejectReason
+    }
+}
+
+public struct MotionPoseAnalyzer: Sendable {
+    public init() {}
+
+    public func makeSignature(templates: [MotionTemplate]) -> MotionPoseSignature? {
+        let summaries = templates.compactMap { summarize($0.samples) }
+        guard !summaries.isEmpty else { return nil }
+
+        let startGravity = averageVector(summaries.map(\.startGravity))
+        let endGravity = averageVector(summaries.map(\.endGravity))
+        let gravityDelta = averageVector(summaries.map(\.gravityDelta))
+        let terminalHoldDuration = average(summaries.map(\.terminalHoldDuration))
+        let endConsistency = vectorConsistency(summaries.map(\.endGravity), reference: endGravity)
+        let deltaConsistency = gravityDelta.magnitude >= 0.08
+            ? vectorConsistency(summaries.map(\.gravityDelta), reference: gravityDelta)
+            : 0.5
+        let holdConfidence = min(1, terminalHoldDuration / 0.45)
+        let confidence = clamp(endConsistency * 0.55 + deltaConsistency * 0.25 + holdConfidence * 0.20)
+
+        return MotionPoseSignature(
+            startGravity: startGravity,
+            endGravity: endGravity,
+            gravityDelta: gravityDelta,
+            terminalHoldDuration: terminalHoldDuration,
+            confidence: confidence
+        )
+    }
+
+    public func summarize(_ samples: [MotionSample]) -> MotionPoseSummary? {
+        let gravitySamples = samples.compactMap { sample -> (timestamp: Double, gravity: MotionVector3)? in
+            guard let gravity = sample.gravity else { return nil }
+            return (sample.timestamp, gravity)
+        }
+        guard gravitySamples.count >= 4 else { return nil }
+
+        let windowCount = max(2, Int(ceil(Double(gravitySamples.count) * 0.16)))
+        let startGravity = averageVector(gravitySamples.prefix(windowCount).map(\.gravity))
+        let endGravity = averageVector(gravitySamples.suffix(windowCount).map(\.gravity))
+        let terminalHoldDuration = stableSuffixDuration(samples)
+        return MotionPoseSummary(
+            startGravity: startGravity,
+            endGravity: endGravity,
+            gravityDelta: endGravity - startGravity,
+            terminalHoldDuration: terminalHoldDuration
+        )
+    }
+
+    public func match(signature: MotionPoseSignature?, samples: [MotionSample]) -> MotionPoseMatchResult? {
+        guard let signature, signature.confidence >= 0.42, let summary = summarize(samples) else {
+            return nil
+        }
+        let endScore = vectorSimilarity(summary.endGravity, signature.endGravity)
+        let startScore = vectorSimilarity(summary.startGravity, signature.startGravity)
+        let deltaScore = signature.gravityDelta.magnitude >= 0.08 && summary.gravityDelta.magnitude >= 0.04
+            ? vectorSimilarity(summary.gravityDelta, signature.gravityDelta)
+            : 0.72
+        let holdScore = signature.terminalHoldDuration >= 0.18
+            ? ratioScore(value: summary.terminalHoldDuration, reference: signature.terminalHoldDuration, lower: 0.40, upper: 2.5)
+            : 0.78
+        let score = clamp(endScore * 0.42 + deltaScore * 0.24 + holdScore * 0.22 + startScore * 0.12)
+
+        let terminalHoldMissing = signature.terminalHoldDuration >= 0.22
+            && summary.terminalHoldDuration < signature.terminalHoldDuration * 0.35
+        let rejectReason: RejectReason? = terminalHoldMissing || (signature.confidence >= 0.62 && score < 0.36)
+            ? .poseMismatch
+            : nil
+        return MotionPoseMatchResult(score: score, rejectReason: rejectReason)
+    }
+
+    private func stableSuffixDuration(_ samples: [MotionSample]) -> Double {
+        guard samples.count >= 4, let last = samples.last else { return 0 }
+        var startTimestamp = last.timestamp
+        for sample in samples.reversed() {
+            let stable = sample.userAcceleration.magnitude <= 0.28 && sample.rotationRate.magnitude <= 0.72
+            guard stable else { break }
+            startTimestamp = sample.timestamp
+        }
+        return max(0, last.timestamp - startTimestamp)
+    }
+}
+
+public struct GestureSignatureBuilder: Sendable {
+    public var tokenizer: MotionTokenizer
+    public var extractor: MotionFeatureExtractor
+    public var stageExtractor: MotionStageExtractor
+    public var poseAnalyzer: MotionPoseAnalyzer
+
+    public init(
+        tokenizer: MotionTokenizer = MotionTokenizer(),
+        extractor: MotionFeatureExtractor = MotionFeatureExtractor(),
+        stageExtractor: MotionStageExtractor = MotionStageExtractor(),
+        poseAnalyzer: MotionPoseAnalyzer = MotionPoseAnalyzer()
+    ) {
+        self.tokenizer = tokenizer
+        self.extractor = extractor
+        self.stageExtractor = stageExtractor
+        self.poseAnalyzer = poseAnalyzer
     }
 
     public func makeSignature(templates: [MotionTemplate]) -> GestureSignature {
@@ -648,6 +990,8 @@ public struct GestureSignatureBuilder: Sendable {
             primaryKind: primary,
             secondaryKinds: secondary,
             tokenPatterns: patterns,
+            stages: stageExtractor.makeSignature(templates: templates),
+            pose: poseAnalyzer.makeSignature(templates: templates),
             impulse: makeImpulseSignature(features: templateFeatures),
             rotation: makeRotationSignature(features: templateFeatures),
             oscillation: makeOscillationSignature(features: templateFeatures),
@@ -801,17 +1145,23 @@ public struct MotionRecognitionRouter: Sendable {
     public var extractor: MotionFeatureExtractor
     public var matcher: MotionTemplateMatcher
     public var activityTrimmer: MotionSampleActivityTrimmer
+    public var stageExtractor: MotionStageExtractor
+    public var poseAnalyzer: MotionPoseAnalyzer
 
     public init(
         tokenizer: MotionTokenizer = MotionTokenizer(),
         extractor: MotionFeatureExtractor = MotionFeatureExtractor(),
         matcher: MotionTemplateMatcher = MotionTemplateMatcher(),
-        activityTrimmer: MotionSampleActivityTrimmer = MotionSampleActivityTrimmer()
+        activityTrimmer: MotionSampleActivityTrimmer = MotionSampleActivityTrimmer(),
+        stageExtractor: MotionStageExtractor = MotionStageExtractor(),
+        poseAnalyzer: MotionPoseAnalyzer = MotionPoseAnalyzer()
     ) {
         self.tokenizer = tokenizer
         self.extractor = extractor
         self.matcher = matcher
         self.activityTrimmer = activityTrimmer
+        self.stageExtractor = stageExtractor
+        self.poseAnalyzer = poseAnalyzer
     }
 
     public func evaluate(
@@ -914,14 +1264,32 @@ public struct MotionRecognitionRouter: Sendable {
         let tokenScore = profile.signature.map {
             score(profile: profile, signature: $0, segment: matchingSegment, tokens: matchingTokens)
         }
+        let stageScore = stageExtractor.match(signature: profile.signature?.stages, samples: matchingSegment.samples)
+        let poseScore = poseAnalyzer.match(signature: profile.signature?.pose, samples: matchingSegment.samples)
         let kind = tokenScore?.candidate.recognizerKind ?? explanatoryKind(profile: profile, tokens: matchingTokens)
-        let rejectReason = trajectoryRejectReason(profile: profile, segment: matchingSegment, tokens: matchingTokens, match: match)
+        let rejectReason = trajectoryRejectReason(
+            profile: profile,
+            segment: matchingSegment,
+            tokens: matchingTokens,
+            match: match,
+            stageScore: stageScore,
+            poseScore: poseScore
+        )
         match.margin = nil
         if profile.signature != nil {
-            match.recognitionScore = trajectoryTriggerScore(
+            let trajectoryScore = trajectoryTriggerScore(
                 distance: match.distance,
                 threshold: profile.acceptanceThreshold,
                 triggerScore: profile.thresholds?.triggerScore
+            )
+            let semanticScore = tokenScore?.candidate.recognitionScore ?? tokenScore?.candidate.confidence
+            match.recognitionScore = trajectoryTriggerScore(
+                trajectoryScore: trajectoryScore,
+                semanticScore: semanticScore,
+                stageScore: stageScore?.score,
+                poseScore: poseScore?.score,
+                poseConfidence: profile.signature?.pose?.confidence ?? 0,
+                stageCount: profile.signature?.stages?.count ?? 0
             )
         }
         if let rejectReason {
@@ -938,7 +1306,7 @@ public struct MotionRecognitionRouter: Sendable {
             threshold: scoreThreshold,
             margin: match.margin,
             shouldTrigger: match.shouldTrigger,
-            rejectReason: match.shouldTrigger ? nil : rejectReason
+            rejectReason: match.shouldTrigger ? nil : (rejectReason ?? .scoreBelowThreshold)
         )
         return (match, report)
     }
@@ -1005,20 +1373,37 @@ public struct MotionRecognitionRouter: Sendable {
         profile: GestureProfile,
         segment: GestureSegment,
         tokens: [MotionToken],
-        match: RecognitionCandidate
+        match: RecognitionCandidate,
+        stageScore: MotionStageMatchResult?,
+        poseScore: MotionPoseMatchResult?
     ) -> RejectReason? {
         if let signature = profile.signature {
             let tokenResult = score(profile: profile, signature: signature, segment: segment, tokens: tokens)
             if let hardRejectReason = hardTrajectoryVetoReason(tokenResult.candidate.rejectReason) {
                 return hardRejectReason
             }
+            if let hardRejectReason = hardTrajectoryVetoReason(stageScore?.rejectReason) {
+                return hardRejectReason
+            }
+            if let hardRejectReason = hardTrajectoryVetoReason(poseScore?.rejectReason) {
+                return hardRejectReason
+            }
             if match.distance > profile.acceptanceThreshold {
-                return tokenResult.candidate.rejectReason ?? .scoreBelowThreshold
+                return tokenResult.candidate.rejectReason
+                    ?? stageScore?.rejectReason
+                    ?? poseScore?.rejectReason
+                    ?? .scoreBelowThreshold
             }
             let semanticScore = tokenResult.candidate.recognitionScore ?? tokenResult.candidate.confidence
             let minimumSemanticScore = profile.thresholds?.rejectScore ?? 0.42
             if semanticScore < minimumSemanticScore {
                 return tokenResult.candidate.rejectReason ?? .scoreBelowThreshold
+            }
+            if let stageScore, stageScore.score < 0.30 {
+                return stageScore.rejectReason ?? .stageMismatch
+            }
+            if let poseScore, poseScore.score < 0.30 {
+                return poseScore.rejectReason ?? .poseMismatch
             }
         } else if match.distance > profile.acceptanceThreshold {
             return .scoreBelowThreshold
@@ -1033,6 +1418,33 @@ public struct MotionRecognitionRouter: Sendable {
         return clamp(1 - normalizedDistance * (1 - floor))
     }
 
+    private func trajectoryTriggerScore(
+        trajectoryScore: Double,
+        semanticScore: Double?,
+        stageScore: Double?,
+        poseScore: Double?,
+        poseConfidence: Double,
+        stageCount: Int
+    ) -> Double {
+        var weightedScores: [(weight: Double, score: Double)] = [
+            (0.52, trajectoryScore)
+        ]
+        if let semanticScore {
+            weightedScores.append((0.26, semanticScore))
+        }
+        if let stageScore {
+            let weight = stageCount > 1 ? 0.17 : 0.10
+            weightedScores.append((weight, stageScore))
+        }
+        if let poseScore {
+            let weight = poseConfidence >= 0.62 ? 0.18 : 0.10
+            weightedScores.append((weight, poseScore))
+        }
+        let totalWeight = weightedScores.map(\.weight).reduce(0.0, +)
+        guard totalWeight > 0 else { return 0 }
+        return clamp(weightedScores.map { $0.weight * $0.score }.reduce(0.0, +) / totalWeight)
+    }
+
     private func hardTrajectoryVetoReason(_ rejectReason: RejectReason?) -> RejectReason? {
         switch rejectReason {
         case .rotationAngleTooSmall,
@@ -1040,7 +1452,9 @@ public struct MotionRecognitionRouter: Sendable {
              .rotationDirectionMismatch,
              .oscillationCountTooLow,
              .holdTooShort,
-             .holdNotStable:
+             .holdNotStable,
+             .poseMismatch,
+             .stageMismatch:
             return rejectReason
         case .none,
              .noCandidate,
@@ -1341,9 +1755,50 @@ private func dot(_ lhs: MotionVector3, _ rhs: MotionVector3) -> Double {
     lhs.x * rhs.x + lhs.y * rhs.y + lhs.z * rhs.z
 }
 
+private func average(_ values: [Double]) -> Double {
+    guard !values.isEmpty else { return 0 }
+    return values.reduce(0.0, +) / Double(values.count)
+}
+
+private func averageVector(_ vectors: [MotionVector3]) -> MotionVector3 {
+    guard !vectors.isEmpty else {
+        return MotionVector3(x: 0, y: 0, z: -1)
+    }
+    return normalized(MotionVector3(
+        x: average(vectors.map(\.x)),
+        y: average(vectors.map(\.y)),
+        z: average(vectors.map(\.z))
+    ))
+}
+
+private func vectorConsistency(_ vectors: [MotionVector3], reference: MotionVector3) -> Double {
+    guard !vectors.isEmpty else { return 0 }
+    return average(vectors.map { vectorSimilarity($0, reference) })
+}
+
+private func vectorSimilarity(_ lhs: MotionVector3, _ rhs: MotionVector3) -> Double {
+    guard lhs.magnitude > 0.0001, rhs.magnitude > 0.0001 else { return 0.5 }
+    let value = dot(normalized(lhs), normalized(rhs))
+    return clamp((max(-1, min(1, value)) + 1) * 0.5)
+}
+
 private func normalized(_ vector: MotionVector3) -> MotionVector3 {
     let magnitude = max(vector.magnitude, 0.0001)
     return MotionVector3(x: vector.x / magnitude, y: vector.y / magnitude, z: vector.z / magnitude)
+}
+
+private func ratioScore(value: Double, reference: Double, lower: Double, upper: Double) -> Double {
+    guard reference > 0.0001 else { return value < 0.0001 ? 1 : 0 }
+    let ratio = value / reference
+    if ratio >= lower, ratio <= upper {
+        let center = 1.0
+        let spread = ratio < center ? center - lower : upper - center
+        return clamp(1 - abs(ratio - center) / max(spread * 1.25, 0.0001))
+    }
+    if ratio < lower {
+        return clamp(ratio / lower * 0.55)
+    }
+    return clamp(upper / ratio * 0.55)
 }
 
 private func clamp(_ value: Double) -> Double {
