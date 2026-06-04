@@ -123,9 +123,11 @@ struct MotionDebugView: View {
         }
         .onChange(of: fileSender.lastReceivedProfileURL) {
             recorder.reloadSavedProfiles()
+            syncRuntimeSession(reason: "profileReceived")
         }
         .onChange(of: fileSender.profileLibraryChangeCount) {
             recorder.reloadSavedProfiles()
+            syncRuntimeSession(reason: "profileLibraryChanged")
         }
         .onReceive(fileSender.$lastRecordingCommand.compactMap { $0 }) { command in
             handleRemoteRecordingCommand(command)
@@ -452,13 +454,28 @@ struct MotionDebugView: View {
         case .background:
             runtimeStartTask?.cancel()
             runtimeStartTask = nil
-            runtimeSession.stop(reason: "scenePhase.background")
+            if shouldKeepRuntimeSessionActive {
+                AppDiagnostics.record(
+                    "watch.runtime.keepAlive.background",
+                    [
+                        "reason": reason,
+                        "profiles": recorder.loadedProfileCount,
+                        "recording": recorder.isRecording || remoteCaptureState == "recording",
+                    ]
+                )
+            } else {
+                runtimeSession.stop(reason: "scenePhase.background")
+            }
         case .inactive:
             AppDiagnostics.record("watch.runtime.start.deferred", ["phase": "inactive", "reason": reason])
             break
         @unknown default:
             break
         }
+    }
+
+    private var shouldKeepRuntimeSessionActive: Bool {
+        recorder.loadedProfileCount > 0 || recorder.isRecording || remoteCaptureState == "recording"
     }
 
     private func scheduleRuntimeStart(reason: String, requireActiveScene: Bool) {

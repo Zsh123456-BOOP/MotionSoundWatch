@@ -458,7 +458,13 @@ public struct GestureProfileCodec: Sendable {
             upgraded.signature = rebuiltSignature
         }
 
-        if upgraded.thresholds == nil, let signature = upgraded.signature {
+        let inferredKind = Self.inferredKind(from: upgraded.signature, fallback: upgraded.kind)
+        let kindChanged = upgraded.kind != inferredKind
+        if kindChanged {
+            upgraded.kind = inferredKind
+        }
+
+        if (upgraded.thresholds == nil || kindChanged), let signature = upgraded.signature {
             upgraded.thresholds = builder.makeThresholds(
                 signature: signature,
                 templateCount: upgraded.templates.count,
@@ -466,5 +472,21 @@ public struct GestureProfileCodec: Sendable {
             )
         }
         return upgraded
+    }
+
+    private static func inferredKind(from signature: GestureSignature?, fallback: GestureKind) -> GestureKind {
+        guard fallback != .combo, let primaryKind = signature?.primaryKind else {
+            return fallback
+        }
+        switch primaryKind {
+        case .impulse, .sweep:
+            return .burst
+        case .rotation, .oscillation:
+            return .sequence
+        case .hold:
+            return .posture
+        case .pause, .free:
+            return fallback
+        }
     }
 }

@@ -1006,9 +1006,9 @@ public struct GestureSignatureBuilder: Sendable {
         case .impulse:
             base = templateCount >= 3 ? 0.70 : 0.76
         case .rotation:
-            base = templateCount >= 3 ? 0.66 : 0.70
+            base = templateCount >= 3 ? 0.62 : 0.70
         case .oscillation:
-            base = templateCount >= 3 ? 0.64 : 0.69
+            base = templateCount >= 3 ? 0.58 : 0.69
         case .hold:
             base = 0.72
         case .sweep:

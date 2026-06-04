@@ -396,13 +396,26 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
             var primaryTemplates: [MotionTemplate] = []
             let csvCodec = MotionSampleCSVCodec()
             let templateBuilder = MotionTemplateBuilder()
-            let preparedPrimarySamples = primarySamplesOverride.map {
-                Self.preparedTemplateSamples($0, requestedKind: requestedKind)
+            let csvPrimarySampleSets = try csvFiles.compactMap { file -> [MotionSample]? in
+                let parsed = Self.parseCaptureFileName(file.fileURL.deletingPathExtension().lastPathComponent)
+                guard ["sample", "positive", "watch", "unknown"].contains(parsed.role) else {
+                    return nil
+                }
+                let samples = try csvCodec.decodeData(Data(contentsOf: file.fileURL))
+                return samples.isEmpty ? nil : samples
             }
+            let classificationSampleSets = Self.classificationSampleSets(
+                primarySamplesOverride: primarySamplesOverride,
+                baseTemplates: baseTemplates,
+                csvPrimarySampleSets: csvPrimarySampleSets
+            )
             let effectiveKind = Self.effectiveKind(
                 requestedKind: requestedKind,
-                primarySamples: preparedPrimarySamples
+                sampleSets: classificationSampleSets
             )
+            let preparedPrimarySamples = primarySamplesOverride.map {
+                Self.preparedTemplateSamples($0, requestedKind: effectiveKind)
+            }
             let preparedBaseTemplates = baseTemplates.map {
                 Self.preparedTemplate(from: $0, kind: effectiveKind, builder: templateBuilder)
             }
@@ -426,23 +439,14 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
                 )
             }
 
-            for file in csvFiles {
-                let parsed = Self.parseCaptureFileName(file.fileURL.deletingPathExtension().lastPathComponent)
-                let samples = try csvCodec.decodeData(Data(contentsOf: file.fileURL))
-                guard !samples.isEmpty else { continue }
-
-                switch parsed.role {
-                case "sample", "positive", "watch", "unknown":
-                    if primarySamplesOverride == nil, baseTemplates.isEmpty {
-                        let preparedSamples = Self.preparedTemplateSamples(samples, requestedKind: effectiveKind)
-                        primaryTemplates.append(templateBuilder.makeTemplate(
-                            label: trimmedGesture,
-                            kind: effectiveKind,
-                            samples: preparedSamples
-                        ))
-                    }
-                default:
-                    continue
+            if primarySamplesOverride == nil, baseTemplates.isEmpty {
+                for samples in csvPrimarySampleSets {
+                    let preparedSamples = Self.preparedTemplateSamples(samples, requestedKind: effectiveKind)
+                    primaryTemplates.append(templateBuilder.makeTemplate(
+                        label: trimmedGesture,
+                        kind: effectiveKind,
+                        samples: preparedSamples
+                    ))
                 }
             }
 
@@ -545,6 +549,7 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
                     "effectiveKind": effectiveKind.rawValue,
                     "templates": primaryTemplates.count,
                     "baseTemplates": baseTemplates.count,
+                    "classificationSamples": classificationSampleSets.count,
                     "preparedBaseTemplates": preparedBaseTemplates.count,
                     "negativeTemplates": 0,
                     "soundSequenceCount": profile.soundSequence?.count ?? 0,
@@ -766,28 +771,78 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
         }
     }
 
+    nonisolated private static func classificationSampleSets(
+        primarySamplesOverride: [MotionSample]?,
+        baseTemplates: [MotionTemplate],
+        csvPrimarySampleSets: [[MotionSample]]
+    ) -> [[MotionSample]] {
+        var sampleSets: [[MotionSample]] = []
+        if let primarySamplesOverride, !primarySamplesOverride.isEmpty {
+            sampleSets.append(primarySamplesOverride)
+        }
+        sampleSets.append(contentsOf: baseTemplates.map(\.samples).filter { !$0.isEmpty })
+        if sampleSets.isEmpty {
+            sampleSets.append(contentsOf: csvPrimarySampleSets)
+        }
+        return sampleSets
+    }
+
     nonisolated private static func effectiveKind(
         requestedKind: GestureKind,
-        primarySamples: [MotionSample]?
+        sampleSets: [[MotionSample]]
     ) -> GestureKind {
-        guard requestedKind != .posture else { return requestedKind }
-        guard let primarySamples, primarySamples.isEmpty == false else { return requestedKind }
-        guard let first = primarySamples.first, let last = primarySamples.last else {
-            return requestedKind
+        guard requestedKind != .posture, requestedKind != .combo else { return requestedKind }
+        let sampleSets = sampleSets.filter { !$0.isEmpty }
+        guard !sampleSets.isEmpty else { return requestedKind }
+
+        let extractor = MotionFeatureExtractor()
+        let tokenizer = MotionTokenizer()
+        let featuresList = sampleSets.map { extractor.extract($0) }
+        var votes: [GestureKind: Double] = [:]
+
+        for features in featuresList {
+            let tokenKind = tokenizer.classify(features)
+            let inferredKind: GestureKind
+            let weight: Double
+            switch tokenKind {
+            case .rotation, .oscillation:
+                inferredKind = .sequence
+                weight = features.duration >= 0.8 ? 2.0 : 1.35
+            case .hold:
+                inferredKind = .posture
+                weight = 1.8
+            case .impulse, .sweep:
+                inferredKind = .burst
+                weight = 1.55
+            case .pause, .free:
+                inferredKind = features.duration <= 1.6 ? .burst : .sequence
+                weight = 0.75
+            }
+            votes[inferredKind, default: 0] += weight
         }
-        let features = MotionFeatureExtractor().extract(primarySamples)
-        switch MotionTokenizer().classify(features) {
-        case .impulse, .sweep:
-            return .burst
-        case .hold:
-            return .posture
-        case .rotation, .oscillation:
-            return .sequence
-        case .pause, .free:
-            break
+
+        let averageDuration = featuresList.map(\.duration).reduce(0, +) / Double(featuresList.count)
+        let hasSequenceEvidence = featuresList.contains { features in
+            let tokenKind = tokenizer.classify(features)
+            return tokenKind == .rotation
+                || tokenKind == .oscillation
+                || features.integratedRotationAngle >= .pi * 0.9
+                || features.oscillationCount >= 2.0
         }
-        let duration = max(0, last.timestamp - first.timestamp)
-        return duration <= 1.6 ? .burst : .sequence
+
+        if hasSequenceEvidence, averageDuration >= 0.65 {
+            votes[.sequence, default: 0] += 1.2
+        }
+        if averageDuration > 1.8 {
+            votes[.sequence, default: 0] += 0.8
+        }
+
+        return votes.max { lhs, rhs in
+            if lhs.value == rhs.value {
+                return lhs.key.rawValue < rhs.key.rawValue
+            }
+            return lhs.value < rhs.value
+        }?.key ?? requestedKind
     }
 
     nonisolated private static func preparedTemplateSamples(

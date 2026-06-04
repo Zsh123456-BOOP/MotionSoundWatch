@@ -93,11 +93,11 @@ public struct GestureRecognitionRuntime: Sendable {
             minimumTriggerScore = isSingleTemplate ? 0.80 : 0.72
             minimumMarginScore = isSingleTemplate ? 0.14 : 0.08
         case .rotation:
-            minimumTriggerScore = isSingleTemplate ? 0.78 : 0.70
-            minimumMarginScore = isSingleTemplate ? 0.16 : 0.08
+            minimumTriggerScore = isSingleTemplate ? 0.78 : 0.64
+            minimumMarginScore = isSingleTemplate ? 0.16 : 0.06
         case .oscillation:
-            minimumTriggerScore = isSingleTemplate ? 0.76 : 0.68
-            minimumMarginScore = isSingleTemplate ? 0.14 : 0.08
+            minimumTriggerScore = isSingleTemplate ? 0.76 : 0.60
+            minimumMarginScore = isSingleTemplate ? 0.14 : 0.06
         case .hold:
             minimumTriggerScore = isSingleTemplate ? 0.80 : 0.72
             minimumMarginScore = isSingleTemplate ? 0.12 : 0.08

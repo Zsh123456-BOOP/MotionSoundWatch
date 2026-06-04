@@ -536,6 +536,26 @@ import Foundation
     #expect(upgraded.thresholds != nil)
 }
 
+@Test func profileCodecMigratesStoredRotationProfileKindAndThresholds() throws {
+    let templateBuilder = MotionTemplateBuilder()
+    let templates = [
+        templateBuilder.makeTemplate(label: "turn", kind: .burst, samples: syntheticRotation(duration: 1.2, angle: .pi * 2.0)),
+        templateBuilder.makeTemplate(label: "turn", kind: .burst, samples: syntheticRotation(duration: 1.3, angle: .pi * 2.05)),
+        templateBuilder.makeTemplate(label: "turn", kind: .burst, samples: syntheticRotation(duration: 1.1, angle: .pi * 1.95)),
+    ]
+    var profile = GestureProfileBuilder().makeProfile(name: "turn", kind: .burst, templates: templates)
+    profile.thresholds = ThresholdProfile(triggerScore: 0.70, rejectScore: 0.48, marginScore: 0.08)
+    let archive = GestureProfileArchive(profiles: [profile])
+    let codec = GestureProfileCodec()
+
+    let decoded = try codec.decode(try codec.encode(archive))
+    let upgraded = decoded.profiles[0]
+
+    #expect(upgraded.kind == .sequence)
+    #expect(upgraded.signature?.primaryKind == .rotation)
+    #expect((upgraded.thresholds?.triggerScore ?? 1) <= 0.62)
+}
+
 @Test func profileArchivePreservesSoundSequence() throws {
     let template = MotionTemplateBuilder().makeTemplate(
         label: "combo",
