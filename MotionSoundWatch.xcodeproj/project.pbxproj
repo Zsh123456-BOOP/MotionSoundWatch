@@ -189,7 +189,7 @@
 			name = MotionSoundWatch;
 			productName = MotionSoundWatch;
 			productReference = AA0000000000000000000100 /* MotionSoundWatch.app */;
-			productType = "com.apple.product-type.application";
+			productType = "com.apple.product-type.application.watchapp2";
 		};
 		BB0000000000000000000301 /* MotionSoundPhone */ = {
 			isa = PBXNativeTarget;
@@ -452,6 +452,7 @@
 				);
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.zhongsuhua.MotionSoundPhone.watchkitapp;
+				PRODUCT_BINARY_SOURCE_PATH = "";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = watchos;
 				SKIP_INSTALL = YES;
@@ -481,6 +482,7 @@
 				);
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.zhongsuhua.MotionSoundPhone.watchkitapp;
+				PRODUCT_BINARY_SOURCE_PATH = "";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = watchos;
 				SKIP_INSTALL = YES;
