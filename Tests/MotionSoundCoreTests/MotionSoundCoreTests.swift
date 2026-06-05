@@ -622,6 +622,47 @@ import Foundation
     #expect(event.logEntry.tokens.first?.integratedAngle ?? 0 > .pi * 1.5)
 }
 
+@Test func continuousEpisodeRecognizerTriggersRotationBeforeSegmentFinalizes() {
+    let template = MotionTemplateBuilder().makeTemplate(
+        label: "turn",
+        kind: .sequence,
+        samples: syntheticRotation(duration: 1.2, angle: .pi * 2)
+    )
+    let profile = GestureProfileBuilder().makeProfile(name: "turn", kind: .sequence, templates: [template])
+    let interval = 0.02
+    var stream: [MotionSample] = (0..<30).map {
+        flatSample(timestamp: Double($0) * interval, acceleration: 0.01, rotation: 0.01)
+    }
+    let offset = (stream.last?.timestamp ?? 0) + interval
+    stream.append(contentsOf: syntheticRotation(duration: 2.6, angle: .pi * 2.1).map {
+        MotionSample(
+            timestamp: $0.timestamp + offset,
+            userAcceleration: $0.userAcceleration,
+            rotationRate: $0.rotationRate,
+            gravity: $0.gravity,
+            attitude: $0.attitude
+        )
+    })
+    var runtime = GestureRecognitionRuntime(
+        profiles: [profile],
+        continuousEvaluationInterval: 0.02
+    )
+    var triggered: ContinuousRecognitionEvaluation?
+
+    for sample in stream {
+        if let evaluation = runtime.evaluateContinuous(sample: sample, now: sample.timestamp),
+           evaluation.evaluation.candidate?.shouldTrigger == true {
+            triggered = evaluation
+            break
+        }
+    }
+
+    #expect(triggered != nil)
+    #expect(triggered?.evaluation.candidate?.profile.id == profile.id)
+    #expect(triggered?.evaluation.candidate?.recognizerKind == .rotation)
+    #expect((triggered?.evaluation.tokens.first?.integratedAngle ?? 0) > .pi * 1.5)
+}
+
 @Test func trajectoryRecognizerTreatsDistanceThresholdAsTriggerBoundary() {
     let builder = MotionTemplateBuilder()
     var profile = GestureProfileBuilder().makeProfile(
@@ -1166,7 +1207,7 @@ import Foundation
     #expect(event.logEntry.burstGateRejectionReason == nil)
 }
 
-@Test func sampleCollectionPolicyRequiresThreeSamplesBeforeSaving() {
+@Test func sampleCollectionPolicyRequiresFiveSamplesBeforeSaving() {
     let builder = MotionTemplateBuilder()
     let templates = [
         builder.makeTemplate(label: "punch", kind: .burst, samples: syntheticBurst(duration: 0.7, amplitude: 1.0)),
@@ -1176,12 +1217,12 @@ import Foundation
     let plan = GestureSampleCollectionPolicy().plan(templates: templates)
 
     #expect(plan.acceptedCount == 2)
-    #expect(plan.requiredCount == 3)
+    #expect(plan.requiredCount == 5)
     #expect(plan.isReady == false)
     #expect(plan.needsMoreSamples)
 }
 
-@Test func sampleCollectionPolicyAllowsThreeConsistentSamples() {
+@Test func sampleCollectionPolicyRequiresFiveEvenForConsistentSamples() {
     let builder = MotionTemplateBuilder()
     let templates = [
         builder.makeTemplate(label: "punch", kind: .burst, samples: syntheticBurst(duration: 0.7, amplitude: 1.0)),
@@ -1192,25 +1233,26 @@ import Foundation
     let plan = GestureSampleCollectionPolicy().plan(templates: templates)
 
     #expect(plan.acceptedCount == 3)
-    #expect(plan.requiredCount == 3)
-    #expect(plan.isReady)
+    #expect(plan.requiredCount == 5)
+    #expect(plan.isReady == false)
     #expect(plan.hasHighDeviation == false)
 }
 
-@Test func sampleCollectionPolicyRequiresFiveWhenSamplesDiverge() {
+@Test func sampleCollectionPolicyAllowsFiveSamplesWithoutUserCorrectionFlow() {
     let builder = MotionTemplateBuilder()
     let templates = [
         builder.makeTemplate(label: "mixed", kind: .sequence, samples: syntheticBurst(duration: 0.7, amplitude: 1.0)),
         builder.makeTemplate(label: "mixed", kind: .sequence, samples: syntheticSequence(duration: 2.8, amplitude: 1.0)),
         builder.makeTemplate(label: "mixed", kind: .sequence, samples: syntheticSequence(duration: 0.9, amplitude: 0.35)),
+        builder.makeTemplate(label: "mixed", kind: .sequence, samples: syntheticSequence(duration: 2.2, amplitude: 0.8)),
+        builder.makeTemplate(label: "mixed", kind: .sequence, samples: syntheticBurst(duration: 1.1, amplitude: 0.6)),
     ]
 
     let plan = GestureSampleCollectionPolicy().plan(templates: templates)
 
-    #expect(plan.acceptedCount == 3)
+    #expect(plan.acceptedCount == 5)
     #expect(plan.requiredCount == 5)
-    #expect(plan.isReady == false)
-    #expect(plan.hasHighDeviation)
+    #expect(plan.isReady)
 }
 
 @Test func singleTemplateLegacyProfileRejectsOverIntenseLooseMatch() {

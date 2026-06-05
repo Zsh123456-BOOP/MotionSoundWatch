@@ -2320,12 +2320,6 @@ private struct SampleCollectionStatusView: View {
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            if plan.hasHighDeviation {
-                Text("样本偏差较大，系统会多收集到 5 次，避免后续一做就误触或完全触发不了。")
-                    .font(.footnote.weight(.medium))
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
         }
         .padding(12)
         .background(Color(.tertiarySystemGroupedBackground))

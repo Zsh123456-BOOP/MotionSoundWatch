@@ -135,9 +135,6 @@ struct MotionDebugView: View {
         .onReceive(fileSender.$lastRecordingCommand.compactMap { $0 }) { command in
             handleRemoteRecordingCommand(command)
         }
-        .onChange(of: recorder.triggerCount) {
-            sendPhoneFallbackSoundIfNeeded()
-        }
         .onDisappear {
             AppDiagnostics.record("watch.debugView.onDisappear")
             runtimeStartTask?.cancel()
@@ -180,30 +177,6 @@ struct MotionDebugView: View {
 
     private var outputVolumeText: String {
         "\(Int((soundPlayer.lastOutputVolume * 100).rounded()))%"
-    }
-
-    private func sendPhoneFallbackSoundIfNeeded() {
-        guard recorder.triggerCount > 0,
-              recorder.lastTriggerAudioPlayed == false,
-              let event = recorder.lastRecognitionEvent,
-              event.triggered,
-              let sound = event.profile?.sound else {
-            return
-        }
-
-        let queued = fileSender.sendPlaySound(
-            fileName: sound.fileName,
-            profileName: event.profile?.name ?? "",
-            volume: sound.volume
-        )
-        AppDiagnostics.record(
-            "watch.phoneFallbackSound.requested",
-            [
-                "file": sound.fileName,
-                "profile": event.profile?.name ?? "",
-                "queued": queued,
-            ]
-        )
     }
 
     private var watchConnectionText: String {

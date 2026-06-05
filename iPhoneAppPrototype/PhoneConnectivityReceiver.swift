@@ -699,9 +699,11 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
 
         do {
             let fileURL = try copyToOutgoingDirectory(sourceURL)
+            let preferredFileName = sanitizeFileName(sourceURL.lastPathComponent)
             var metadata: [String: Any] = [
                 "kind": kind.rawValue,
-                "fileName": fileURL.lastPathComponent,
+                "fileName": preferredFileName,
+                "transferFileName": fileURL.lastPathComponent,
                 "sentAt": Date().timeIntervalSince1970,
                 "source": "MotionSoundPhone",
                 "checksum": try sha256Hex(fileURL),
@@ -711,7 +713,14 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
             }
             session.transferFile(fileURL, metadata: metadata)
             lastMessage = "\(queuedMessagePrefix)：\(fileURL.lastPathComponent)"
-            AppDiagnostics.record("phone.connectivity.transfer.queued", ["file": fileURL.lastPathComponent, "kind": kind.rawValue])
+            AppDiagnostics.record(
+                "phone.connectivity.transfer.queued",
+                [
+                    "file": fileURL.lastPathComponent,
+                    "preferredFileName": preferredFileName,
+                    "kind": kind.rawValue,
+                ]
+            )
             return true
         } catch {
             lastMessage = error.localizedDescription
@@ -778,19 +787,13 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
             return
         }
 
-        let played = soundPlayer.play(
-            fileName: trimmedFileName,
-            volume: Float(max(0, min(1, volume ?? 1)))
-        )
-        lastMessage = played
-            ? "Watch 触发：\(profile ?? "")，iPhone 已播放音效。"
-            : "Watch 触发：\(profile ?? "")，但 iPhone 未找到或未播放音效。"
+        lastMessage = "Watch 触发：\(profile ?? "")，手机不代播；请以 Watch 声音为准。"
         AppDiagnostics.record(
-            "phone.playSound.received",
+            "phone.playSound.ignored",
             [
                 "file": trimmedFileName,
                 "profile": profile ?? "",
-                "played": played,
+                "volume": volume ?? 1,
             ]
         )
     }

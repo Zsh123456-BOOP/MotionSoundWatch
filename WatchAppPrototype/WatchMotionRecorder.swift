@@ -31,7 +31,7 @@ final class WatchMotionRecorder: ObservableObject {
     @Published private(set) var lastFeedbackMessage: String?
     @Published private(set) var standardTemplateCount = 0
     @Published private(set) var standardNegativeTemplateCount = 0
-    @Published private(set) var standardRequiredTemplateCount = 3
+    @Published private(set) var standardRequiredTemplateCount = 5
     @Published private(set) var standardQuality: GestureQuality?
     var recognitionEventSink: (([String: Any]) -> Void)?
 
@@ -59,6 +59,7 @@ final class WatchMotionRecorder: ObservableObject {
     private var standardLabel: String?
     private var standardKind: GestureKind?
     private var triggerCountsByProfileID: [UUID: Int] = [:]
+    private var rearmStatesByProfileID: [UUID: GestureRearmState] = [:]
     private var lastMotionHeartbeatAt: TimeInterval = 0
     private var lastNoProfileSummaryLogAt: TimeInterval = -.infinity
     private var lastNonCandidateTraceAt: TimeInterval = -.infinity
@@ -66,6 +67,25 @@ final class WatchMotionRecorder: ObservableObject {
     private var motionCallbackCount = 0
     private var firstMotionSampleLogged = false
     private var motionStartDiagnosticTask: Task<Void, Never>?
+
+    private struct GestureRearmState {
+        var isArmed: Bool
+        var lastTriggerTimestamp: TimeInterval
+        var quietSinceTimestamp: TimeInterval?
+        var minimumCooldown: TimeInterval
+
+        init(
+            isArmed: Bool = true,
+            lastTriggerTimestamp: TimeInterval = -.infinity,
+            quietSinceTimestamp: TimeInterval? = nil,
+            minimumCooldown: TimeInterval = 0.9
+        ) {
+            self.isArmed = isArmed
+            self.lastTriggerTimestamp = lastTriggerTimestamp
+            self.quietSinceTimestamp = quietSinceTimestamp
+            self.minimumCooldown = minimumCooldown
+        }
+    }
 
     init(soundPlayer: WatchSoundPlayer? = nil) {
         self.soundPlayer = soundPlayer
@@ -458,13 +478,14 @@ final class WatchMotionRecorder: ObservableObject {
             recordingStartTimestamp = rawSample.timestamp
         }
 
-        let liveSample = rawSample.makeSample(start: liveStartTimestamp)
-        latestSample = liveSample
-        recordFirstMotionSampleIfNeeded(rawSample: rawSample, sample: liveSample)
-        recordMotionHeartbeatIfNeeded(sample: liveSample)
+            let liveSample = rawSample.makeSample(start: liveStartTimestamp)
+            latestSample = liveSample
+            recordFirstMotionSampleIfNeeded(rawSample: rawSample, sample: liveSample)
+            recordMotionHeartbeatIfNeeded(sample: liveSample)
+            updateRearmStates(sample: liveSample)
 
-        if isRecording {
-            let recordingSample = normalizedRecordingSample(from: rawSample)
+            if isRecording {
+                let recordingSample = normalizedRecordingSample(from: rawSample)
             samples.append(recordingSample)
             lastAssessment = validator.assess(samples)
             estimatedSampleRate = lastAssessment?.estimatedSampleRate ?? 0
@@ -475,81 +496,187 @@ final class WatchMotionRecorder: ObservableObject {
             return
         }
 
-        if let segment = segmenter.ingest(liveSample) {
-            lastSegment = segment
-            AppDiagnostics.record(
-                "watch.motion.segment",
-                [
-                    "kind": segment.kind.rawValue,
-                    "duration": segment.duration,
-                    "peakEnergy": segment.peakEnergy,
-                ]
-            )
-            let evaluation = recognitionRuntime.evaluate(segment: segment, now: liveSample.timestamp)
-            let candidate = evaluation.candidate
-            lastBurstGateRejectionReason = evaluation.burstGateRejectionReason
-            updateRecognitionSummary(segment: segment, candidate: candidate, rejectionReason: evaluation.burstGateRejectionReason)
-            let soundToPlay = candidate?.shouldTrigger == true ? nextSound(for: candidate?.profile) : nil
-            let audioPlayRequested = candidate?.shouldTrigger == true
-                ? (soundPlayer?.play(sound: soundToPlay) ?? false)
-                : false
-            let audioPlayed = audioPlayRequested && (soundPlayer?.lastAudiblePlaySucceeded ?? audioPlayRequested)
-            lastRecognitionEvent = recognitionRuntime.record(
-                segment: segment,
-                candidate: candidate,
-                now: liveSample.timestamp,
-                wearContext: currentWearContext(),
-                audioPlayed: audioPlayed,
-                burstGateRejectionReason: evaluation.burstGateRejectionReason,
-                tokens: evaluation.tokens,
-                classifiedKind: evaluation.classifiedKind,
-                candidateReports: evaluation.candidateReports,
-                rejectReason: evaluation.rejectReason
+        if let continuousEvaluation = recognitionRuntime.evaluateContinuous(sample: liveSample, now: liveSample.timestamp) {
+            processRecognition(
+                segment: continuousEvaluation.segment,
+                evaluation: continuousEvaluation.evaluation,
+                liveSample: liveSample,
+                source: "continuous"
             )
             if lastRecognitionEvent?.triggered == true {
-                if let profileID = lastRecognitionEvent?.profile?.id {
-                    triggerCountsByProfileID[profileID, default: 0] += 1
-                }
-                triggerCount += 1
-                if audioPlayed {
-                    audioPlayedTriggerCount += 1
-                } else {
-                    audioMissingTriggerCount += 1
-                }
-                lastTriggeredProfileName = lastRecognitionEvent?.profile?.name
-                lastTriggeredSound = soundToPlay
-                lastTriggerAudioPlayed = audioPlayed
-                lastTriggerDate = Date()
-                WKInterfaceDevice.current().play(.success)
-                AppDiagnostics.record(
-                    "watch.recognition.triggered",
-                    [
-                        "profile": lastRecognitionEvent?.profile?.name ?? "",
-                        "audioPlayed": audioPlayed,
-                        "audioPlayRequested": audioPlayRequested,
-                        "sound": soundToPlay?.fileName ?? "",
-                        "profileTriggerCount": lastRecognitionEvent?.profile.map { triggerCountsByProfileID[$0.id, default: 0] } ?? 0,
-                        "triggerCount": triggerCount,
-                        "audioPlayedTriggerCount": audioPlayedTriggerCount,
-                        "audioMissingTriggerCount": audioMissingTriggerCount,
-                    ]
-                )
-                AppDiagnostics.record(
-                    "watch.recognition.triggerHaptic",
-                    ["profile": lastRecognitionEvent?.profile?.name ?? ""]
-                )
+                return
             }
-            persistRecognitionTraceIfNeeded(
-                segment: segment,
-                candidate: candidate,
-                rejectionReason: evaluation.burstGateRejectionReason,
-                rejectReason: evaluation.rejectReason,
-                tokens: evaluation.tokens,
-                classifiedKind: evaluation.classifiedKind,
-                candidateReports: evaluation.candidateReports,
-                audioPlayed: audioPlayed,
-                triggered: lastRecognitionEvent?.triggered == true
+        }
+
+        if let segment = segmenter.ingest(liveSample) {
+            let evaluation = recognitionRuntime.evaluate(segment: segment, now: liveSample.timestamp)
+            processRecognition(segment: segment, evaluation: evaluation, liveSample: liveSample, source: "segment")
+        }
+    }
+
+    private func processRecognition(
+        segment: GestureSegment,
+        evaluation: RecognitionEvaluation,
+        liveSample: MotionSample,
+        source: String
+    ) {
+        lastSegment = segment
+        AppDiagnostics.record(
+            "watch.motion.segment",
+            [
+                "source": source,
+                "kind": segment.kind.rawValue,
+                "duration": segment.duration,
+                "peakEnergy": segment.peakEnergy,
+            ]
+        )
+
+        var candidate = evaluation.candidate
+        var rejectReason = evaluation.rejectReason
+        if candidate?.shouldTrigger == true,
+           let profile = candidate?.profile,
+           !isArmedForTrigger(profile: profile, at: liveSample.timestamp) {
+            candidate?.rejectReason = .cooldownActive
+            rejectReason = .cooldownActive
+            AppDiagnostics.record(
+                "watch.recognition.rearmBlocked",
+                [
+                    "profile": profile.name,
+                    "timestamp": liveSample.timestamp,
+                    "source": source,
+                ]
             )
+        }
+
+        lastBurstGateRejectionReason = evaluation.burstGateRejectionReason
+        updateRecognitionSummary(segment: segment, candidate: candidate, rejectionReason: evaluation.burstGateRejectionReason)
+        let soundToPlay = candidate?.shouldTrigger == true ? nextSound(for: candidate?.profile) : nil
+        let audioPlayRequested = candidate?.shouldTrigger == true
+            ? (soundPlayer?.play(sound: soundToPlay) ?? false)
+            : false
+        let audioPlayed = audioPlayRequested && (soundPlayer?.lastAudiblePlaySucceeded ?? audioPlayRequested)
+        lastRecognitionEvent = recognitionRuntime.record(
+            segment: segment,
+            candidate: candidate,
+            now: liveSample.timestamp,
+            wearContext: currentWearContext(),
+            audioPlayed: audioPlayed,
+            burstGateRejectionReason: evaluation.burstGateRejectionReason,
+            tokens: evaluation.tokens,
+            classifiedKind: evaluation.classifiedKind,
+            candidateReports: evaluation.candidateReports,
+            rejectReason: rejectReason
+        )
+        if lastRecognitionEvent?.triggered == true {
+            if let profile = lastRecognitionEvent?.profile {
+                triggerCountsByProfileID[profile.id, default: 0] += 1
+                markTriggered(profile: profile, at: liveSample.timestamp)
+            }
+            triggerCount += 1
+            if audioPlayed {
+                audioPlayedTriggerCount += 1
+            } else {
+                audioMissingTriggerCount += 1
+            }
+            lastTriggeredProfileName = lastRecognitionEvent?.profile?.name
+            lastTriggeredSound = soundToPlay
+            lastTriggerAudioPlayed = audioPlayed
+            lastTriggerDate = Date()
+            WKInterfaceDevice.current().play(.success)
+            AppDiagnostics.record(
+                "watch.recognition.triggered",
+                [
+                    "source": source,
+                    "profile": lastRecognitionEvent?.profile?.name ?? "",
+                    "audioPlayed": audioPlayed,
+                    "audioPlayRequested": audioPlayRequested,
+                    "sound": soundToPlay?.fileName ?? "",
+                    "profileTriggerCount": lastRecognitionEvent?.profile.map { triggerCountsByProfileID[$0.id, default: 0] } ?? 0,
+                    "triggerCount": triggerCount,
+                    "audioPlayedTriggerCount": audioPlayedTriggerCount,
+                    "audioMissingTriggerCount": audioMissingTriggerCount,
+                ]
+            )
+            AppDiagnostics.record(
+                "watch.recognition.triggerHaptic",
+                ["profile": lastRecognitionEvent?.profile?.name ?? ""]
+            )
+        }
+        persistRecognitionTraceIfNeeded(
+            segment: segment,
+            candidate: candidate,
+            rejectionReason: evaluation.burstGateRejectionReason,
+            rejectReason: rejectReason,
+            tokens: evaluation.tokens,
+            classifiedKind: evaluation.classifiedKind,
+            candidateReports: evaluation.candidateReports,
+            audioPlayed: audioPlayed,
+            triggered: lastRecognitionEvent?.triggered == true
+        )
+    }
+
+    private func isArmedForTrigger(profile: GestureProfile, at timestamp: TimeInterval) -> Bool {
+        rearmStatesByProfileID[profile.id, default: GestureRearmState()].isArmed
+    }
+
+    private func markTriggered(profile: GestureProfile, at timestamp: TimeInterval) {
+        let cooldown = max(0.9, profile.cooldownSeconds)
+        rearmStatesByProfileID[profile.id] = GestureRearmState(
+            isArmed: false,
+            lastTriggerTimestamp: timestamp,
+            quietSinceTimestamp: nil,
+            minimumCooldown: cooldown
+        )
+    }
+
+    private func updateRearmStates(sample: MotionSample) {
+        guard !rearmStatesByProfileID.isEmpty else { return }
+        let energy = sample.userAcceleration.magnitude + 0.25 * sample.rotationRate.magnitude
+        let quietThreshold = 0.34
+        let quietDuration = 0.34
+        let maxLockedDuration = 3.5
+
+        for profileID in rearmStatesByProfileID.keys {
+            guard var state = rearmStatesByProfileID[profileID], !state.isArmed else {
+                continue
+            }
+
+            let elapsed = sample.timestamp - state.lastTriggerTimestamp
+            if elapsed >= maxLockedDuration {
+                state.isArmed = true
+                state.quietSinceTimestamp = nil
+                rearmStatesByProfileID[profileID] = state
+                AppDiagnostics.record("watch.recognition.rearmed", ["profileID": profileID.uuidString, "reason": "timeout"])
+                continue
+            }
+
+            guard elapsed >= state.minimumCooldown else {
+                state.quietSinceTimestamp = nil
+                rearmStatesByProfileID[profileID] = state
+                continue
+            }
+
+            if energy <= quietThreshold {
+                if state.quietSinceTimestamp == nil {
+                    state.quietSinceTimestamp = sample.timestamp
+                }
+                if let quietSince = state.quietSinceTimestamp,
+                   sample.timestamp - quietSince >= quietDuration {
+                    state.isArmed = true
+                    state.quietSinceTimestamp = nil
+                    AppDiagnostics.record(
+                        "watch.recognition.rearmed",
+                        [
+                            "profileID": profileID.uuidString,
+                            "reason": "quiet",
+                            "quietDuration": sample.timestamp - quietSince,
+                        ]
+                    )
+                }
+            } else {
+                state.quietSinceTimestamp = nil
+            }
+            rearmStatesByProfileID[profileID] = state
         }
     }
 

@@ -228,10 +228,7 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
             let preferredName = preferredFileName?.isEmpty == false
                 ? preferredFileName!
                 : fileURL.lastPathComponent
-            let destination = availableDestinationURL(
-                directory: directory,
-                fileName: sanitizeFileName(preferredName)
-            )
+            let destination = directory.appendingPathComponent(sanitizeFileName(preferredName))
 
             if let checksum, let actualChecksum = sha256Hex(fileURL), checksum != actualChecksum {
                 lastTransferMessage = "音频校验失败：\(preferredName)"
@@ -239,6 +236,9 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
                 return
             }
 
+            if fileManager.fileExists(atPath: destination.path) {
+                try fileManager.removeItem(at: destination)
+            }
             try fileManager.moveItem(at: fileURL, to: destination)
             reloadReceivedSoundFiles()
             lastTransferMessage = "已接收音频：\(destination.lastPathComponent)"

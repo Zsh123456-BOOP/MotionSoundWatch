@@ -228,7 +228,7 @@ public struct GestureSampleCollectionPolicy: Sendable {
     public var matcher: MotionTemplateMatcher
 
     public init(
-        minimumTemplateCount: Int = 3,
+        minimumTemplateCount: Int = 5,
         highDeviationTemplateCount: Int = 5,
         highDistanceThreshold: Double = 0.26,
         highDurationRatioThreshold: Double = 2.4,
@@ -254,26 +254,19 @@ public struct GestureSampleCollectionPolicy: Sendable {
             existingProfiles: existingProfiles
         )
         let highDeviation = hasHighDeviation(templates)
-        let required = highDeviation ? highDeviationTemplateCount : minimumTemplateCount
+        let required = max(minimumTemplateCount, highDeviation ? highDeviationTemplateCount : minimumTemplateCount)
         let ready = count >= required
 
         let message: String
         if count == 0 {
-            message = "先录第 1 次动作。系统会要求至少录满 \(minimumTemplateCount) 次。"
-        } else if count < minimumTemplateCount {
-            message = "已确认 \(count)/\(minimumTemplateCount) 次。继续录同一个动作，让系统学习你的自然差异。"
-        } else if highDeviation, count < highDeviationTemplateCount {
-            message = "前 \(count) 次差异偏大，需要录满 \(highDeviationTemplateCount) 次来提升泛化。"
-        } else if highDeviation {
-            message = "已录满 \(count) 次，但样本差异仍偏大。可以先保存，后续再补录优化。"
+            message = "先录第 1 次动作。系统会学习 5 次录制里的自然差异。"
+        } else if count < required {
+            message = "已确认 \(count)/\(required) 次。继续录同一个动作。"
         } else {
-            message = "已录满 \(count) 次，可以配置声音并保存。"
+            message = "已确认 \(count) 次录制，可以配置声音并保存。"
         }
 
-        var warnings = report.warnings
-        if highDeviation {
-            warnings.append("同一动作的轨迹差异偏大，系统会要求录满 \(highDeviationTemplateCount) 次。")
-        }
+        let warnings = report.warnings
 
         return GestureSampleCollectionPlan(
             acceptedCount: count,

@@ -1514,7 +1514,11 @@ public struct MotionRecognitionRouter: Sendable {
         }
         let stageScore = stageExtractor.match(signature: profile.signature?.stages, samples: matchingSegment.samples)
         let poseScore = poseAnalyzer.match(signature: profile.signature?.pose, samples: matchingSegment.samples)
-        let kind = tokenScore?.candidate.recognizerKind ?? explanatoryKind(profile: profile, tokens: matchingTokens)
+        let kind = tokenScore?.candidate.recognizerKind ?? explanatoryKind(
+            profile: profile,
+            segment: matchingSegment,
+            tokens: matchingTokens
+        )
         let rejectReason = trajectoryRejectReason(
             profile: profile,
             segment: matchingSegment,
@@ -1537,7 +1541,8 @@ public struct MotionRecognitionRouter: Sendable {
                 stageScore: stageScore?.score,
                 poseScore: poseScore?.score,
                 poseConfidence: profile.signature?.pose?.confidence ?? 0,
-                stageCount: profile.signature?.stages?.count ?? 0
+                stageCount: profile.signature?.stages?.count ?? 0,
+                recognizerKind: tokenScore?.candidate.recognizerKind
             )
         }
         if let rejectReason {
@@ -1613,12 +1618,12 @@ public struct MotionRecognitionRouter: Sendable {
         }
     }
 
-    private func explanatoryKind(profile: GestureProfile, tokens: [MotionToken]) -> MotionTokenKind {
+    private func explanatoryKind(profile: GestureProfile, segment: GestureSegment, tokens: [MotionToken]) -> MotionTokenKind {
         let token = tokens.first
         guard let signature = profile.signature else {
             return token?.kind ?? .free
         }
-        return routeKind(signature: signature, token: token)
+        return routeKind(signature: signature, token: token, features: extractor.extract(segment.samples))
     }
 
     private func trajectoryRejectReason(
@@ -1634,17 +1639,24 @@ public struct MotionRecognitionRouter: Sendable {
             if let hardRejectReason = hardTrajectoryVetoReason(tokenResult.candidate.rejectReason) {
                 return hardRejectReason
             }
-            if let hardRejectReason = hardTrajectoryVetoReason(stageScore?.rejectReason) {
-                return hardRejectReason
-            }
-            if let hardRejectReason = hardTrajectoryVetoReason(poseScore?.rejectReason) {
-                return hardRejectReason
-            }
             let semanticScore = tokenResult.candidate.recognitionScore ?? tokenResult.candidate.confidence
             let minimumSemanticScore = profile.thresholds?.rejectScore ?? 0.42
+            let rotationSemanticPass = signature.rotation != nil
+                && tokenResult.candidate.recognizerKind == .rotation
+                && semanticScore >= minimumSemanticScore
+            if !rotationSemanticPass {
+                if let hardRejectReason = hardTrajectoryVetoReason(stageScore?.rejectReason) {
+                    return hardRejectReason
+                }
+                if let hardRejectReason = hardTrajectoryVetoReason(poseScore?.rejectReason) {
+                    return hardRejectReason
+                }
+            }
             if match.distance > profile.acceptanceThreshold {
                 let distanceRatio = match.distance / max(profile.acceptanceThreshold, 0.0001)
-                let softDistanceAllowed = distanceRatio <= 1.30 && semanticScore >= minimumSemanticScore
+                let softDistanceAllowed = rotationSemanticPass
+                    ? distanceRatio <= 2.25 && semanticScore >= minimumSemanticScore
+                    : distanceRatio <= 1.30 && semanticScore >= minimumSemanticScore
                 if !softDistanceAllowed {
                     return .trajectoryDistanceTooHigh
                 }
@@ -1677,13 +1689,16 @@ public struct MotionRecognitionRouter: Sendable {
         stageScore: Double?,
         poseScore: Double?,
         poseConfidence: Double,
-        stageCount: Int
+        stageCount: Int,
+        recognizerKind: MotionTokenKind?
     ) -> Double {
+        let trajectoryWeight = recognizerKind == .rotation ? 0.24 : 0.52
+        let semanticWeight = recognizerKind == .rotation ? 0.48 : 0.26
         var weightedScores: [(weight: Double, score: Double)] = [
-            (0.52, trajectoryScore)
+            (trajectoryWeight, trajectoryScore)
         ]
         if let semanticScore {
-            weightedScores.append((0.26, semanticScore))
+            weightedScores.append((semanticWeight, semanticScore))
         }
         if let stageScore {
             let weight = stageCount > 1 ? 0.17 : 0.10
@@ -1736,7 +1751,7 @@ public struct MotionRecognitionRouter: Sendable {
     ) -> (candidate: RecognitionCandidate, report: CandidateRecognitionReport) {
         let token = tokens.first
         let features = extractor.extract(segment.samples)
-        let kind = routeKind(signature: signature, token: token)
+        let kind = routeKind(signature: signature, token: token, features: features)
         let score: Double
         let rejectReason: RejectReason?
 
@@ -1801,10 +1816,20 @@ public struct MotionRecognitionRouter: Sendable {
         return (candidate, report)
     }
 
-    private func routeKind(signature: GestureSignature, token: MotionToken?) -> MotionTokenKind {
+    private func routeKind(
+        signature: GestureSignature,
+        token: MotionToken?,
+        features: GestureSampleFeatures? = nil
+    ) -> MotionTokenKind {
         guard let token else { return signature.primaryKind }
         if token.kind == signature.primaryKind || signature.secondaryKinds.contains(token.kind) {
             return token.kind
+        }
+        if signature.rotation != nil,
+           (token.kind == .oscillation || token.kind == .free),
+           let features,
+           features.integratedRotationAngle >= max(.pi * 0.75, (signature.rotation?.totalAngleRadians ?? .pi * 2) * 0.45) {
+            return .rotation
         }
         if signature.primaryKind == .free {
             return .free
@@ -1837,6 +1862,9 @@ public struct MotionRecognitionRouter: Sendable {
         case (.rotation, .oscillation):
             let requiredAngle = signature.rotation.map { max(.pi * 0.75, $0.totalAngleRadians * 0.70) } ?? .pi
             return features.integratedRotationAngle < requiredAngle
+        case (.rotation, .free):
+            let requiredAngle = signature.rotation.map { max(.pi * 0.75, $0.totalAngleRadians * 0.45) } ?? .pi
+            return features.integratedRotationAngle < requiredAngle
         case (.oscillation, .impulse):
             return signature.impulse == nil
         case (.impulse, .rotation), (.impulse, .oscillation), (.rotation, .impulse):
@@ -1863,7 +1891,7 @@ public struct MotionRecognitionRouter: Sendable {
 
     private func rotationScore(features: GestureSampleFeatures, signature: RotationSignature?) -> (Double, RejectReason?) {
         guard let signature else { return (0, .typeMismatch) }
-        let minAngle = max(.pi * 0.30, signature.totalAngleRadians * 0.45)
+        let minAngle = max(.pi * 0.65, signature.totalAngleRadians * 0.68)
         guard features.integratedRotationAngle >= minAngle else {
             return (0.25, .rotationAngleTooSmall)
         }
