@@ -104,6 +104,9 @@ struct MotionDebugView: View {
             recorder.startLiveUpdates()
             soundPlayer.configureAudioSession()
             fileSender.activate()
+            recorder.recognitionEventSink = { event in
+                _ = fileSender.sendRecognitionEvent(event)
+            }
             fileSender.reloadReceivedSoundFiles()
             preloadReceivedSounds()
             syncRuntimeSession(reason: "viewAppear")
@@ -139,6 +142,7 @@ struct MotionDebugView: View {
             AppDiagnostics.record("watch.debugView.onDisappear")
             runtimeStartTask?.cancel()
             runtimeStartTask = nil
+            recorder.recognitionEventSink = nil
             recorder.stopLiveUpdates()
             runtimeSession.stop(reason: "viewDisappear")
         }

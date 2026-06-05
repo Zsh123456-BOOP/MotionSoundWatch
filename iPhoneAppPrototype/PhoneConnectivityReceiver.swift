@@ -33,6 +33,17 @@ private struct RecordingCommandReply {
     var samples: Int?
 }
 
+private enum PhoneConnectivityReceiverError: LocalizedError {
+    case invalidWatchEvent
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidWatchEvent:
+            return "Watch 事件不是有效 JSON。"
+        }
+    }
+}
+
 private enum PhoneRecordingCommandTransport {
     static func send(
         session: WCSession,
@@ -67,6 +78,8 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
     @Published private(set) var receivedFiles: [ReceivedSyncedFile] = []
     @Published private(set) var lastMessage: String?
     @Published private(set) var lastRecordingStatus: RecordingStatusEvent?
+    @Published private(set) var receivedWatchEventCount = 0
+    @Published private(set) var lastWatchEventFileName: String?
 
     private let fileManager: FileManager
     private let soundPlayer: PhoneSoundPlayer
@@ -77,6 +90,7 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
         super.init()
         AppDiagnostics.record("phone.connectivity.init", ["supported": isSupported])
         reloadReceivedFiles()
+        reloadWatchEventCount()
     }
 
     private var session: WCSession? {
@@ -105,6 +119,7 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
                 "watchAppInstalled": isWatchAppInstalled,
             ]
         )
+        _ = sendDiagnosticsConfiguration(reason: "activate")
     }
 
     func reloadReceivedFiles() {
@@ -139,6 +154,52 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
 
     func setLastMessage(_ message: String) {
         lastMessage = message
+    }
+
+    @discardableResult
+    func sendDiagnosticsConfiguration(reason: String, clearWatchLogs: Bool = false) -> Bool {
+        guard let session else {
+            AppDiagnostics.record("phone.diagnostics.configureWatch.unsupported", ["reason": reason])
+            return false
+        }
+        guard session.activationState == .activated else {
+            AppDiagnostics.record(
+                "phone.diagnostics.configureWatch.deferred",
+                ["reason": reason, "state": Self.description(for: session.activationState)]
+            )
+            return false
+        }
+
+        let message: [String: Any] = [
+            "command": "configureDiagnostics",
+            "testRunId": AppDiagnostics.currentRunID(),
+            "buildCommit": AppDiagnostics.currentBuildCommit(),
+            "clearLogs": clearWatchLogs,
+            "reason": reason,
+            "sentAt": Date().timeIntervalSince1970,
+            "source": "MotionSoundPhone",
+        ]
+
+        if session.isReachable {
+            session.sendMessage(message, replyHandler: nil) { error in
+                AppDiagnostics.record(
+                    "phone.diagnostics.configureWatch.sendMessage.error",
+                    ["reason": reason, "error": error.localizedDescription]
+                )
+            }
+            AppDiagnostics.record("phone.diagnostics.configureWatch.sent", ["reason": reason, "clear": clearWatchLogs])
+            return true
+        }
+
+        do {
+            try session.updateApplicationContext(message)
+            AppDiagnostics.record("phone.diagnostics.configureWatch.contextUpdated", ["reason": reason, "clear": clearWatchLogs])
+            return true
+        } catch {
+            session.transferUserInfo(message)
+            AppDiagnostics.record(error: error, event: "phone.diagnostics.configureWatch.context.error", ["reason": reason])
+            return true
+        }
     }
 
     @discardableResult
@@ -717,6 +778,80 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
         )
     }
 
+    private func receiveWatchRecognitionEvent(_ message: [String: Any]) {
+        do {
+            let fileName = try Self.persistWatchRecognitionEvent(message)
+            noteWatchEventSaved(fileName: fileName)
+            reloadWatchEventCount()
+        } catch {
+            AppDiagnostics.record(error: error, event: "phone.watchEvent.receive.error")
+        }
+    }
+
+    private func noteWatchEventSaved(fileName: String) {
+        lastWatchEventFileName = fileName
+        AppDiagnostics.record("phone.watchEvent.received", ["file": fileName])
+    }
+
+    private func reloadWatchEventCount() {
+        do {
+            let directory = try AppDiagnostics.watchEventsDirectory(fileManager: fileManager)
+            guard fileManager.fileExists(atPath: directory.path) else {
+                receivedWatchEventCount = 0
+                lastWatchEventFileName = nil
+                return
+            }
+            let files = try fileManager.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+            )
+            .filter { $0.pathExtension == "json" }
+            .sorted { modificationDate($0) > modificationDate($1) }
+            receivedWatchEventCount = files.count
+            lastWatchEventFileName = files.first?.lastPathComponent
+        } catch {
+            receivedWatchEventCount = 0
+            AppDiagnostics.record(error: error, event: "phone.watchEvent.reload.error")
+        }
+    }
+
+    nonisolated private static func persistWatchRecognitionEvent(
+        _ message: [String: Any],
+        fileManager: FileManager = .default
+    ) throws -> String {
+        let directory = try AppDiagnostics.watchEventsDirectory(fileManager: fileManager)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        var event = message
+        event["receivedAt"] = ISO8601DateFormatter().string(from: Date())
+        event["receivedBy"] = "MotionSoundPhone"
+        event["testRunId"] = event["testRunId"] as? String ?? AppDiagnostics.currentRunID()
+        event["buildCommit"] = event["buildCommit"] as? String ?? AppDiagnostics.currentBuildCommit()
+        event["eventType"] = event["eventType"] as? String ?? "watchRecognitionEvent"
+
+        guard JSONSerialization.isValidJSONObject(event) else {
+            throw PhoneConnectivityReceiverError.invalidWatchEvent
+        }
+
+        let data = try JSONSerialization.data(withJSONObject: event, options: [.prettyPrinted, .sortedKeys])
+        let fileName = watchEventFileName(event)
+        try data.write(to: directory.appendingPathComponent(fileName), options: [.atomic])
+        return fileName
+    }
+
+    nonisolated private static func watchEventFileName(_ event: [String: Any]) -> String {
+        let timestamp = (event["createdAt"] as? String) ?? ISO8601DateFormatter().string(from: Date())
+        let outcome = nonisolatedSanitizeFileName((event["outcome"] as? String) ?? "event")
+        let profile = nonisolatedSanitizeFileName((event["profileName"] as? String) ?? "no-profile")
+        let compactTimestamp = timestamp
+            .replacingOccurrences(of: ":", with: "")
+            .replacingOccurrences(of: ".", with: "-")
+            .replacingOccurrences(of: "T", with: "-")
+            .replacingOccurrences(of: "Z", with: "")
+        return "\(compactTimestamp)-\(outcome)-\(profile).json"
+    }
+
     private func incomingDirectory() throws -> URL {
         let documents = try fileManager.url(
             for: .documentDirectory,
@@ -1076,6 +1211,7 @@ extension PhoneConnectivityReceiver: WCSessionDelegate {
                         "watchAppInstalled": isWatchAppInstalled,
                     ]
                 )
+                _ = sendDiagnosticsConfiguration(reason: "activationComplete")
                 _ = requestWatchRuntime(reason: "activationComplete")
             }
         }
@@ -1112,7 +1248,25 @@ extension PhoneConnectivityReceiver: WCSessionDelegate {
         let errorMessage = message["errorMessage"] as? String
         let profile = message["profile"] as? String
         let volume = message["volume"] as? Double
+        var watchEventFileName: String?
+        var watchEventError: String?
+        if command == "watchRecognitionEvent" {
+            do {
+                watchEventFileName = try Self.persistWatchRecognitionEvent(message)
+            } catch {
+                watchEventError = error.localizedDescription
+            }
+        }
         Task { @MainActor in
+            if command == "watchRecognitionEvent" {
+                if let watchEventFileName {
+                    noteWatchEventSaved(fileName: watchEventFileName)
+                    reloadWatchEventCount()
+                } else {
+                    AppDiagnostics.record("phone.watchEvent.receive.error", ["error": watchEventError ?? "unknown"])
+                }
+                return
+            }
             if command == "playSound" {
                 receivePlaySound(command: command, fileName: fileName, profile: profile, volume: volume)
                 return
@@ -1141,7 +1295,25 @@ extension PhoneConnectivityReceiver: WCSessionDelegate {
         let errorMessage = userInfo["errorMessage"] as? String
         let profile = userInfo["profile"] as? String
         let volume = userInfo["volume"] as? Double
+        var watchEventFileName: String?
+        var watchEventError: String?
+        if command == "watchRecognitionEvent" {
+            do {
+                watchEventFileName = try Self.persistWatchRecognitionEvent(userInfo)
+            } catch {
+                watchEventError = error.localizedDescription
+            }
+        }
         Task { @MainActor in
+            if command == "watchRecognitionEvent" {
+                if let watchEventFileName {
+                    noteWatchEventSaved(fileName: watchEventFileName)
+                    reloadWatchEventCount()
+                } else {
+                    AppDiagnostics.record("phone.watchEvent.receive.error", ["error": watchEventError ?? "unknown"])
+                }
+                return
+            }
             if command == "playSound" {
                 receivePlaySound(command: command, fileName: fileName, profile: profile, volume: volume)
                 return

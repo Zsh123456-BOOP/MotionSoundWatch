@@ -129,6 +129,7 @@ struct PhoneDebugView: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         receiver.activate()
+                        receiver.sendDiagnosticsConfiguration(reason: "toolbarRefresh")
                         receiver.reloadReceivedFiles()
                         reloadLocalAudioFiles()
                         reloadSavedProfiles()
@@ -143,6 +144,7 @@ struct PhoneDebugView: View {
                 AppDiagnostics.record("phone.productView.onAppear")
                 UIApplication.shared.isIdleTimerDisabled = true
                 receiver.activate()
+                receiver.sendDiagnosticsConfiguration(reason: "phoneViewAppear")
                 receiver.requestWatchRuntime(reason: "phoneViewAppear")
                 reloadLocalAudioFiles()
                 reloadSavedProfiles()
@@ -225,7 +227,7 @@ struct PhoneDebugView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("\(savedProfiles.count) 个动作")
                             .font(.title3.weight(.semibold))
-                        Text("保存后的动作会显示在这里。新动作会引导录满 3 次；样本差异大时会继续录到 5 次。")
+                        Text("保存后的动作会显示在这里。新动作会引导录满 3 次；每次都能裁剪真正的开始和结束。")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
@@ -328,7 +330,7 @@ struct PhoneDebugView: View {
                     if pendingRecordingAction == .stopRecording {
                         HStack(spacing: 8) {
                             ProgressView()
-                            Text("正在等待 Watch 保存并同步样本，完成后自动进入裁剪。")
+                            Text("正在等待 Watch 保存并同步这次录制，完成后自动进入裁剪。")
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                         }
@@ -358,7 +360,7 @@ struct PhoneDebugView: View {
 
                 StepNavigationBar(
                     backTitle: "返回",
-                    nextTitle: captureFiles.isEmpty ? "等待样本" : "下一步：裁剪",
+                    nextTitle: captureFiles.isEmpty ? "等待录制" : "下一步：裁剪",
                     canGoNext: !captureFiles.isEmpty
                 ) {
                     currentStep = .create
@@ -375,8 +377,8 @@ struct PhoneDebugView: View {
             VStack(alignment: .leading, spacing: 14) {
                 if previewSamples.isEmpty {
                     EmptyStateView(
-                        title: "还没有可裁剪的样本",
-                        subtitle: "先录一次动作，Watch 会把样本同步到 iPhone。"
+                        title: "还没有可裁剪的录制",
+                        subtitle: "先录一次动作，Watch 会把这次录制同步到 iPhone。"
                     )
                     PrimaryActionButton(title: "返回录制", systemImage: "record.circle") {
                         currentStep = .record
@@ -579,7 +581,7 @@ struct PhoneDebugView: View {
 
                 Picker("触发时机", selection: $triggerTiming) {
                     Text("动作结束").tag("atEnd")
-                    Text("峰值附近").tag("atPeak")
+                    Text("动作最明显时").tag("atPeak")
                 }
                 .pickerStyle(.segmented)
 
@@ -605,13 +607,11 @@ struct PhoneDebugView: View {
         ProductSection("保存并同步") {
             VStack(alignment: .leading, spacing: 14) {
                 SummaryRow(label: "动作", value: normalizedGestureName)
-                SummaryRow(label: "类型", value: automaticKindText)
                 SummaryRow(label: "录制", value: "\(syncBaseTemplates.count) 次")
                 SummaryRow(label: "音效", value: selectedAudioFileName.isEmpty ? "未绑定" : selectedAudioFileName)
-                SummaryRow(label: "触发", value: triggerTiming == "atPeak" ? "峰值附近" : "动作结束")
-                SummaryRow(label: "保存类型", value: automaticKindText)
+                SummaryRow(label: "播放", value: triggerTiming == "atPeak" ? "动作最明显时" : "动作完成后")
 
-                Text("保存后会生成动作 Profile，并把 Profile 与已选择的音频发送到 Watch。Watch 端会本地识别和播放。")
+                Text("保存后会把动作和已选择的音频发送到 Watch。Watch 端会本地识别和播放。")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -624,7 +624,7 @@ struct PhoneDebugView: View {
                 Button {
                     activeFileImport = .profile
                 } label: {
-                    Label("导入已有 Profile", systemImage: "square.and.arrow.down")
+                    Label("导入动作配置", systemImage: "square.and.arrow.down")
                 }
                 .buttonStyle(.bordered)
 
@@ -677,7 +677,7 @@ struct PhoneDebugView: View {
 
     private var recordingSubtitle: String {
         let plan = currentSampleCollectionPlan
-        if let editingAsset, isAppendingRecording {
+        if editingAsset != nil, isAppendingRecording {
             return "补录第 \(plan.acceptedCount + 1) 次，目标 \(plan.requiredCount) 次"
         }
         return "第 \(plan.acceptedCount + 1) 次，目标 \(plan.requiredCount) 次"
@@ -689,7 +689,7 @@ struct PhoneDebugView: View {
             return "已确认 \(plan.acceptedCount) 次录制，系统会生成\(automaticKindText)模型。"
         }
         if isAppendingRecording {
-            return "保存后会保留原有模板，并使用当前共 \(plan.acceptedCount) 次录制重新生成模型。"
+            return "保存后会保留原有录制，并使用当前共 \(plan.acceptedCount) 次录制重新生成模型。"
         }
         return "当前动作已有 \(editingAsset.templateCount) 次录制；保存会同步名称、声音和触发设置。"
     }
@@ -1531,7 +1531,7 @@ struct PhoneDebugView: View {
             trimStartFraction = min(trimStartFraction, 0.95)
             trimEndFraction = max(trimEndFraction, 0.05)
             playbackFraction = 0
-            previewMessage = "已载入 \(samples.count) 个采样点，时长 \(formatDuration(samples))。"
+            previewMessage = "已载入动作片段，时长 \(formatDuration(samples))。"
             AppDiagnostics.record("phone.capture.preview.loaded", ["file": file.fileURL.lastPathComponent, "samples": samples.count])
         } catch {
             previewSamples = []
@@ -1548,9 +1548,9 @@ struct PhoneDebugView: View {
             return "Watch 正在录制 \(status.label.isEmpty ? normalizedGestureName : status.label)"
         }
         if status.csvQueued {
-            return "已收到 \(status.samples) 个采样点，正在同步样本。"
+            return "Watch 已结束，正在同步这次录制。"
         }
-        return "已采集 \(status.samples) 个采样点。"
+        return "Watch 已结束，正在保存这次录制。"
     }
 
     private func formatDuration(_ samples: [MotionSample]) -> String {
@@ -1689,6 +1689,10 @@ private struct PhoneDiagnosticsView: View {
                     DiagnosticsRow(label: "本机音效", value: "\(localAudioFiles.count)")
                     DiagnosticsRow(label: "录制样本", value: "\(captureFiles.count)")
                     DiagnosticsRow(label: "预览采样点", value: "\(previewSamples.count)")
+                    DiagnosticsRow(label: "Watch 事件", value: "\(receiver.receivedWatchEventCount)")
+                    if let fileName = receiver.lastWatchEventFileName {
+                        DiagnosticsText(label: "最近 Watch 事件", value: fileName)
+                    }
                 }
 
                 if let status = receiver.lastRecordingStatus {
@@ -1707,8 +1711,9 @@ private struct PhoneDiagnosticsView: View {
                 }
 
                 Section("日志") {
-                    DiagnosticsText(label: "iPhone 日志位置", value: "Documents/MotionSoundLogs/app.log")
-                    DiagnosticsText(label: "Watch 触发日志", value: "用 scripts/fetch_app_logs.sh watch 导出 MotionSoundTriggerLogs")
+                    DiagnosticsText(label: "当前 runId", value: AppDiagnostics.currentRunID())
+                    DiagnosticsText(label: "iPhone 日志位置", value: AppDiagnostics.relativeLogPathDescription())
+                    DiagnosticsText(label: "Watch 事件", value: "Documents/MotionSoundDiagnostics/runs/\(AppDiagnostics.currentRunID())/iOS/watch-events")
                 }
             }
             .navigationTitle("诊断")
@@ -1948,15 +1953,15 @@ private struct CapturePicker: View {
 
     var body: some View {
         if files.count > 1 {
-            Picker("样本", selection: $selectedURL) {
-                ForEach(files) { file in
-                    Text(file.fileURL.lastPathComponent)
+            Picker("选择录制", selection: $selectedURL) {
+                ForEach(Array(files.enumerated()), id: \.element.id) { index, file in
+                    Text("第 \(index + 1) 次录制")
                         .tag(Optional(file.fileURL))
                 }
             }
             .pickerStyle(.menu)
-        } else if let file = files.first {
-            SummaryRow(label: "样本", value: file.fileURL.lastPathComponent)
+        } else if files.first != nil {
+            SummaryRow(label: "录制", value: "第 1 次")
         }
     }
 }
@@ -1973,30 +1978,15 @@ private struct MotionSignalTimeline: View {
         let reduced = samples.enumerated().compactMap { offset, sample -> (Int, MotionSample)? in
             offset % stride == 0 ? (offset, sample) : nil
         }
-        let maxAcceleration = max(
-            reduced.flatMap { item in
-                [
-                    abs(item.1.userAcceleration.x),
-                    abs(item.1.userAcceleration.y),
-                    abs(item.1.userAcceleration.z),
-                ]
-            }.max() ?? 1,
-            0.01
-        )
         let maxEnergy = max(
             reduced.map { $0.1.userAcceleration.magnitude + 0.25 * $0.1.rotationRate.magnitude }.max() ?? 1,
             0.01
         )
 
-        return reduced.flatMap { offset, sample in
+        return reduced.map { offset, sample in
             let time = sample.timestamp - first.timestamp
             let energy = sample.userAcceleration.magnitude + 0.25 * sample.rotationRate.magnitude
-            return [
-                SignalPoint(id: "\(offset)-energy", time: time, value: energy / maxEnergy, series: "强度"),
-                SignalPoint(id: "\(offset)-x", time: time, value: sample.userAcceleration.x / maxAcceleration, series: "X"),
-                SignalPoint(id: "\(offset)-y", time: time, value: sample.userAcceleration.y / maxAcceleration, series: "Y"),
-                SignalPoint(id: "\(offset)-z", time: time, value: sample.userAcceleration.z / maxAcceleration, series: "Z"),
-            ]
+            return SignalPoint(id: "\(offset)-energy", time: time, value: energy / maxEnergy, series: "动作强度")
         }
     }
 
@@ -2008,10 +1998,10 @@ private struct MotionSignalTimeline: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
-                SignalLegend(color: .accentColor, label: "强度")
-                SignalLegend(color: .red, label: "X")
-                SignalLegend(color: .green, label: "Y")
-                SignalLegend(color: .blue, label: "Z")
+                SignalLegend(color: .accentColor, label: "动作强度")
+                Spacer()
+                Text("拖动下面的开始和结束，保留真正的动作部分")
+                    .foregroundStyle(.secondary)
             }
             .font(.caption)
 
@@ -2022,9 +2012,8 @@ private struct MotionSignalTimeline: View {
                         y: .value("归一化", point.value),
                         series: .value("信号", point.series)
                     )
-                    .lineStyle(StrokeStyle(lineWidth: point.series == "强度" ? 2.4 : 1.1))
+                    .lineStyle(StrokeStyle(lineWidth: 2.4))
                     .foregroundStyle(by: .value("信号", point.series))
-                    .opacity(point.series == "强度" ? 1 : 0.62)
                 }
 
                 RectangleMark(
@@ -2046,10 +2035,7 @@ private struct MotionSignalTimeline: View {
                     .lineStyle(StrokeStyle(lineWidth: 2, dash: [4, 3]))
             }
             .chartForegroundStyleScale([
-                "强度": Color.accentColor,
-                "X": Color.red,
-                "Y": Color.green,
-                "Z": Color.blue,
+                "动作强度": Color.accentColor,
             ])
             .chartLegend(.hidden)
             .chartYScale(domain: -1.05...1.05)
@@ -2110,9 +2096,8 @@ private struct CaptureStats: View {
 
     var body: some View {
         HStack {
-            SummaryMetric(title: "采样点", value: "\(samples.count)")
-            SummaryMetric(title: "时长", value: durationText)
-            SummaryMetric(title: "峰值", value: peakText)
+            SummaryMetric(title: "已选时长", value: durationText)
+            SummaryMetric(title: "片段状态", value: qualityText)
         }
     }
 
@@ -2121,9 +2106,16 @@ private struct CaptureStats: View {
         return String(format: "%.1fs", max(0, last.timestamp - first.timestamp))
     }
 
-    private var peakText: String {
-        let peak = samples.map(\.userAcceleration.magnitude).max() ?? 0
-        return String(format: "%.2f", peak)
+    private var qualityText: String {
+        guard let first = samples.first, let last = samples.last else { return "待选择" }
+        let duration = max(0, last.timestamp - first.timestamp)
+        if duration < 0.25 {
+            return "偏短"
+        }
+        if duration > 8 {
+            return "偏长"
+        }
+        return "可用"
     }
 }
 
@@ -2224,7 +2216,6 @@ private struct PhoneGestureAsset: Identifiable, Equatable {
     var id: UUID { profile.id }
     var deduplicationKey: String { "\(profile.name.lowercased())|\(profile.kind.rawValue)" }
     var templateCount: Int { profile.templates.count }
-    var sampleCount: Int { profile.templates.map(\.samples.count).reduce(0, +) }
     var soundName: String {
         if let sequence = profile.soundSequence, sequence.count > 1 {
             return "\(sequence.count) 段音效"
@@ -2234,19 +2225,6 @@ private struct PhoneGestureAsset: Identifiable, Equatable {
     var isLegacyUntitled: Bool {
         profile.name.trimmingCharacters(in: .whitespacesAndNewlines)
             .caseInsensitiveCompare("untitled") == .orderedSame
-    }
-
-    var kindText: String {
-        switch profile.kind {
-        case .burst:
-            return "短促"
-        case .sequence:
-            return "连续"
-        case .posture:
-            return "姿态"
-        case .combo:
-            return "组合"
-        }
     }
 }
 
@@ -2261,7 +2239,7 @@ private struct GestureAssetRow: View {
         VStack(alignment: .leading, spacing: 10) {
             Button(action: open) {
                 HStack(spacing: 12) {
-                    Image(systemName: asset.profile.kind == .burst ? "bolt.fill" : "point.3.connected.trianglepath.dotted")
+                    Image(systemName: "figure.wave")
                         .frame(width: 34, height: 34)
                         .background(Color.accentColor.opacity(0.13))
                         .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -2271,7 +2249,7 @@ private struct GestureAssetRow: View {
                             .font(.headline)
                             .foregroundStyle(.primary)
                             .lineLimit(1)
-                        Text("\(asset.kindText) · \(asset.templateCount) 模板 · \(asset.sampleCount) 采样点")
+                        Text("\(asset.templateCount) 次录制 · \(asset.soundName)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)

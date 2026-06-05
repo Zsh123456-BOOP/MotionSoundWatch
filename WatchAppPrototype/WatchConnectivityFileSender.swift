@@ -13,6 +13,7 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
     @Published private(set) var lastRecordingCommand: RecordingControlCommand?
     @Published private(set) var runtimePrepareRequestCount = 0
     @Published private(set) var profileLibraryChangeCount = 0
+    @Published private(set) var recognitionEventSyncCount = 0
 
     private var session: WCSession? {
         isSupported ? WCSession.default : nil
@@ -186,6 +187,36 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
 
         session.transferUserInfo(message)
         AppDiagnostics.record("watch.playSound.queued", ["file": fileName, "profile": profileName])
+        return true
+    }
+
+    @discardableResult
+    func sendRecognitionEvent(_ event: [String: Any]) -> Bool {
+        guard let session else {
+            AppDiagnostics.record("watch.recognitionEvent.unsupported")
+            return false
+        }
+
+        var message = event
+        message["command"] = "watchRecognitionEvent"
+        message["testRunId"] = message["testRunId"] as? String ?? AppDiagnostics.currentRunID()
+        message["buildCommit"] = message["buildCommit"] as? String ?? AppDiagnostics.currentBuildCommit()
+        message["deviceRole"] = "watchOS"
+        message["eventType"] = "watchRecognitionEvent"
+        message["sentAt"] = Date().timeIntervalSince1970
+        message["source"] = "MotionSoundWatch"
+
+        session.transferUserInfo(message)
+        recognitionEventSyncCount += 1
+        AppDiagnostics.record(
+            "watch.recognitionEvent.queued",
+            [
+                "count": recognitionEventSyncCount,
+                "profile": message["profileName"] as? String ?? "",
+                "outcome": message["outcome"] as? String ?? "",
+                "triggered": message["triggered"] as? Bool ?? false,
+            ]
+        )
         return true
     }
 
@@ -377,6 +408,28 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
         )
     }
 
+    private func receiveConfigureDiagnostics(runID: String?, buildCommit: String?, clearLogs: Bool?, reason: String?) {
+        guard let runID, !runID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            AppDiagnostics.record("watch.diagnostics.configure.missingRunID", ["reason": reason ?? ""])
+            return
+        }
+        AppDiagnostics.configureRun(
+            id: runID,
+            buildCommit: buildCommit,
+            clearExisting: clearLogs ?? false,
+            reason: reason ?? "phoneConfigure"
+        )
+        lastTransferMessage = "诊断已同步"
+        AppDiagnostics.record(
+            "watch.diagnostics.configured",
+            [
+                "runID": AppDiagnostics.currentRunID(),
+                "clear": clearLogs ?? false,
+                "reason": reason ?? "",
+            ]
+        )
+    }
+
     private func description(for state: WCSessionActivationState) -> String {
         switch state {
         case .activated:
@@ -549,7 +602,14 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
         let autoSendCSV = message["autoSendCSV"] as? Bool
         let profileID = message["profileID"] as? String
         let name = message["name"] as? String
+        let testRunID = message["testRunId"] as? String
+        let buildCommit = message["buildCommit"] as? String
+        let clearLogs = message["clearLogs"] as? Bool
         Task { @MainActor in
+            if command == "configureDiagnostics" {
+                receiveConfigureDiagnostics(runID: testRunID, buildCommit: buildCommit, clearLogs: clearLogs, reason: reason)
+                return
+            }
             if command == "prepareRuntime" {
                 receivePrepareRuntime(reason: reason)
                 return
@@ -583,6 +643,21 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
         let autoSendCSV = message["autoSendCSV"] as? Bool
         let profileID = message["profileID"] as? String
         let name = message["name"] as? String
+        let testRunID = message["testRunId"] as? String
+        let buildCommit = message["buildCommit"] as? String
+        let clearLogs = message["clearLogs"] as? Bool
+
+        if command == "configureDiagnostics" {
+            replyHandler([
+                "status": "accepted",
+                "command": "configureDiagnostics",
+                "receivedAt": Date().timeIntervalSince1970,
+            ])
+            Task { @MainActor in
+                receiveConfigureDiagnostics(runID: testRunID, buildCommit: buildCommit, clearLogs: clearLogs, reason: reason)
+            }
+            return
+        }
 
         if command == "prepareRuntime" {
             replyHandler([
@@ -645,7 +720,14 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
         let autoSendCSV = userInfo["autoSendCSV"] as? Bool
         let profileID = userInfo["profileID"] as? String
         let name = userInfo["name"] as? String
+        let testRunID = userInfo["testRunId"] as? String
+        let buildCommit = userInfo["buildCommit"] as? String
+        let clearLogs = userInfo["clearLogs"] as? Bool
         Task { @MainActor in
+            if command == "configureDiagnostics" {
+                receiveConfigureDiagnostics(runID: testRunID, buildCommit: buildCommit, clearLogs: clearLogs, reason: reason)
+                return
+            }
             if command == "prepareRuntime" {
                 receivePrepareRuntime(reason: reason)
                 return
@@ -668,7 +750,14 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
     nonisolated func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) {
         let command = applicationContext["command"] as? String
         let reason = applicationContext["reason"] as? String
+        let testRunID = applicationContext["testRunId"] as? String
+        let buildCommit = applicationContext["buildCommit"] as? String
+        let clearLogs = applicationContext["clearLogs"] as? Bool
         Task { @MainActor in
+            if command == "configureDiagnostics" {
+                receiveConfigureDiagnostics(runID: testRunID, buildCommit: buildCommit, clearLogs: clearLogs, reason: reason)
+                return
+            }
             guard command == "prepareRuntime" else { return }
             receivePrepareRuntime(reason: reason)
         }

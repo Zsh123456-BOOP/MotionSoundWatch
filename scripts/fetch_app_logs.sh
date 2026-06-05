@@ -16,8 +16,8 @@ USAGE
 target="${1:-}"
 destination_root="${2:-/tmp/motionsound-logs}"
 
-watch_device_id="${WATCH_DEVICE_ID:-00008310-0014FC5E0C28A01E}"
-phone_device_id="${PHONE_DEVICE_ID:-00008130-00114C441AE8001C}"
+watch_device_id="${WATCH_DEVICE_ID:-B291F720-5021-54B9-9B1E-DB2D0632D9A0}"
+phone_device_id="${PHONE_DEVICE_ID:-BAC2651E-2C9A-5BD5-BF85-6F98072714A9}"
 
 case "$target" in
   watch)
@@ -38,22 +38,24 @@ timestamp="$(date -u +%Y%m%d-%H%M%S)"
 destination="${destination_root}/${target}-${timestamp}"
 mkdir -p "$destination"
 
-xcrun devicectl device copy from \
-  --device "$device_id" \
-  --domain-type appDataContainer \
-  --domain-identifier "$bundle_id" \
-  --source Documents/MotionSoundLogs \
-  --destination "$destination"
+copy_from_app() {
+  local source_path="$1"
+  local label="$2"
+  if xcrun devicectl device copy from \
+    --device "$device_id" \
+    --domain-type appDataContainer \
+    --domain-identifier "$bundle_id" \
+    --source "$source_path" \
+    --destination "$destination" >/dev/null 2>&1; then
+    echo "Copied ${label} from ${target}." >&2
+  else
+    echo "No ${label} found on ${target}." >&2
+  fi
+}
 
-if xcrun devicectl device copy from \
-  --device "$device_id" \
-  --domain-type appDataContainer \
-  --domain-identifier "$bundle_id" \
-  --source Documents/MotionSoundTriggerLogs \
-  --destination "$destination" >/dev/null 2>&1; then
-  :
-else
-  echo "No MotionSoundTriggerLogs directory found on ${target}." >&2
-fi
+copy_from_app Documents/MotionSoundDiagnostics MotionSoundDiagnostics
+copy_from_app Documents/MotionSoundLogs MotionSoundLogs
+copy_from_app Documents/MotionSoundTriggerLogs MotionSoundTriggerLogs
+copy_from_app Documents/MotionSoundIncoming MotionSoundIncoming
 
 echo "$destination"

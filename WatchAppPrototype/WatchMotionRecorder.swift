@@ -33,6 +33,7 @@ final class WatchMotionRecorder: ObservableObject {
     @Published private(set) var standardNegativeTemplateCount = 0
     @Published private(set) var standardRequiredTemplateCount = 3
     @Published private(set) var standardQuality: GestureQuality?
+    var recognitionEventSink: (([String: Any]) -> Void)?
 
     private let motionManager = CMMotionManager()
     private let motionQueue = OperationQueue()
@@ -668,6 +669,20 @@ final class WatchMotionRecorder: ObservableObject {
             )
             let data = try JSONSerialization.data(withJSONObject: metadata, options: [.prettyPrinted, .sortedKeys])
             try data.write(to: jsonURL, options: [.atomic])
+            recognitionEventSink?(compactRecognitionEventMetadata(
+                date: now,
+                segment: segment,
+                candidate: candidate,
+                rejectionReason: rejectionReason,
+                rejectReason: rejectReason,
+                tokens: tokens,
+                classifiedKind: classifiedKind,
+                candidateReports: candidateReports,
+                audioPlayed: audioPlayed,
+                triggered: triggered,
+                csvFileName: csvURL.lastPathComponent,
+                jsonFileName: jsonURL.lastPathComponent
+            ))
             pruneRecognitionTraceDirectory(directory, keepingNewestFilePairs: 80)
             AppDiagnostics.record(
                 "watch.recognition.traceSaved",
@@ -720,13 +735,9 @@ final class WatchMotionRecorder: ObservableObject {
     }
 
     private func recognitionTraceDirectory() throws -> URL {
-        let documents = try FileManager.default.url(
-            for: .documentDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        )
-        return documents.appendingPathComponent("MotionSoundTriggerLogs", isDirectory: true)
+        try AppDiagnostics.runDirectory()
+            .appendingPathComponent("watchOS", isDirectory: true)
+            .appendingPathComponent("trigger-traces", isDirectory: true)
     }
 
     private func recognitionTraceBaseName(date: Date, outcome: String, profileName: String?) -> String {
@@ -865,6 +876,101 @@ final class WatchMotionRecorder: ObservableObject {
             ]
         }
         return metadata
+    }
+
+    private func compactRecognitionEventMetadata(
+        date: Date,
+        segment: GestureSegment,
+        candidate: RecognitionCandidate?,
+        rejectionReason: BurstGateRejectionReason?,
+        rejectReason: RejectReason?,
+        tokens: [MotionToken],
+        classifiedKind: MotionTokenKind?,
+        candidateReports: [CandidateRecognitionReport],
+        audioPlayed: Bool,
+        triggered: Bool,
+        csvFileName: String,
+        jsonFileName: String
+    ) -> [String: Any] {
+        let timestampFormatter = ISO8601DateFormatter()
+        timestampFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        var event: [String: Any] = [
+            "schemaVersion": 1,
+            "eventType": "watchRecognitionEvent",
+            "testRunId": AppDiagnostics.currentRunID(),
+            "buildCommit": AppDiagnostics.currentBuildCommit(),
+            "deviceRole": "watchOS",
+            "createdAt": timestampFormatter.string(from: date),
+            "outcome": recognitionOutcome(triggered: triggered, candidate: candidate, rejectionReason: rejectionReason),
+            "triggered": triggered,
+            "audioPlayed": audioPlayed,
+            "profileCount": recognitionRuntime.profiles.count,
+            "segmentKind": segment.kind.rawValue,
+            "classifiedKind": classifiedKind?.rawValue ?? "",
+            "sampleCount": segment.samples.count,
+            "duration": segment.duration,
+            "peakEnergy": segment.peakEnergy,
+            "peakAcceleration": segment.features.peakAcceleration,
+            "peakRotationRate": segment.features.peakRotationRate,
+            "peakJerk": segment.features.peakJerk,
+            "meanEnergy": segment.features.meanEnergy,
+            "dominantAxis": segment.features.dominantAxis,
+            "csvFileName": csvFileName,
+            "jsonFileName": jsonFileName,
+            "wearWrist": currentWearContext().wristLocation,
+            "wearCrown": currentWearContext().crownOrientation,
+        ]
+
+        if let rejectionReason {
+            event["rejectionReason"] = rejectionReason.rawValue
+        }
+        if let rejectReason {
+            event["rejectReason"] = rejectReason.rawValue
+        }
+        if let candidate {
+            event["profileID"] = candidate.profile.id.uuidString
+            event["profileName"] = candidate.profile.name
+            event["profileKind"] = candidate.profile.kind.rawValue
+            event["recognizerKind"] = candidate.recognizerKind?.rawValue ?? ""
+            event["recognitionScore"] = candidate.recognitionScore ?? -1
+            event["distance"] = candidate.distance
+            event["threshold"] = candidate.profile.acceptanceThreshold
+            event["scoreThreshold"] = candidate.profile.thresholds?.triggerScore ?? -1
+            event["confidence"] = candidate.confidence
+            event["margin"] = candidate.margin ?? -1
+            event["marginThreshold"] = candidate.profile.marginThreshold
+            event["secondBestDistance"] = candidate.secondBestDistance ?? -1
+            event["shouldTrigger"] = candidate.shouldTrigger
+            event["soundFileName"] = candidate.profile.sound?.fileName ?? ""
+            event["playedSoundFileName"] = triggered ? (lastTriggeredSound?.fileName ?? "") : ""
+        }
+
+        event["tokens"] = tokens.prefix(6).map { token in
+            [
+                "kind": token.kind.rawValue,
+                "duration": token.duration,
+                "direction": token.direction,
+                "magnitude": token.magnitude,
+                "confidence": token.confidence,
+                "peakAcc": token.peakAcc ?? -1,
+                "peakGyro": token.peakGyro ?? -1,
+                "integratedAngle": token.integratedAngle ?? -1,
+                "oscillationCount": token.oscillationCount ?? -1,
+            ] as [String: Any]
+        }
+        event["candidateReports"] = candidateReports.prefix(8).map { report in
+            [
+                "profileID": report.profileID.uuidString,
+                "profileName": report.profileName,
+                "recognizerKind": report.recognizerKind.rawValue,
+                "score": report.score,
+                "threshold": report.threshold,
+                "margin": report.margin ?? -1,
+                "shouldTrigger": report.shouldTrigger,
+                "rejectReason": report.rejectReason?.rawValue ?? "",
+            ] as [String: Any]
+        }
+        return event
     }
 
     private func sanitizeTraceFileName(_ value: String) -> String {
