@@ -410,11 +410,18 @@ public struct GestureProfileBuilder: Sendable {
 
 public struct GestureProfileArchive: Codable, Equatable, Sendable {
     public var schemaVersion: Int
+    public var libraryVersion: String?
     public var profiles: [GestureProfile]
     public var exportedAt: Date
 
-    public init(schemaVersion: Int = 1, profiles: [GestureProfile], exportedAt: Date = Date()) {
+    public init(
+        schemaVersion: Int = 1,
+        libraryVersion: String? = nil,
+        profiles: [GestureProfile],
+        exportedAt: Date = Date()
+    ) {
         self.schemaVersion = schemaVersion
+        self.libraryVersion = libraryVersion
         self.profiles = profiles
         self.exportedAt = exportedAt
     }
@@ -436,6 +443,7 @@ public struct GestureProfileCodec: Sendable {
         let archive = try decoder.decode(GestureProfileArchive.self, from: data)
         return GestureProfileArchive(
             schemaVersion: archive.schemaVersion,
+            libraryVersion: archive.libraryVersion,
             profiles: archive.profiles.map(upgradeProfileIfNeeded),
             exportedAt: archive.exportedAt
         )

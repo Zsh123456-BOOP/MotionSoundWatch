@@ -25,6 +25,7 @@ struct WatchRecognitionEventSummary: Identifiable, Equatable {
     var id: URL { fileURL }
     var fileURL: URL
     var fileName: String
+    var profileLibraryVersion: String?
     var profileID: UUID?
     var profileName: String
     var variantLabel: String?
@@ -97,6 +98,9 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
     @Published private(set) var receivedWatchEventCount = 0
     @Published private(set) var lastWatchEventFileName: String?
     @Published private(set) var recentWatchEvents: [WatchRecognitionEventSummary] = []
+    @Published private(set) var lastQueuedProfileLibraryVersion: String?
+    @Published private(set) var lastQueuedProfileLibraryCount = 0
+    @Published private(set) var lastQueuedProfileLibraryAt: Date?
 
     private let fileManager: FileManager
     private let soundPlayer: PhoneSoundPlayer
@@ -419,28 +423,77 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
     }
 
     @discardableResult
-    func sendProfileLibrarySnapshot() -> Bool {
+    func sendProfileLibrarySnapshot(reason: String = "manual") -> Bool {
         do {
             let store = try GestureProfileFileStore.appDocumentsStore(fileManager: fileManager)
             let profiles = try store.list()
                 .flatMap(\.archive.profiles)
                 .filter { !Self.isLegacyUntitledProfile($0) }
-            let archive = GestureProfileArchive(profiles: profiles)
+            let libraryVersion = Self.profileLibraryVersion(for: profiles)
+            let archive = GestureProfileArchive(libraryVersion: libraryVersion, profiles: profiles)
             let data = try GestureProfileCodec().encode(archive)
             let snapshotURL = fileManager.temporaryDirectory
-                .appendingPathComponent("MotionSoundProfileLibrary-\(Int(Date().timeIntervalSince1970)).json")
+                .appendingPathComponent("MotionSoundProfileLibrary-\(libraryVersion).json")
             try data.write(to: snapshotURL, options: [.atomic])
-            return sendFile(
+            let queued = sendFile(
                 snapshotURL,
                 kind: .gestureProfile,
                 queuedMessagePrefix: "已加入 Watch 动作库替换队列",
-                extraMetadata: ["replaceLibrary": true]
+                extraMetadata: [
+                    "replaceLibrary": true,
+                    "profileLibraryVersion": libraryVersion,
+                    "profileCount": profiles.count,
+                    "reason": reason,
+                ]
             )
+            if queued {
+                lastQueuedProfileLibraryVersion = libraryVersion
+                lastQueuedProfileLibraryCount = profiles.count
+                lastQueuedProfileLibraryAt = Date()
+                AppDiagnostics.record(
+                    "phone.profile.librarySnapshot.queued",
+                    [
+                        "reason": reason,
+                        "profileLibraryVersion": libraryVersion,
+                        "profileCount": profiles.count,
+                    ]
+                )
+            }
+            return queued
         } catch {
             lastMessage = error.localizedDescription
-            AppDiagnostics.record(error: error, event: "phone.profile.librarySnapshot.error")
+            AppDiagnostics.record(error: error, event: "phone.profile.librarySnapshot.error", ["reason": reason])
             return false
         }
+    }
+
+    @discardableResult
+    func sendCurrentLibraryToWatch(reason: String) -> Bool {
+        sendProfileLibrarySnapshot(reason: reason)
+    }
+
+    private static func profileLibraryVersion(for profiles: [GestureProfile], now: Date = Date()) -> String {
+        let sortedProfiles = profiles.sorted {
+            if $0.name.caseInsensitiveCompare($1.name) == .orderedSame {
+                return $0.id.uuidString < $1.id.uuidString
+            }
+            return $0.name.localizedStandardCompare($1.name) == .orderedAscending
+        }
+        let seed = sortedProfiles.map { profile in
+            [
+                profile.id.uuidString,
+                profile.name,
+                profile.updatedAt.timeIntervalSince1970.description,
+                "\(profile.templates.count)",
+                profile.sound?.fileName ?? "",
+                profile.soundSequence?.map(\.fileName).joined(separator: ",") ?? "",
+            ].joined(separator: "|")
+        }.joined(separator: "\n")
+        let digest = SHA256.hash(data: Data(seed.utf8))
+            .prefix(6)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return "\(Int(now.timeIntervalSince1970))-\(digest)"
     }
 
     func generateAndSendProfile(
@@ -616,7 +669,7 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
 
             let archive = GestureProfileArchive(profiles: [profile])
             let localURL = try localStore.save(archive, preferredName: trimmedGesture)
-            let didQueueTransfer = sendProfileFile(localURL)
+            let didQueueTransfer = false
             lastMessage = "已保存动作：\(profile.name)"
             AppDiagnostics.record(
                 "phone.profile.saved",
@@ -631,7 +684,7 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
                     "preparedBaseTemplates": preparedBaseTemplates.count,
                     "negativeTemplates": 0,
                     "soundSequenceCount": profile.soundSequence?.count ?? 0,
-                    "queued": didQueueTransfer,
+                    "queuedIndividualProfile": didQueueTransfer,
                 ]
             )
             return ProfileSyncResult(fileURL: localURL, archive: archive, didQueueTransfer: didQueueTransfer)
@@ -859,6 +912,7 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
         return WatchRecognitionEventSummary(
             fileURL: fileURL,
             fileName: fileURL.lastPathComponent,
+            profileLibraryVersion: (json["profileLibraryVersion"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
             profileID: profileID,
             profileName: profileName?.isEmpty == false ? profileName! : "未命中",
             variantLabel: variantLabel?.isEmpty == false ? variantLabel : nil,

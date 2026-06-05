@@ -18,6 +18,8 @@ final class WatchMotionRecorder: ObservableObject {
     @Published private(set) var savedProfileURL: URL?
     @Published private(set) var savedRecordingURL: URL?
     @Published private(set) var loadedProfileCount = 0
+    @Published private(set) var isProfileLibraryReady = false
+    @Published private(set) var activeProfileLibraryVersion = ""
     @Published private(set) var lastRecognitionEvent: GestureRecognitionEvent?
     @Published private(set) var lastRecognitionSummary: String?
     @Published private(set) var triggerCount = 0
@@ -188,13 +190,48 @@ final class WatchMotionRecorder: ObservableObject {
             }
             soundPlayer?.preload(profileSounds: profiles)
             loadedProfileCount = profiles.count
-            lastFeedbackMessage = nil
-            AppDiagnostics.record("watch.profiles.reload", ["count": profiles.count])
+            if isProfileLibraryReady {
+                lastFeedbackMessage = nil
+            }
+            AppDiagnostics.record(
+                "watch.profiles.reload",
+                [
+                    "count": profiles.count,
+                    "profileLibraryReady": isProfileLibraryReady,
+                    "profileLibraryVersion": activeProfileLibraryVersion,
+                ]
+            )
         } catch {
             loadedProfileCount = 0
             lastFeedbackMessage = error.localizedDescription
             AppDiagnostics.record(error: error, event: "watch.profiles.reload.error")
         }
+    }
+
+    func updateProfileLibraryState(
+        isReady: Bool,
+        version: String?,
+        expectedProfileCount: Int,
+        reason: String
+    ) {
+        isProfileLibraryReady = isReady
+        activeProfileLibraryVersion = version?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if isReady {
+            lastFeedbackMessage = expectedProfileCount > 0 ? nil : "动作库为空，请在 iPhone 创建动作。"
+        } else {
+            lastFeedbackMessage = "等待 iPhone 同步动作库。"
+            recognitionRuntime.resetRuntimeState()
+        }
+        AppDiagnostics.record(
+            "watch.profileLibrary.state",
+            [
+                "ready": isReady,
+                "profileLibraryVersion": activeProfileLibraryVersion,
+                "expectedProfileCount": expectedProfileCount,
+                "loadedProfileCount": loadedProfileCount,
+                "reason": reason,
+            ]
+        )
     }
 
     private func deduplicateProfiles(_ profiles: [GestureProfile]) -> [GestureProfile] {
@@ -496,6 +533,22 @@ final class WatchMotionRecorder: ObservableObject {
             return
         }
 
+        guard isProfileLibraryReady else {
+            recordRecognitionSuppressedIfNeeded(
+                sample: liveSample,
+                reason: "profileLibraryNotReady"
+            )
+            return
+        }
+
+        guard !recognitionRuntime.profiles.isEmpty else {
+            recordRecognitionSuppressedIfNeeded(
+                sample: liveSample,
+                reason: "noProfiles"
+            )
+            return
+        }
+
         if let continuousEvaluation = recognitionRuntime.evaluateContinuous(sample: liveSample, now: liveSample.timestamp) {
             processRecognition(
                 segment: continuousEvaluation.segment,
@@ -678,6 +731,22 @@ final class WatchMotionRecorder: ObservableObject {
             }
             rearmStatesByProfileID[profileID] = state
         }
+    }
+
+    private func recordRecognitionSuppressedIfNeeded(sample: MotionSample, reason: String) {
+        guard sample.timestamp - lastNoProfileSummaryLogAt >= 5 else {
+            return
+        }
+        lastNoProfileSummaryLogAt = sample.timestamp
+        AppDiagnostics.record(
+            "watch.recognition.suppressed",
+            [
+                "reason": reason,
+                "profileLibraryReady": isProfileLibraryReady,
+                "profileLibraryVersion": activeProfileLibraryVersion,
+                "loadedProfileCount": loadedProfileCount,
+            ]
+        )
     }
 
     private func normalizedRecordingSample(from rawSample: RawMotionSample) -> MotionSample {
@@ -921,6 +990,8 @@ final class WatchMotionRecorder: ObservableObject {
             "triggered": triggered,
             "audioPlayed": audioPlayed,
             "profileCount": recognitionRuntime.profiles.count,
+            "profileLibraryReady": isProfileLibraryReady,
+            "profileLibraryVersion": activeProfileLibraryVersion,
             "segmentKind": segment.kind.rawValue,
             "classifiedKind": classifiedKind?.rawValue ?? "",
             "sampleCount": segment.samples.count,
@@ -1036,6 +1107,8 @@ final class WatchMotionRecorder: ObservableObject {
             "triggered": triggered,
             "audioPlayed": audioPlayed,
             "profileCount": recognitionRuntime.profiles.count,
+            "profileLibraryReady": isProfileLibraryReady,
+            "profileLibraryVersion": activeProfileLibraryVersion,
             "segmentKind": segment.kind.rawValue,
             "classifiedKind": classifiedKind?.rawValue ?? "",
             "sampleCount": segment.samples.count,

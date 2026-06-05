@@ -889,7 +889,11 @@ import Foundation
         kind: .burst,
         templates: [template]
     )
-    let archive = GestureProfileArchive(profiles: [profile], exportedAt: Date(timeIntervalSince1970: 1_800_000_000))
+    let archive = GestureProfileArchive(
+        libraryVersion: "test-library-1",
+        profiles: [profile],
+        exportedAt: Date(timeIntervalSince1970: 1_800_000_000)
+    )
 
     let fileURL = try store.save(archive, preferredName: profile.name)
     let listed = try store.list()
@@ -898,6 +902,7 @@ import Foundation
     #expect(fileURL.lastPathComponent.contains("punch"))
     #expect(fileURL.pathExtension == "json")
     #expect(listed.count == 1)
+    #expect(loaded.libraryVersion == "test-library-1")
     #expect(loaded.profiles.first?.name == "挥拳 / punch")
 
     try store.delete(fileURL: fileURL)

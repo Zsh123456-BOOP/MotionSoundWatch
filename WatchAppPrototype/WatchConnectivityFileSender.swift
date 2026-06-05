@@ -13,6 +13,9 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
     @Published private(set) var lastRecordingCommand: RecordingControlCommand?
     @Published private(set) var runtimePrepareRequestCount = 0
     @Published private(set) var profileLibraryChangeCount = 0
+    @Published private(set) var profileLibraryVersion: String?
+    @Published private(set) var profileLibraryProfileCount = 0
+    @Published private(set) var isProfileLibraryReady = false
     @Published private(set) var recognitionEventSyncCount = 0
 
     private var session: WCSession? {
@@ -249,7 +252,14 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
         }
     }
 
-    private func receiveProfile(fileURL: URL, preferredFileName: String?, checksum: String?, replaceLibrary: Bool) {
+    private func receiveProfile(
+        fileURL: URL,
+        preferredFileName: String?,
+        checksum: String?,
+        replaceLibrary: Bool,
+        incomingLibraryVersion: String?,
+        incomingProfileCount: Int?
+    ) {
         do {
             if let checksum, let actualChecksum = sha256Hex(fileURL), checksum != actualChecksum {
                 lastTransferMessage = "Profile 校验失败：\(preferredFileName ?? fileURL.lastPathComponent)"
@@ -277,6 +287,17 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
             )
             try fileManager.moveItem(at: fileURL, to: destination)
             lastReceivedProfileURL = destination
+            let resolvedLibraryVersion = incomingLibraryVersion?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                ? incomingLibraryVersion!
+                : (archive.libraryVersion ?? "single-\(Int(Date().timeIntervalSince1970))")
+            if replaceLibrary {
+                profileLibraryVersion = resolvedLibraryVersion
+                profileLibraryProfileCount = incomingProfileCount ?? archive.profiles.count
+                isProfileLibraryReady = true
+            } else if profileLibraryVersion == nil {
+                profileLibraryVersion = resolvedLibraryVersion
+                profileLibraryProfileCount = archive.profiles.count
+            }
             profileLibraryChangeCount += 1
             lastTransferMessage = replaceLibrary
                 ? "已替换 Watch 动作库：\(archive.profiles.count) 个动作"
@@ -287,8 +308,27 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
                     "file": destination.lastPathComponent,
                     "profiles": archive.profiles.count,
                     "replaceLibrary": replaceLibrary,
+                    "profileLibraryVersion": resolvedLibraryVersion,
+                    "profileLibraryReady": isProfileLibraryReady,
                 ]
             )
+            if replaceLibrary {
+                AppDiagnostics.record(
+                    "watch.profileLibrary.ready",
+                    [
+                        "profileLibraryVersion": resolvedLibraryVersion,
+                        "profileCount": archive.profiles.count,
+                    ]
+                )
+            } else {
+                AppDiagnostics.record(
+                    "watch.profileLibrary.notReady",
+                    [
+                        "reason": "individualProfileTransfer",
+                        "profileLibraryVersion": resolvedLibraryVersion,
+                    ]
+                )
+            }
         } catch {
             lastTransferMessage = error.localizedDescription
             AppDiagnostics.record(error: error, event: "watch.connectivity.receiveProfile.error", ["file": preferredFileName ?? fileURL.lastPathComponent])
@@ -555,6 +595,8 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
         let preferredFileName = file.metadata?["fileName"] as? String
         let checksum = file.metadata?["checksum"] as? String
         let replaceLibrary = file.metadata?["replaceLibrary"] as? Bool ?? false
+        let profileLibraryVersion = file.metadata?["profileLibraryVersion"] as? String
+        let profileCount = file.metadata?["profileCount"] as? Int
         let fallbackFileName = file.fileURL.lastPathComponent
         let persistedFileURL: URL
 
@@ -584,7 +626,9 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
                     fileURL: persistedFileURL,
                     preferredFileName: preferredFileName,
                     checksum: checksum,
-                    replaceLibrary: replaceLibrary
+                    replaceLibrary: replaceLibrary,
+                    incomingLibraryVersion: profileLibraryVersion,
+                    incomingProfileCount: profileCount
                 )
             default:
                 lastTransferMessage = "忽略未知文件：\(preferredFileName ?? persistedFileURL.lastPathComponent)"

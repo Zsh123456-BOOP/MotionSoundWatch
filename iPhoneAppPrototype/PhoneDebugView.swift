@@ -232,7 +232,7 @@ struct PhoneDebugView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("\(savedProfiles.count) 个动作")
                             .font(.title3.weight(.semibold))
-                        Text("保存后的动作会显示在这里。新动作会引导录满 3 次；每次都能裁剪真正的开始和结束。")
+                        Text("保存后的动作会显示在这里。新动作会引导录满 5 次；每次都能裁剪真正的开始和结束。")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
@@ -283,7 +283,7 @@ struct PhoneDebugView: View {
                         .foregroundStyle(.red)
                 }
 
-                Text("创建后先录同一个动作 3 次。每次录完都可以看 3D 轨迹和时间轴，确认后再进入下一次。")
+                Text("创建后先录同一个动作 5 次。每次录完都可以看 3D 轨迹和时间轴，确认后再进入下一次。")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1001,7 +1001,7 @@ struct PhoneDebugView: View {
                 }
             }
             reloadSavedProfiles()
-            let didQueueLibraryReplace = receiver.sendProfileLibrarySnapshot()
+            let didQueueLibraryReplace = receiver.sendProfileLibrarySnapshot(reason: "profileSaved")
             currentStep = .library
             editingAsset = nil
             isAppendingRecording = false
@@ -1179,7 +1179,7 @@ struct PhoneDebugView: View {
     }
 
     private func syncWatchLibrarySnapshot(reason: String) {
-        let queued = receiver.sendProfileLibrarySnapshot()
+        let queued = syncWatchLibrarySnapshotReturningQueue(reason: reason)
         AppDiagnostics.record(
             "phone.profile.librarySnapshot.requested",
             [
@@ -1187,6 +1187,11 @@ struct PhoneDebugView: View {
                 "queued": queued,
             ]
         )
+    }
+
+    @discardableResult
+    private func syncWatchLibrarySnapshotReturningQueue(reason: String) -> Bool {
+        receiver.sendProfileLibrarySnapshot(reason: reason)
     }
 
     private func resetForNewGesture() {
@@ -1238,12 +1243,12 @@ struct PhoneDebugView: View {
     }
 
     private func resyncAsset(_ asset: PhoneGestureAsset) {
-        let profileQueued = receiver.sendProfileFile(asset.fileURL)
+        let profileQueued = syncWatchLibrarySnapshotReturningQueue(reason: "resync.\(asset.profile.id.uuidString)")
         if let audioName = asset.profile.sound?.fileName,
            let audioURL = localAudioFiles.first(where: { $0.lastPathComponent == audioName }) {
             _ = receiver.sendAudioFile(audioURL)
         }
-        receiver.setLastMessage(profileQueued ? "已重新同步：\(asset.profile.name)" : "重新同步失败")
+        receiver.setLastMessage(profileQueued ? "已重新同步完整动作库" : "重新同步失败")
         AppDiagnostics.record(
             "phone.profile.resync",
             [
@@ -1258,7 +1263,7 @@ struct PhoneDebugView: View {
         testStartedAt = Date()
         testBaselineWatchEventCount = receiver.receivedWatchEventCount
         currentStep = .test
-        _ = receiver.sendProfileFile(asset.fileURL)
+        _ = syncWatchLibrarySnapshotReturningQueue(reason: "testModeStart")
         if let audioName = asset.profile.sound?.fileName,
            let audioURL = localAudioFiles.first(where: { $0.lastPathComponent == audioName }) {
             _ = receiver.sendAudioFile(audioURL)
@@ -1423,7 +1428,7 @@ struct PhoneDebugView: View {
             let store = try GestureProfileFileStore.appDocumentsStore()
             let savedURL = try store.save(archive, preferredName: archive.profiles.first?.name ?? url.deletingPathExtension().lastPathComponent)
             reloadSavedProfiles()
-            _ = receiver.sendProfileFile(savedURL)
+            syncWatchLibrarySnapshot(reason: "importProfile")
             currentStep = .library
             receiver.setLastMessage("已导入动作：\(archive.profiles.first?.name ?? savedURL.lastPathComponent)")
             AppDiagnostics.record("phone.profile.imported", ["file": savedURL.lastPathComponent])
@@ -1810,6 +1815,8 @@ private struct PhoneDiagnosticsView: View {
                 Section("动作与音频") {
                     DiagnosticsRow(label: "当前步骤", value: currentStep.title)
                     DiagnosticsRow(label: "已保存动作", value: "\(savedProfiles.count)")
+                    DiagnosticsRow(label: "最近同步动作库", value: receiver.lastQueuedProfileLibraryVersion ?? "未同步")
+                    DiagnosticsRow(label: "同步动作数", value: "\(receiver.lastQueuedProfileLibraryCount)")
                     DiagnosticsRow(label: "本机音效", value: "\(localAudioFiles.count)")
                     DiagnosticsRow(label: "录制样本", value: "\(captureFiles.count)")
                     DiagnosticsRow(label: "预览采样点", value: "\(previewSamples.count)")

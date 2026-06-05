@@ -100,10 +100,10 @@ struct MotionDebugView: View {
         }
         .onAppear {
             AppDiagnostics.record("watch.debugView.onAppear")
-            recorder.reloadSavedProfiles()
             recorder.startLiveUpdates()
             soundPlayer.configureAudioSession()
             fileSender.activate()
+            syncProfileLibraryState(reason: "viewAppear")
             recorder.recognitionEventSink = { event in
                 _ = fileSender.sendRecognitionEvent(event)
             }
@@ -125,11 +125,11 @@ struct MotionDebugView: View {
             syncRuntimeSession(reason: "phonePrepareRuntime")
         }
         .onChange(of: fileSender.lastReceivedProfileURL) {
-            recorder.reloadSavedProfiles()
+            syncProfileLibraryState(reason: "profileReceived")
             syncRuntimeSession(reason: "profileReceived")
         }
         .onChange(of: fileSender.profileLibraryChangeCount) {
-            recorder.reloadSavedProfiles()
+            syncProfileLibraryState(reason: "profileLibraryChanged")
             syncRuntimeSession(reason: "profileLibraryChanged")
         }
         .onReceive(fileSender.$lastRecordingCommand.compactMap { $0 }) { command in
@@ -149,6 +149,9 @@ struct MotionDebugView: View {
         if recorder.isRecording || remoteCaptureState == "recording" {
             return "正在录制"
         }
+        if !recorder.isProfileLibraryReady {
+            return "等待同步"
+        }
         if recorder.loadedProfileCount > 0 {
             return "正在监听"
         }
@@ -158,6 +161,9 @@ struct MotionDebugView: View {
     private var watchStatusSubtitle: String {
         if recorder.isRecording || remoteCaptureState == "recording" {
             return "保持动作自然，完成后在 iPhone 点击结束。"
+        }
+        if !recorder.isProfileLibraryReady {
+            return "请在 iPhone 打开 MotionSound，同步完整动作库。"
         }
         if recorder.loadedProfileCount > 0 {
             return "抬手做动作，匹配后会立即触发音效。"
@@ -198,6 +204,18 @@ struct MotionDebugView: View {
             return transfer
         }
         return nil
+    }
+
+    private func syncProfileLibraryState(reason: String) {
+        recorder.updateProfileLibraryState(
+            isReady: fileSender.isProfileLibraryReady,
+            version: fileSender.profileLibraryVersion,
+            expectedProfileCount: fileSender.profileLibraryProfileCount,
+            reason: reason
+        )
+        if fileSender.isProfileLibraryReady {
+            recorder.reloadSavedProfiles()
+        }
     }
 
     private func toggleLocalRecording() {
