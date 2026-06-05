@@ -18,12 +18,15 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
     @Published private(set) var profileLibraryProfileCount = 0
     @Published private(set) var isProfileLibraryReady = false
     @Published private(set) var recognitionEventSyncCount = 0
+    @Published private(set) var lastProfileSyncTransactionID: UUID?
+    @Published private(set) var missingProfileAudioFileNames: [String] = []
 
     private var session: WCSession? {
         isSupported ? WCSession.default : nil
     }
 
     private let fileManager = FileManager.default
+    private var pendingProfileManifest: ProfileSyncManifest?
 
     override init() {
         super.init()
@@ -245,6 +248,7 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
             }
             try fileManager.moveItem(at: fileURL, to: destination)
             reloadReceivedSoundFiles()
+            refreshManifestReadinessIfPossible(reason: "audioReceived")
             lastTransferMessage = "已接收音频：\(destination.lastPathComponent)"
             AppDiagnostics.record("watch.connectivity.receiveAudio", ["file": destination.lastPathComponent])
         } catch {
@@ -272,7 +276,7 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
             let archive = try GestureProfileCodec().decode(data)
             let resolvedLibraryVersion = incomingLibraryVersion?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
                 ? incomingLibraryVersion!
-                : (archive.libraryVersion ?? "single-\(Int(Date().timeIntervalSince1970))")
+                : (pendingProfileManifest?.libraryVersion ?? archive.libraryVersion ?? "single-\(Int(Date().timeIntervalSince1970))")
             let resolvedProfileCount = incomingProfileCount ?? archive.profiles.count
 
             if replaceLibrary,
@@ -311,7 +315,8 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
             if replaceLibrary {
                 profileLibraryVersion = resolvedLibraryVersion
                 profileLibraryProfileCount = resolvedProfileCount
-                isProfileLibraryReady = true
+                missingProfileAudioFileNames = missingAudioFiles(for: pendingProfileManifest)
+                isProfileLibraryReady = missingProfileAudioFileNames.isEmpty
             } else if profileLibraryVersion == nil {
                 profileLibraryVersion = resolvedLibraryVersion
                 profileLibraryProfileCount = archive.profiles.count
@@ -327,6 +332,7 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
                     "profiles": archive.profiles.count,
                     "replaceLibrary": replaceLibrary,
                     "profileLibraryVersion": resolvedLibraryVersion,
+                    "missingAudioCount": missingProfileAudioFileNames.count,
                     "profileLibraryReady": isProfileLibraryReady,
                 ]
             )
@@ -336,7 +342,13 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
                     [
                         "profileLibraryVersion": resolvedLibraryVersion,
                         "profileCount": archive.profiles.count,
+                        "missingAudioCount": missingProfileAudioFileNames.count,
                     ]
+                )
+                sendProfileSyncAck(
+                    applied: isProfileLibraryReady,
+                    reason: isProfileLibraryReady ? nil : "missingAudio",
+                    profileCount: archive.profiles.count
                 )
             } else {
                 AppDiagnostics.record(
@@ -350,6 +362,118 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
         } catch {
             lastTransferMessage = error.localizedDescription
             AppDiagnostics.record(error: error, event: "watch.connectivity.receiveProfile.error", ["file": preferredFileName ?? fileURL.lastPathComponent])
+        }
+    }
+
+    private func receiveProfileLibraryManifest(payload: String?, reason: String?) {
+        guard let payload,
+              let data = Data(base64Encoded: payload),
+              let manifest = try? JSONDecoder().decode(ProfileSyncManifest.self, from: data) else {
+            lastTransferMessage = "动作库 Manifest 无法解析"
+            AppDiagnostics.record("watch.profileLibrary.manifest.invalid", ["reason": reason ?? ""])
+            return
+        }
+        pendingProfileManifest = manifest
+        lastProfileSyncTransactionID = manifest.transactionID
+        profileLibraryVersion = manifest.libraryVersion
+        profileLibraryProfileCount = manifest.profileCount
+        missingProfileAudioFileNames = missingAudioFiles(for: manifest)
+        isProfileLibraryReady = false
+        profileLibraryStateChangeCount += 1
+        lastTransferMessage = "正在同步 Watch 动作库..."
+        AppDiagnostics.record(
+            "watch.profileLibrary.manifest.received",
+            [
+                "transactionID": manifest.transactionID.uuidString,
+                "profileLibraryVersion": manifest.libraryVersion,
+                "profileCount": manifest.profileCount,
+                "audioCount": manifest.audioChecksumsByFileName.count,
+                "missingAudioCount": missingProfileAudioFileNames.count,
+                "reason": reason ?? "",
+            ]
+        )
+    }
+
+    private func refreshManifestReadinessIfPossible(reason: String) {
+        guard let manifest = pendingProfileManifest,
+              profileLibraryVersion == manifest.libraryVersion,
+              profileLibraryProfileCount == manifest.profileCount else {
+            return
+        }
+        missingProfileAudioFileNames = missingAudioFiles(for: manifest)
+        guard missingProfileAudioFileNames.isEmpty else {
+            isProfileLibraryReady = false
+            sendProfileSyncAck(applied: false, reason: "missingAudio", profileCount: profileLibraryProfileCount)
+            return
+        }
+        isProfileLibraryReady = true
+        profileLibraryStateChangeCount += 1
+        lastTransferMessage = "Watch 动作库已同步：\(profileLibraryProfileCount) 个动作"
+        sendProfileSyncAck(applied: true, reason: reason, profileCount: profileLibraryProfileCount)
+        AppDiagnostics.record(
+            "watch.profileLibrary.ready.afterManifest",
+            [
+                "transactionID": manifest.transactionID.uuidString,
+                "profileLibraryVersion": manifest.libraryVersion,
+                "profileCount": manifest.profileCount,
+                "reason": reason,
+            ]
+        )
+    }
+
+    private func missingAudioFiles(for manifest: ProfileSyncManifest?) -> [String] {
+        guard let manifest else { return [] }
+        let directory = try? WatchSoundPlayer.soundsDirectory()
+        return manifest.audioChecksumsByFileName.keys.sorted().filter { fileName in
+            guard let directory else { return true }
+            let url = directory.appendingPathComponent(fileName)
+            guard fileManager.fileExists(atPath: url.path) else { return true }
+            guard let expected = manifest.audioChecksumsByFileName[fileName],
+                  !expected.isEmpty else {
+                return false
+            }
+            return sha256Hex(url) != expected
+        }
+    }
+
+    private func sendProfileSyncAck(applied: Bool, reason: String?, profileCount: Int) {
+        guard let session, let manifest = pendingProfileManifest else { return }
+        let ack = ProfileSyncAck(
+            transactionID: manifest.transactionID,
+            libraryVersion: manifest.libraryVersion,
+            applied: applied,
+            profileCount: profileCount,
+            missingAudioFileNames: missingProfileAudioFileNames,
+            reason: reason
+        )
+        do {
+            let payload = try JSONEncoder().encode(ack).base64EncodedString()
+            let message: [String: Any] = [
+                "command": "profileLibrarySyncAck",
+                "payload": payload,
+                "transactionID": ack.transactionID.uuidString,
+                "profileLibraryVersion": ack.libraryVersion,
+                "applied": ack.applied,
+                "profileCount": ack.profileCount,
+                "missingAudioCount": ack.missingAudioFileNames.count,
+                "reason": ack.reason ?? "",
+                "sentAt": Date().timeIntervalSince1970,
+                "source": "MotionSoundWatch",
+            ]
+            session.transferUserInfo(message)
+            AppDiagnostics.record(
+                "watch.profileLibrary.ack.queued",
+                [
+                    "transactionID": ack.transactionID.uuidString,
+                    "profileLibraryVersion": ack.libraryVersion,
+                    "applied": ack.applied,
+                    "profileCount": ack.profileCount,
+                    "missingAudioCount": ack.missingAudioFileNames.count,
+                    "reason": ack.reason ?? "",
+                ]
+            )
+        } catch {
+            AppDiagnostics.record(error: error, event: "watch.profileLibrary.ack.encode.error")
         }
     }
 
@@ -706,9 +830,14 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
         let clearLogs = message["clearLogs"] as? Bool
         let profileLibraryVersion = message["profileLibraryVersion"] as? String
         let profileCount = message["profileCount"] as? Int
+        let payload = message["payload"] as? String
         Task { @MainActor in
             if command == "configureDiagnostics" {
                 receiveConfigureDiagnostics(runID: testRunID, buildCommit: buildCommit, clearLogs: clearLogs, reason: reason)
+                return
+            }
+            if command == "profileLibraryManifest" {
+                receiveProfileLibraryManifest(payload: payload, reason: reason)
                 return
             }
             if command == "profileLibrarySyncBegin" {
@@ -753,6 +882,7 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
         let clearLogs = message["clearLogs"] as? Bool
         let profileLibraryVersion = message["profileLibraryVersion"] as? String
         let profileCount = message["profileCount"] as? Int
+        let payload = message["payload"] as? String
 
         if command == "configureDiagnostics" {
             replyHandler([
@@ -762,6 +892,18 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
             ])
             Task { @MainActor in
                 receiveConfigureDiagnostics(runID: testRunID, buildCommit: buildCommit, clearLogs: clearLogs, reason: reason)
+            }
+            return
+        }
+
+        if command == "profileLibraryManifest" {
+            replyHandler([
+                "status": "accepted",
+                "command": "profileLibraryManifest",
+                "receivedAt": Date().timeIntervalSince1970,
+            ])
+            Task { @MainActor in
+                receiveProfileLibraryManifest(payload: payload, reason: reason)
             }
             return
         }
@@ -844,9 +986,14 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
         let clearLogs = userInfo["clearLogs"] as? Bool
         let profileLibraryVersion = userInfo["profileLibraryVersion"] as? String
         let profileCount = userInfo["profileCount"] as? Int
+        let payload = userInfo["payload"] as? String
         Task { @MainActor in
             if command == "configureDiagnostics" {
                 receiveConfigureDiagnostics(runID: testRunID, buildCommit: buildCommit, clearLogs: clearLogs, reason: reason)
+                return
+            }
+            if command == "profileLibraryManifest" {
+                receiveProfileLibraryManifest(payload: payload, reason: reason)
                 return
             }
             if command == "profileLibrarySyncBegin" {
@@ -880,9 +1027,14 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
         let clearLogs = applicationContext["clearLogs"] as? Bool
         let profileLibraryVersion = applicationContext["profileLibraryVersion"] as? String
         let profileCount = applicationContext["profileCount"] as? Int
+        let payload = applicationContext["payload"] as? String
         Task { @MainActor in
             if command == "configureDiagnostics" {
                 receiveConfigureDiagnostics(runID: testRunID, buildCommit: buildCommit, clearLogs: clearLogs, reason: reason)
+                return
+            }
+            if command == "profileLibraryManifest" {
+                receiveProfileLibraryManifest(payload: payload, reason: reason)
                 return
             }
             if command == "profileLibrarySyncBegin" {

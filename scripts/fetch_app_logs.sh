@@ -57,5 +57,8 @@ copy_from_app Documents/MotionSoundDiagnostics MotionSoundDiagnostics
 copy_from_app Documents/MotionSoundLogs MotionSoundLogs
 copy_from_app Documents/MotionSoundTriggerLogs MotionSoundTriggerLogs
 copy_from_app Documents/MotionSoundIncoming MotionSoundIncoming
+copy_from_app "Library/Application Support/MotionSoundWatch/MotionSoundDiagnostics" MotionSoundDiagnostics-AppSupport
+copy_from_app "Library/Application Support/MotionSoundWatch/GestureProfiles" GestureProfiles-AppSupport
+copy_from_app "Library/Application Support/MotionSoundWatch/MotionRecordings" MotionRecordings-AppSupport
 
 echo "$destination"

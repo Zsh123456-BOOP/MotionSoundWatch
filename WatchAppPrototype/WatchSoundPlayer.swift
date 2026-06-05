@@ -106,6 +106,10 @@ final class WatchSoundPlayer: ObservableObject {
         }
     }
 
+    func canPlay(sound: SoundAsset) -> Bool {
+        players[sound.fileName] != nil || watchKitPlayers[sound.fileName] != nil
+    }
+
     @discardableResult
     func play(assetName: String) -> Bool {
         configureAudioSession()

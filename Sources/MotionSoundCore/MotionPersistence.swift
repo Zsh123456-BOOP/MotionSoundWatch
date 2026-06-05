@@ -1,5 +1,82 @@
 import Foundation
 
+public enum MotionSecureFileWriter {
+    public static func applicationSupportSubdirectory(
+        _ subdirectory: String,
+        legacyDocumentsSubdirectory: String? = nil,
+        fileManager: FileManager = .default
+    ) throws -> URL {
+        let support = try fileManager.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+        let root = support.appendingPathComponent("MotionSoundWatch", isDirectory: true)
+        let destination = root.appendingPathComponent(subdirectory, isDirectory: true)
+        try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
+        try applyProtection(to: destination, fileManager: fileManager)
+
+        if let legacyDocumentsSubdirectory {
+            try migrateLegacyDocumentsSubdirectory(
+                legacyDocumentsSubdirectory,
+                to: destination,
+                fileManager: fileManager
+            )
+        }
+        return destination
+    }
+
+    public static func write(
+        _ data: Data,
+        to url: URL,
+        fileManager: FileManager = .default
+    ) throws {
+        try fileManager.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: url, options: [.atomic])
+        try applyProtection(to: url, fileManager: fileManager)
+    }
+
+    public static func applyProtection(to url: URL, fileManager: FileManager = .default) throws {
+        #if os(iOS) || os(watchOS) || os(tvOS)
+        try fileManager.setAttributes(
+            [.protectionKey: FileProtectionType.completeUnlessOpen],
+            ofItemAtPath: url.path
+        )
+        #else
+        _ = url
+        _ = fileManager
+        #endif
+    }
+
+    private static func migrateLegacyDocumentsSubdirectory(
+        _ subdirectory: String,
+        to destination: URL,
+        fileManager: FileManager
+    ) throws {
+        let documents = try fileManager.url(
+            for: .documentDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+        let legacy = documents.appendingPathComponent(subdirectory, isDirectory: true)
+        guard fileManager.fileExists(atPath: legacy.path) else { return }
+
+        let files = try fileManager.contentsOfDirectory(
+            at: legacy,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )
+        for file in files {
+            let target = destination.appendingPathComponent(file.lastPathComponent)
+            guard !fileManager.fileExists(atPath: target.path) else { continue }
+            try? fileManager.copyItem(at: file, to: target)
+            try? applyProtection(to: target, fileManager: fileManager)
+        }
+    }
+}
+
 public struct StoredGestureProfileArchive: Equatable, Sendable {
     public var fileURL: URL
     public var archive: GestureProfileArchive
@@ -29,14 +106,13 @@ public struct GestureProfileFileStore {
         subdirectory: String = "GestureProfiles",
         fileManager: FileManager = .default
     ) throws -> GestureProfileFileStore {
-        let documents = try fileManager.url(
-            for: .documentDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
+        let directory = try MotionSecureFileWriter.applicationSupportSubdirectory(
+            subdirectory,
+            legacyDocumentsSubdirectory: subdirectory,
+            fileManager: fileManager
         )
         return GestureProfileFileStore(
-            directoryURL: documents.appendingPathComponent(subdirectory, isDirectory: true),
+            directoryURL: directory,
             fileManager: fileManager
         )
     }
@@ -46,7 +122,7 @@ public struct GestureProfileFileStore {
         try ensureDirectoryExists()
         let fileURL = directoryURL.appendingPathComponent(fileName(for: archive, preferredName: preferredName))
         let data = try codec.encode(archive)
-        try data.write(to: fileURL, options: [.atomic])
+        try MotionSecureFileWriter.write(data, to: fileURL, fileManager: fileManager)
         return fileURL
     }
 
@@ -330,14 +406,13 @@ public struct MotionRecordingFileStore {
         subdirectory: String = "MotionRecordings",
         fileManager: FileManager = .default
     ) throws -> MotionRecordingFileStore {
-        let documents = try fileManager.url(
-            for: .documentDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
+        let directory = try MotionSecureFileWriter.applicationSupportSubdirectory(
+            subdirectory,
+            legacyDocumentsSubdirectory: subdirectory,
+            fileManager: fileManager
         )
         return MotionRecordingFileStore(
-            directoryURL: documents.appendingPathComponent(subdirectory, isDirectory: true),
+            directoryURL: directory,
             fileManager: fileManager
         )
     }
@@ -347,7 +422,7 @@ public struct MotionRecordingFileStore {
         try ensureDirectoryExists()
         let baseName = sanitizeFileName(preferredName ?? "motion-recording")
         let fileURL = directoryURL.appendingPathComponent("\(fileTimestamp(exportedAt))-\(baseName).csv")
-        try codec.encodeData(samples).write(to: fileURL, options: [.atomic])
+        try MotionSecureFileWriter.write(codec.encodeData(samples), to: fileURL, fileManager: fileManager)
         return fileURL
     }
 

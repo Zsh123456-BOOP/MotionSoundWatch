@@ -101,6 +101,8 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
     @Published private(set) var lastQueuedProfileLibraryVersion: String?
     @Published private(set) var lastQueuedProfileLibraryCount = 0
     @Published private(set) var lastQueuedProfileLibraryAt: Date?
+    @Published private(set) var lastProfileSyncAck: ProfileSyncAck?
+    @Published private(set) var lastProfileSyncMissingAudio: [String] = []
 
     private let fileManager: FileManager
     private let soundPlayer: PhoneSoundPlayer
@@ -116,6 +118,52 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
 
     private var session: WCSession? {
         isSupported ? WCSession.default : nil
+    }
+
+    nonisolated private static func fallbackProfileSyncAck(from message: [String: Any]) -> ProfileSyncAck? {
+        guard let transactionID = (message["transactionID"] as? String).flatMap(UUID.init(uuidString:)),
+              let libraryVersion = message["profileLibraryVersion"] as? String else {
+            return nil
+        }
+        return ProfileSyncAck(
+            transactionID: transactionID,
+            libraryVersion: libraryVersion,
+            applied: message["applied"] as? Bool ?? false,
+            profileCount: message["profileCount"] as? Int ?? 0,
+            missingAudioFileNames: [],
+            reason: message["reason"] as? String
+        )
+    }
+
+    private func receiveProfileSyncAck(payload: String?, fallbackAck: ProfileSyncAck?) {
+        let ack: ProfileSyncAck?
+        if let payload,
+           let data = Data(base64Encoded: payload) {
+            ack = try? JSONDecoder().decode(ProfileSyncAck.self, from: data)
+        } else {
+            ack = fallbackAck
+        }
+
+        guard let ack else {
+            AppDiagnostics.record("phone.profile.libraryAck.invalid")
+            return
+        }
+        lastProfileSyncAck = ack
+        lastProfileSyncMissingAudio = ack.missingAudioFileNames
+        lastMessage = ack.applied
+            ? "Watch 已同步 \(ack.profileCount) 个动作"
+            : "Watch 动作库未就绪：缺少 \(ack.missingAudioFileNames.count) 个音频"
+        AppDiagnostics.record(
+            "phone.profile.libraryAck.received",
+            [
+                "transactionID": ack.transactionID.uuidString,
+                "profileLibraryVersion": ack.libraryVersion,
+                "applied": ack.applied,
+                "profileCount": ack.profileCount,
+                "missingAudioCount": ack.missingAudioFileNames.count,
+                "reason": ack.reason ?? "",
+            ]
+        )
     }
 
     func activate() {
@@ -435,6 +483,15 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
             let snapshotURL = fileManager.temporaryDirectory
                 .appendingPathComponent("MotionSoundProfileLibrary-\(libraryVersion).json")
             try data.write(to: snapshotURL, options: [.atomic])
+            let profileChecksum = try sha256Hex(snapshotURL)
+            let manifest = ProfileSyncManifest(
+                libraryVersion: libraryVersion,
+                profileCount: profiles.count,
+                profileFileName: snapshotURL.lastPathComponent,
+                profileChecksum: profileChecksum,
+                audioChecksumsByFileName: audioManifestChecksums(for: profiles)
+            )
+            sendProfileLibraryManifest(manifest, reason: reason)
             sendProfileLibrarySyncBegin(
                 version: libraryVersion,
                 profileCount: profiles.count,
@@ -448,6 +505,7 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
                     "replaceLibrary": true,
                     "profileLibraryVersion": libraryVersion,
                     "profileCount": profiles.count,
+                    "syncTransactionID": manifest.transactionID.uuidString,
                     "reason": reason,
                 ]
             )
@@ -470,6 +528,90 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
             AppDiagnostics.record(error: error, event: "phone.profile.librarySnapshot.error", ["reason": reason])
             return false
         }
+    }
+
+    private func sendProfileLibraryManifest(_ manifest: ProfileSyncManifest, reason: String) {
+        guard let session else {
+            AppDiagnostics.record(
+                "phone.profile.libraryManifest.unsupported",
+                ["profileLibraryVersion": manifest.libraryVersion]
+            )
+            return
+        }
+        guard session.activationState == .activated else {
+            AppDiagnostics.record(
+                "phone.profile.libraryManifest.deferred",
+                [
+                    "profileLibraryVersion": manifest.libraryVersion,
+                    "state": Self.description(for: session.activationState),
+                ]
+            )
+            return
+        }
+
+        do {
+            let payload = try JSONEncoder().encode(manifest).base64EncodedString()
+            let message: [String: Any] = [
+                "command": "profileLibraryManifest",
+                "payload": payload,
+                "profileLibraryVersion": manifest.libraryVersion,
+                "profileCount": manifest.profileCount,
+                "transactionID": manifest.transactionID.uuidString,
+                "reason": reason,
+                "sentAt": Date().timeIntervalSince1970,
+                "source": "MotionSoundPhone",
+            ]
+            if session.isReachable {
+                session.sendMessage(message, replyHandler: nil) { error in
+                    session.transferUserInfo(message)
+                    AppDiagnostics.record(
+                        "phone.profile.libraryManifest.sendMessage.error",
+                        [
+                            "profileLibraryVersion": manifest.libraryVersion,
+                            "error": error.localizedDescription,
+                        ]
+                    )
+                }
+            } else {
+                session.transferUserInfo(message)
+            }
+            AppDiagnostics.record(
+                "phone.profile.libraryManifest.sent",
+                [
+                    "profileLibraryVersion": manifest.libraryVersion,
+                    "profileCount": manifest.profileCount,
+                    "transactionID": manifest.transactionID.uuidString,
+                    "reachable": session.isReachable,
+                ]
+            )
+        } catch {
+            AppDiagnostics.record(error: error, event: "phone.profile.libraryManifest.encode.error")
+        }
+    }
+
+    private func audioManifestChecksums(for profiles: [GestureProfile]) -> [String: String] {
+        var names = Set<String>()
+        for profile in profiles {
+            if let fileName = profile.sound?.fileName.trimmingCharacters(in: .whitespacesAndNewlines),
+               !fileName.isEmpty {
+                names.insert(fileName)
+            }
+            for sound in profile.soundSequence ?? [] {
+                let fileName = sound.fileName.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !fileName.isEmpty {
+                    names.insert(fileName)
+                }
+            }
+        }
+
+        var output: [String: String] = [:]
+        for name in names {
+            if let url = soundFileURL(fileName: name),
+               let checksum = try? sha256Hex(url) {
+                output[name] = checksum
+            }
+        }
+        return output
     }
 
     @discardableResult
@@ -1028,7 +1170,7 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
 
         let data = try JSONSerialization.data(withJSONObject: event, options: [.prettyPrinted, .sortedKeys])
         let fileName = watchEventFileName(event)
-        try data.write(to: directory.appendingPathComponent(fileName), options: [.atomic])
+        try MotionSecureFileWriter.write(data, to: directory.appendingPathComponent(fileName), fileManager: fileManager)
         return fileName
     }
 
@@ -1062,6 +1204,24 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
             create: true
         )
         return documents.appendingPathComponent("MotionSoundOutgoing", isDirectory: true)
+    }
+
+    private func soundFileURL(fileName: String) -> URL? {
+        let trimmed = fileName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let documents = try? fileManager.url(
+                for: .documentDirectory,
+                in: .userDomainMask,
+                appropriateFor: nil,
+                create: true
+              ) else {
+            return nil
+        }
+        let candidates = [
+            documents.appendingPathComponent(trimmed),
+            documents.appendingPathComponent("MotionSoundIncoming", isDirectory: true).appendingPathComponent(trimmed),
+        ]
+        return candidates.first { fileManager.fileExists(atPath: $0.path) }
     }
 
     private func copyToOutgoingDirectory(_ sourceURL: URL) throws -> URL {
@@ -1440,6 +1600,8 @@ extension PhoneConnectivityReceiver: WCSessionDelegate {
         let errorMessage = message["errorMessage"] as? String
         let profile = message["profile"] as? String
         let volume = message["volume"] as? Double
+        let payload = message["payload"] as? String
+        let profileSyncAck = Self.fallbackProfileSyncAck(from: message)
         var watchEventFileName: String?
         var watchEventError: String?
         if command == "watchRecognitionEvent" {
@@ -1450,6 +1612,10 @@ extension PhoneConnectivityReceiver: WCSessionDelegate {
             }
         }
         Task { @MainActor in
+            if command == "profileLibrarySyncAck" {
+                receiveProfileSyncAck(payload: payload, fallbackAck: profileSyncAck)
+                return
+            }
             if command == "watchRecognitionEvent" {
                 if let watchEventFileName {
                     noteWatchEventSaved(fileName: watchEventFileName)
@@ -1486,6 +1652,8 @@ extension PhoneConnectivityReceiver: WCSessionDelegate {
         let errorMessage = userInfo["errorMessage"] as? String
         let profile = userInfo["profile"] as? String
         let volume = userInfo["volume"] as? Double
+        let payload = userInfo["payload"] as? String
+        let profileSyncAck = Self.fallbackProfileSyncAck(from: userInfo)
         var watchEventFileName: String?
         var watchEventError: String?
         if command == "watchRecognitionEvent" {
@@ -1496,6 +1664,10 @@ extension PhoneConnectivityReceiver: WCSessionDelegate {
             }
         }
         Task { @MainActor in
+            if command == "profileLibrarySyncAck" {
+                receiveProfileSyncAck(payload: payload, fallbackAck: profileSyncAck)
+                return
+            }
             if command == "watchRecognitionEvent" {
                 if let watchEventFileName {
                     noteWatchEventSaved(fileName: watchEventFileName)

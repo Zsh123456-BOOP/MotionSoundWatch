@@ -1844,7 +1844,10 @@ private struct PhoneDiagnosticsView: View {
                 Section("日志") {
                     DiagnosticsText(label: "当前 runId", value: AppDiagnostics.currentRunID())
                     DiagnosticsText(label: "iPhone 日志位置", value: AppDiagnostics.relativeLogPathDescription())
-                    DiagnosticsText(label: "Watch 事件", value: "Documents/MotionSoundDiagnostics/runs/\(AppDiagnostics.currentRunID())/iOS/watch-events")
+                    DiagnosticsText(
+                        label: "Watch 事件",
+                        value: "Application Support/MotionSoundWatch/MotionSoundDiagnostics/runs/\(AppDiagnostics.currentRunID())/iOS/watch-events"
+                    )
                 }
             }
             .navigationTitle("诊断")

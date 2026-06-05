@@ -554,12 +554,15 @@ final class WatchMotionRecorder: ObservableObject {
             return
         }
 
+        let continuousStart = ProcessInfo.processInfo.systemUptime
         if let continuousEvaluation = recognitionRuntime.evaluateContinuous(sample: liveSample, now: liveSample.timestamp) {
+            let recognitionMs = (ProcessInfo.processInfo.systemUptime - continuousStart) * 1000
             processRecognition(
                 segment: continuousEvaluation.segment,
                 evaluation: continuousEvaluation.evaluation,
                 liveSample: liveSample,
-                source: "continuous"
+                source: "continuous",
+                recognitionMs: recognitionMs
             )
             if lastRecognitionEvent?.triggered == true {
                 return
@@ -567,8 +570,10 @@ final class WatchMotionRecorder: ObservableObject {
         }
 
         if let segment = segmenter.ingest(liveSample) {
+            let recognitionStart = ProcessInfo.processInfo.systemUptime
             let evaluation = recognitionRuntime.evaluate(segment: segment, now: liveSample.timestamp)
-            processRecognition(segment: segment, evaluation: evaluation, liveSample: liveSample, source: "segment")
+            let recognitionMs = (ProcessInfo.processInfo.systemUptime - recognitionStart) * 1000
+            processRecognition(segment: segment, evaluation: evaluation, liveSample: liveSample, source: "segment", recognitionMs: recognitionMs)
         }
     }
 
@@ -589,7 +594,8 @@ final class WatchMotionRecorder: ObservableObject {
         segment: GestureSegment,
         evaluation: RecognitionEvaluation,
         liveSample: MotionSample,
-        source: String
+        source: String,
+        recognitionMs: Double
     ) {
         lastSegment = segment
         AppDiagnostics.record(
@@ -622,10 +628,14 @@ final class WatchMotionRecorder: ObservableObject {
         lastBurstGateRejectionReason = evaluation.burstGateRejectionReason
         updateRecognitionSummary(segment: segment, candidate: candidate, rejectionReason: evaluation.burstGateRejectionReason)
         let soundToPlay = candidate?.shouldTrigger == true ? nextSound(for: candidate?.profile) : nil
+        let audioReady = soundToPlay.flatMap { soundPlayer?.canPlay(sound: $0) } ?? false
         let audioPlayRequested = candidate?.shouldTrigger == true
             ? (soundPlayer?.play(sound: soundToPlay) ?? false)
             : false
         let audioPlayed = audioPlayRequested && (soundPlayer?.lastAudiblePlaySucceeded ?? audioPlayRequested)
+        let audioStartLatencyMs = candidate?.shouldTrigger == true
+            ? max(0, liveSample.timestamp - segment.peakTimestamp) * 1000
+            : nil
         lastRecognitionEvent = recognitionRuntime.record(
             segment: segment,
             candidate: candidate,
@@ -661,6 +671,10 @@ final class WatchMotionRecorder: ObservableObject {
                     "profile": lastRecognitionEvent?.profile?.name ?? "",
                     "audioPlayed": audioPlayed,
                     "audioPlayRequested": audioPlayRequested,
+                    "audioReady": audioReady,
+                    "audioStartLatencyMs": audioStartLatencyMs ?? -1,
+                    "recognitionMs": recognitionMs,
+                    "triggerTiming": lastRecognitionEvent?.profile?.triggerTiming.rawValue ?? "",
                     "sound": soundToPlay?.fileName ?? "",
                     "profileTriggerCount": lastRecognitionEvent?.profile.map { triggerCountsByProfileID[$0.id, default: 0] } ?? 0,
                     "triggerCount": triggerCount,
@@ -682,6 +696,9 @@ final class WatchMotionRecorder: ObservableObject {
             classifiedKind: evaluation.classifiedKind,
             candidateReports: evaluation.candidateReports,
             audioPlayed: audioPlayed,
+            audioReady: audioReady,
+            recognitionMs: recognitionMs,
+            audioStartLatencyMs: audioStartLatencyMs,
             triggered: lastRecognitionEvent?.triggered == true
         )
     }
@@ -843,6 +860,9 @@ final class WatchMotionRecorder: ObservableObject {
         classifiedKind: MotionTokenKind?,
         candidateReports: [CandidateRecognitionReport],
         audioPlayed: Bool,
+        audioReady: Bool,
+        recognitionMs: Double,
+        audioStartLatencyMs: Double?,
         triggered: Bool
     ) {
         guard shouldPersistRecognitionTrace(
@@ -867,7 +887,7 @@ final class WatchMotionRecorder: ObservableObject {
             let csvURL = directory.appendingPathComponent("\(baseName).csv")
             let jsonURL = directory.appendingPathComponent("\(baseName).json")
 
-            try MotionSampleCSVCodec().encodeData(segment.samples).write(to: csvURL, options: [.atomic])
+            try MotionSecureFileWriter.write(MotionSampleCSVCodec().encodeData(segment.samples), to: csvURL)
             let metadata = recognitionTraceMetadata(
                 date: now,
                 segment: segment,
@@ -878,11 +898,14 @@ final class WatchMotionRecorder: ObservableObject {
                 classifiedKind: classifiedKind,
                 candidateReports: candidateReports,
                 audioPlayed: audioPlayed,
+                audioReady: audioReady,
+                recognitionMs: recognitionMs,
+                audioStartLatencyMs: audioStartLatencyMs,
                 triggered: triggered,
                 csvFileName: csvURL.lastPathComponent
             )
             let data = try JSONSerialization.data(withJSONObject: metadata, options: [.prettyPrinted, .sortedKeys])
-            try data.write(to: jsonURL, options: [.atomic])
+            try MotionSecureFileWriter.write(data, to: jsonURL)
             recognitionEventSink?(compactRecognitionEventMetadata(
                 date: now,
                 segment: segment,
@@ -893,6 +916,9 @@ final class WatchMotionRecorder: ObservableObject {
                 classifiedKind: classifiedKind,
                 candidateReports: candidateReports,
                 audioPlayed: audioPlayed,
+                audioReady: audioReady,
+                recognitionMs: recognitionMs,
+                audioStartLatencyMs: audioStartLatencyMs,
                 triggered: triggered,
                 csvFileName: csvURL.lastPathComponent,
                 jsonFileName: jsonURL.lastPathComponent
@@ -995,18 +1021,26 @@ final class WatchMotionRecorder: ObservableObject {
         classifiedKind: MotionTokenKind?,
         candidateReports: [CandidateRecognitionReport],
         audioPlayed: Bool,
+        audioReady: Bool,
+        recognitionMs: Double,
+        audioStartLatencyMs: Double?,
         triggered: Bool,
         csvFileName: String
     ) -> [String: Any] {
         let timestampFormatter = ISO8601DateFormatter()
         timestampFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         var metadata: [String: Any] = [
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "createdAt": timestampFormatter.string(from: date),
             "csvFileName": csvFileName,
+            "source": "watchRecognitionTrace",
+            "sampleRateHz": estimatedSampleRate,
             "outcome": recognitionOutcome(triggered: triggered, candidate: candidate, rejectionReason: rejectionReason),
             "triggered": triggered,
             "audioPlayed": audioPlayed,
+            "audioReady": audioReady,
+            "audioStartLatencyMs": audioStartLatencyMs ?? NSNull(),
+            "recognitionMs": recognitionMs,
             "profileCount": recognitionRuntime.profiles.count,
             "profileLibraryReady": isProfileLibraryReady,
             "profileLibraryVersion": activeProfileLibraryVersion,
@@ -1017,6 +1051,7 @@ final class WatchMotionRecorder: ObservableObject {
             "startTimestamp": segment.startTimestamp,
             "endTimestamp": segment.endTimestamp,
             "peakEnergy": segment.peakEnergy,
+            "peakTimestamp": segment.peakTimestamp,
             "peakAcceleration": segment.features.peakAcceleration,
             "peakRotationRate": segment.features.peakRotationRate,
             "peakJerk": segment.features.peakJerk,
@@ -1089,6 +1124,7 @@ final class WatchMotionRecorder: ObservableObject {
             metadata["shouldTrigger"] = candidate.shouldTrigger
             metadata["soundFileName"] = candidate.profile.sound?.fileName ?? ""
             metadata["playedSoundFileName"] = triggered ? (lastTriggeredSound?.fileName ?? "") : ""
+            metadata["triggerTiming"] = candidate.profile.triggerTiming.rawValue
             metadata["soundSequenceCount"] = candidate.profile.soundSequence?.count ?? 0
             metadata["soundVolume"] = candidate.profile.sound?.volume ?? 0
             metadata["candidate"] = [
@@ -1110,6 +1146,7 @@ final class WatchMotionRecorder: ObservableObject {
                 "shouldTrigger": candidate.shouldTrigger,
                 "soundFileName": candidate.profile.sound?.fileName ?? "",
                 "playedSoundFileName": triggered ? (lastTriggeredSound?.fileName ?? "") : "",
+                "triggerTiming": candidate.profile.triggerTiming.rawValue,
                 "soundSequenceCount": candidate.profile.soundSequence?.count ?? 0,
                 "soundVolume": candidate.profile.sound?.volume ?? 0,
             ]
@@ -1127,6 +1164,9 @@ final class WatchMotionRecorder: ObservableObject {
         classifiedKind: MotionTokenKind?,
         candidateReports: [CandidateRecognitionReport],
         audioPlayed: Bool,
+        audioReady: Bool,
+        recognitionMs: Double,
+        audioStartLatencyMs: Double?,
         triggered: Bool,
         csvFileName: String,
         jsonFileName: String
@@ -1134,7 +1174,7 @@ final class WatchMotionRecorder: ObservableObject {
         let timestampFormatter = ISO8601DateFormatter()
         timestampFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         var event: [String: Any] = [
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "eventType": "watchRecognitionEvent",
             "testRunId": AppDiagnostics.currentRunID(),
             "buildCommit": AppDiagnostics.currentBuildCommit(),
@@ -1143,6 +1183,9 @@ final class WatchMotionRecorder: ObservableObject {
             "outcome": recognitionOutcome(triggered: triggered, candidate: candidate, rejectionReason: rejectionReason),
             "triggered": triggered,
             "audioPlayed": audioPlayed,
+            "audioReady": audioReady,
+            "audioStartLatencyMs": audioStartLatencyMs ?? -1,
+            "recognitionMs": recognitionMs,
             "profileCount": recognitionRuntime.profiles.count,
             "profileLibraryReady": isProfileLibraryReady,
             "profileLibraryVersion": activeProfileLibraryVersion,
@@ -1151,6 +1194,7 @@ final class WatchMotionRecorder: ObservableObject {
             "sampleCount": segment.samples.count,
             "duration": segment.duration,
             "peakEnergy": segment.peakEnergy,
+            "peakTimestamp": segment.peakTimestamp,
             "peakAcceleration": segment.features.peakAcceleration,
             "peakRotationRate": segment.features.peakRotationRate,
             "peakJerk": segment.features.peakJerk,
@@ -1186,6 +1230,7 @@ final class WatchMotionRecorder: ObservableObject {
             event["shouldTrigger"] = candidate.shouldTrigger
             event["soundFileName"] = candidate.profile.sound?.fileName ?? ""
             event["playedSoundFileName"] = triggered ? (lastTriggeredSound?.fileName ?? "") : ""
+            event["triggerTiming"] = candidate.profile.triggerTiming.rawValue
         }
 
         event["tokens"] = tokens.prefix(6).map { token in

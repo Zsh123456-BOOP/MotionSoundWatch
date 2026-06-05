@@ -428,6 +428,62 @@ public struct GestureProfileArchive: Codable, Equatable, Sendable {
     }
 }
 
+public struct ProfileSyncManifest: Codable, Equatable, Sendable {
+    public var transactionID: UUID
+    public var libraryVersion: String
+    public var profileCount: Int
+    public var profileFileName: String
+    public var profileChecksum: String
+    public var audioChecksumsByFileName: [String: String]
+    public var sentAt: Date
+
+    public init(
+        transactionID: UUID = UUID(),
+        libraryVersion: String,
+        profileCount: Int,
+        profileFileName: String,
+        profileChecksum: String,
+        audioChecksumsByFileName: [String: String] = [:],
+        sentAt: Date = Date()
+    ) {
+        self.transactionID = transactionID
+        self.libraryVersion = libraryVersion
+        self.profileCount = profileCount
+        self.profileFileName = profileFileName
+        self.profileChecksum = profileChecksum
+        self.audioChecksumsByFileName = audioChecksumsByFileName
+        self.sentAt = sentAt
+    }
+}
+
+public struct ProfileSyncAck: Codable, Equatable, Sendable {
+    public var transactionID: UUID
+    public var libraryVersion: String
+    public var applied: Bool
+    public var profileCount: Int
+    public var missingAudioFileNames: [String]
+    public var reason: String?
+    public var sentAt: Date
+
+    public init(
+        transactionID: UUID,
+        libraryVersion: String,
+        applied: Bool,
+        profileCount: Int,
+        missingAudioFileNames: [String] = [],
+        reason: String? = nil,
+        sentAt: Date = Date()
+    ) {
+        self.transactionID = transactionID
+        self.libraryVersion = libraryVersion
+        self.applied = applied
+        self.profileCount = profileCount
+        self.missingAudioFileNames = missingAudioFileNames
+        self.reason = reason
+        self.sentAt = sentAt
+    }
+}
+
 public enum GestureProfileLibraryVersion {
     public static func make(profiles: [GestureProfile]) -> String {
         let payload = canonicalPayload(for: profiles)

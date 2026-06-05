@@ -595,34 +595,129 @@ public struct MotionFeatureExtractor: Sendable {
 
 public struct MotionTokenizer: Sendable {
     public var extractor: MotionFeatureExtractor
+    public var windowDuration: Double
+    public var hopDuration: Double
 
-    public init(extractor: MotionFeatureExtractor = MotionFeatureExtractor()) {
+    public init(
+        extractor: MotionFeatureExtractor = MotionFeatureExtractor(),
+        windowDuration: Double = 0.36,
+        hopDuration: Double = 0.12
+    ) {
         self.extractor = extractor
+        self.windowDuration = windowDuration
+        self.hopDuration = hopDuration
     }
 
     public func tokenize(segment: GestureSegment) -> [MotionToken] {
-        let features = extractor.extract(segment.samples)
+        let fullSegmentToken = makeToken(
+            samples: segment.samples,
+            start: segment.startTimestamp,
+            end: segment.endTimestamp
+        )
+        guard segment.samples.count >= 8, segment.duration >= windowDuration * 1.35 else {
+            return [fullSegmentToken]
+        }
+
+        var rawTokens: [MotionToken] = []
+        var windowStartIndex = 0
+        while windowStartIndex < segment.samples.count - 2 {
+            let windowStart = segment.samples[windowStartIndex].timestamp
+            let windowEnd = windowStart + windowDuration
+            var windowEndIndex = windowStartIndex
+            while windowEndIndex + 1 < segment.samples.count,
+                  segment.samples[windowEndIndex + 1].timestamp <= windowEnd {
+                windowEndIndex += 1
+            }
+
+            let count = windowEndIndex - windowStartIndex + 1
+            if count >= 6 {
+                let samples = Array(segment.samples[windowStartIndex...windowEndIndex])
+                let token = makeToken(
+                    samples: samples,
+                    start: samples.first?.timestamp ?? windowStart,
+                    end: samples.last?.timestamp ?? windowEnd
+                )
+                if token.confidence >= 0.18 || token.kind == .pause {
+                    rawTokens.append(token)
+                }
+            }
+
+            let nextStart = windowStart + hopDuration
+            while windowStartIndex + 1 < segment.samples.count,
+                  segment.samples[windowStartIndex].timestamp < nextStart {
+                windowStartIndex += 1
+            }
+            if windowStartIndex >= segment.samples.count - 2 {
+                break
+            }
+        }
+
+        let merged = merge(tokens: rawTokens)
+        return merged.isEmpty
+            ? [fullSegmentToken]
+            : [fullSegmentToken] + merged
+    }
+
+    private func makeToken(samples: [MotionSample], start: Double, end: Double) -> MotionToken {
+        let features = extractor.extract(samples)
+        return makeToken(features: features, start: start, end: end)
+    }
+
+    private func makeToken(features: GestureSampleFeatures, start: Double, end: Double) -> MotionToken {
         let kind = classify(features)
         let direction = features.signedRotationAngle >= 0 ? 1.0 : -1.0
         let magnitude = tokenMagnitude(kind: kind, features: features)
         let confidence = tokenConfidence(kind: kind, features: features)
-        return [
-            MotionToken(
-                kind: kind,
-                startTime: segment.startTimestamp,
-                endTime: segment.endTimestamp,
-                duration: segment.duration,
-                mainAxis: features.dominantRotationAxis,
-                direction: direction,
-                magnitude: magnitude,
-                confidence: confidence,
-                peakAcc: features.peakAcc,
-                peakGyro: features.peakGyro,
-                integratedAngle: features.integratedRotationAngle,
-                oscillationCount: features.oscillationCount,
-                holdStability: features.holdStability
-            )
-        ]
+        return MotionToken(
+            kind: kind,
+            startTime: start,
+            endTime: end,
+            duration: max(0, end - start),
+            mainAxis: features.dominantRotationAxis,
+            direction: direction,
+            magnitude: magnitude,
+            confidence: confidence,
+            peakAcc: features.peakAcc,
+            peakGyro: features.peakGyro,
+            integratedAngle: features.integratedRotationAngle,
+            oscillationCount: features.oscillationCount,
+            holdStability: features.holdStability
+        )
+    }
+
+    private func merge(tokens: [MotionToken]) -> [MotionToken] {
+        var output: [MotionToken] = []
+        for token in tokens {
+            guard var last = output.last,
+                  last.kind == token.kind,
+                  token.startTime <= last.endTime + hopDuration * 1.5 else {
+                output.append(token)
+                continue
+            }
+
+            last.endTime = max(last.endTime, token.endTime)
+            last.duration = max(0, last.endTime - last.startTime)
+            last.magnitude = max(last.magnitude, token.magnitude)
+            last.confidence = max(last.confidence, token.confidence)
+            last.peakAcc = maxOptional(last.peakAcc, token.peakAcc)
+            last.peakGyro = maxOptional(last.peakGyro, token.peakGyro)
+            last.integratedAngle = maxOptional(last.integratedAngle, token.integratedAngle)
+            last.oscillationCount = maxOptional(last.oscillationCount, token.oscillationCount)
+            last.holdStability = maxOptional(last.holdStability, token.holdStability)
+            output[output.count - 1] = last
+        }
+        return output
+    }
+
+    private func maxOptional(_ lhs: Double?, _ rhs: Double?) -> Double? {
+        switch (lhs, rhs) {
+        case let (.some(lhs), .some(rhs)):
+            return max(lhs, rhs)
+        case let (.some(value), .none), let (.none, .some(value)):
+            return value
+        case (.none, .none):
+            return nil
+        }
     }
 
     public func classify(_ features: GestureSampleFeatures) -> MotionTokenKind {
@@ -727,6 +822,125 @@ public struct MotionStageMatchResult: Equatable, Sendable {
         self.score = score
         self.rejectReason = rejectReason
     }
+}
+
+public struct PrimitiveRecognitionResult: Equatable, Sendable {
+    public var kind: MotionTokenKind
+    public var score: Double
+    public var rejectReason: RejectReason?
+
+    public init(kind: MotionTokenKind, score: Double, rejectReason: RejectReason? = nil) {
+        self.kind = kind
+        self.score = max(0, min(1, score))
+        self.rejectReason = rejectReason
+    }
+}
+
+public protocol MotionPrimitiveRecognizer: Sendable {
+    var kind: MotionTokenKind { get }
+}
+
+public struct ImpulsePrimitiveRecognizer: MotionPrimitiveRecognizer {
+    public let kind = MotionTokenKind.impulse
+    public init() {}
+
+    public func score(features: GestureSampleFeatures, signature: ImpulseSignature) -> PrimitiveRecognitionResult {
+        guard features.peakAcc >= max(0.18, signature.peakAcc * 0.22)
+            || features.peakGyro >= max(0.4, signature.peakGyro * 0.22) else {
+            return PrimitiveRecognitionResult(kind: kind, score: 0.2, rejectReason: .impulsePeakTooWeak)
+        }
+        let peakScore = primitiveRatioScore(value: features.peakAcc, reference: signature.peakAcc, lower: 0.25, upper: 2.4)
+        let gyroScore = primitiveRatioScore(value: features.peakGyro, reference: signature.peakGyro, lower: 0.22, upper: 2.8)
+        let durationScore = primitiveRatioScore(value: features.duration, reference: signature.duration, lower: 0.45, upper: 1.85)
+        let directionScore = features.signedRotationAngle.sign == signature.direction.sign ? 1.0 : 0.55
+        let score = peakScore * 0.30 + gyroScore * 0.22 + durationScore * 0.23 + directionScore * 0.25
+        return PrimitiveRecognitionResult(kind: kind, score: score, rejectReason: score >= 0.55 ? nil : .scoreBelowThreshold)
+    }
+}
+
+public struct RotationPrimitiveRecognizer: MotionPrimitiveRecognizer {
+    public let kind = MotionTokenKind.rotation
+    public init() {}
+
+    public func score(features: GestureSampleFeatures, signature: RotationSignature) -> PrimitiveRecognitionResult {
+        let minAngle = max(.pi * 0.65, signature.totalAngleRadians * 0.68)
+        guard features.integratedRotationAngle >= minAngle else {
+            return PrimitiveRecognitionResult(kind: kind, score: 0.25, rejectReason: .rotationAngleTooSmall)
+        }
+        let consistency = features.rotationDirectionConsistency
+        guard consistency >= 0.42 else {
+            return PrimitiveRecognitionResult(kind: kind, score: 0.35, rejectReason: .rotationDirectionMismatch)
+        }
+        let angleScore = primitiveRatioScore(value: features.integratedRotationAngle, reference: signature.totalAngleRadians, lower: 0.48, upper: 1.85)
+        let axisAlignment = abs(dot(features.dominantRotationAxis, signature.axis))
+        let axisScore = primitiveClamp(features.rotationAxisStability / max(signature.axisStability * 0.75, 0.25)) * axisAlignment
+        let durationScore = primitiveRatioScore(value: features.duration, reference: signature.duration, lower: 0.35, upper: 2.6)
+        let directionScore = features.signedRotationAngle.sign == signature.direction.sign ? 1.0 : 0.60
+        let speedScore = primitiveRatioScore(value: features.meanGyro, reference: max(signature.angularSpeedMean, 0.05), lower: 0.20, upper: 3.4)
+        let consistencyScore = primitiveRatioScore(value: consistency, reference: 0.82, lower: 0.50, upper: 1.22)
+        let score = angleScore * 0.24
+            + axisScore * 0.23
+            + durationScore * 0.11
+            + directionScore * 0.12
+            + speedScore * 0.10
+            + consistencyScore * 0.20
+        let reason: RejectReason? = axisScore < 0.45
+            ? .rotationAxisUnstable
+            : (score >= 0.55 ? nil : .scoreBelowThreshold)
+        return PrimitiveRecognitionResult(kind: kind, score: score, rejectReason: reason)
+    }
+}
+
+public struct OscillationPrimitiveRecognizer: MotionPrimitiveRecognizer {
+    public let kind = MotionTokenKind.oscillation
+    public init() {}
+
+    public func score(features: GestureSampleFeatures, signature: OscillationSignature) -> PrimitiveRecognitionResult {
+        guard features.oscillationCount >= max(0.5, signature.count * 0.45) else {
+            return PrimitiveRecognitionResult(kind: kind, score: 0.25, rejectReason: .oscillationCountTooLow)
+        }
+        let countScore = primitiveRatioScore(value: features.oscillationCount, reference: signature.count, lower: 0.45, upper: 1.9)
+        let periodicityScore = primitiveClamp(features.periodicityScore / max(signature.periodicityScore * 0.75, 0.2))
+        let durationScore = primitiveRatioScore(value: features.duration, reference: signature.duration, lower: 0.45, upper: 2.2)
+        let magnitudeScore = primitiveRatioScore(value: features.peakGyro, reference: signature.magnitude, lower: 0.25, upper: 2.8)
+        let score = countScore * 0.34 + periodicityScore * 0.28 + durationScore * 0.18 + magnitudeScore * 0.20
+        let reason: RejectReason? = periodicityScore < 0.42 ? .oscillationNotPeriodic : (score >= 0.55 ? nil : .scoreBelowThreshold)
+        return PrimitiveRecognitionResult(kind: kind, score: score, rejectReason: reason)
+    }
+}
+
+public struct HoldPrimitiveRecognizer: MotionPrimitiveRecognizer {
+    public let kind = MotionTokenKind.hold
+    public init() {}
+
+    public func score(features: GestureSampleFeatures, signature: HoldSignature) -> PrimitiveRecognitionResult {
+        guard features.holdDuration >= max(0.25, signature.duration * 0.55) else {
+            return PrimitiveRecognitionResult(kind: kind, score: 0.25, rejectReason: .holdTooShort)
+        }
+        let stabilityScore = primitiveClamp(features.holdStability / max(signature.stability * 0.80, 0.2))
+        let durationScore = primitiveRatioScore(value: features.duration, reference: signature.duration, lower: 0.55, upper: 1.8)
+        let gyroScore = 1 - primitiveClamp(features.meanGyro / max(signature.meanGyro * 2.2, 0.2))
+        let score = stabilityScore * 0.45 + durationScore * 0.30 + gyroScore * 0.25
+        return PrimitiveRecognitionResult(kind: kind, score: score, rejectReason: score >= 0.55 ? nil : .holdNotStable)
+    }
+}
+
+private func primitiveClamp(_ value: Double) -> Double {
+    max(0, min(1, value))
+}
+
+private func primitiveRatioScore(value: Double, reference: Double, lower: Double, upper: Double) -> Double {
+    guard reference > 0.0001 else { return value < 0.0001 ? 1 : 0 }
+    let ratio = value / reference
+    if ratio >= lower, ratio <= upper {
+        let center = 1.0
+        let spread = ratio < center ? center - lower : upper - center
+        return primitiveClamp(1 - abs(ratio - center) / max(spread * 1.25, 0.0001))
+    }
+    if ratio < lower {
+        return primitiveClamp(ratio / lower * 0.55)
+    }
+    return primitiveClamp(upper / ratio * 0.55)
 }
 
 public struct MotionStageExtractor: Sendable {
@@ -1376,7 +1590,7 @@ public struct MotionRecognitionRouter: Sendable {
         burstGate: MotionBurstGate = MotionBurstGate()
     ) -> RoutedRecognitionEvaluation {
         let tokens = tokenizer.tokenize(segment: segment)
-        let classifiedKind = tokens.first?.kind ?? .free
+        let classifiedKind = dominantToken(in: tokens)?.kind ?? .free
         var reports: [CandidateRecognitionReport] = []
         var candidates: [RecognitionCandidate] = []
         var firstBurstGateReason: BurstGateRejectionReason?
@@ -1449,6 +1663,17 @@ public struct MotionRecognitionRouter: Sendable {
             rejectReason: accepted?.shouldTrigger == true ? nil : rejectReason,
             burstGateRejectionReason: firstBurstGateReason
         )
+    }
+
+    private func dominantToken(in tokens: [MotionToken]) -> MotionToken? {
+        tokens
+            .filter { $0.kind != .pause }
+            .max {
+                let lhs = $0.confidence * max(0.25, $0.magnitude)
+                let rhs = $1.confidence * max(0.25, $1.magnitude)
+                return lhs < rhs
+            }
+            ?? tokens.first
     }
 
     private func trajectoryScore(
@@ -1632,7 +1857,7 @@ public struct MotionRecognitionRouter: Sendable {
     }
 
     private func explanatoryKind(profile: GestureProfile, segment: GestureSegment, tokens: [MotionToken]) -> MotionTokenKind {
-        let token = tokens.first
+        let token = dominantToken(in: tokens)
         guard let signature = profile.signature else {
             return token?.kind ?? .free
         }
@@ -1664,6 +1889,17 @@ public struct MotionRecognitionRouter: Sendable {
                 if let hardRejectReason = hardTrajectoryVetoReason(poseScore?.rejectReason) {
                     return hardRejectReason
                 }
+            }
+            let completeTrajectoryPass = match.distance <= profile.acceptanceThreshold
+            let completeTrajectoryScore = trajectoryTriggerScore(
+                distance: match.distance,
+                threshold: profile.acceptanceThreshold,
+                triggerScore: profile.thresholds?.triggerScore
+            )
+            if completeTrajectoryPass,
+               completeTrajectoryScore >= (profile.thresholds?.triggerScore ?? 0.68),
+               signature.primaryKind == .free || signature.primaryKind == .sweep {
+                return nil
             }
             if match.distance > profile.acceptanceThreshold {
                 let distanceRatio = match.distance / max(profile.acceptanceThreshold, 0.0001)
@@ -1835,7 +2071,7 @@ public struct MotionRecognitionRouter: Sendable {
         segment: GestureSegment,
         tokens: [MotionToken]
     ) -> (candidate: RecognitionCandidate, report: CandidateRecognitionReport) {
-        let token = tokens.first
+        let token = dominantToken(in: tokens)
         let features = extractor.extract(segment.samples)
         let kind = routeKind(signature: signature, token: token, features: features)
         let score: Double
@@ -1852,13 +2088,29 @@ public struct MotionRecognitionRouter: Sendable {
 
         switch kind {
         case .impulse:
-            (score, rejectReason) = impulseScore(features: features, signature: signature.impulse)
+            if let primitive = primitiveScore(kind: .impulse, features: features, signature: signature) {
+                (score, rejectReason) = (primitive.score, primitive.rejectReason)
+            } else {
+                (score, rejectReason) = (0, .typeMismatch)
+            }
         case .rotation:
-            (score, rejectReason) = rotationScore(features: features, signature: signature.rotation)
+            if let primitive = primitiveScore(kind: .rotation, features: features, signature: signature) {
+                (score, rejectReason) = (primitive.score, primitive.rejectReason)
+            } else {
+                (score, rejectReason) = (0, .typeMismatch)
+            }
         case .oscillation:
-            (score, rejectReason) = oscillationScore(features: features, signature: signature.oscillation)
+            if let primitive = primitiveScore(kind: .oscillation, features: features, signature: signature) {
+                (score, rejectReason) = (primitive.score, primitive.rejectReason)
+            } else {
+                (score, rejectReason) = (0, .typeMismatch)
+            }
         case .hold:
-            (score, rejectReason) = holdScore(features: features, signature: signature.hold)
+            if let primitive = primitiveScore(kind: .hold, features: features, signature: signature) {
+                (score, rejectReason) = (primitive.score, primitive.rejectReason)
+            } else {
+                (score, rejectReason) = (0, .typeMismatch)
+            }
         case .sweep, .pause, .free:
             (score, rejectReason) = fallbackScore(profile: profile, samples: segment.samples)
         }
@@ -1869,6 +2121,25 @@ public struct MotionRecognitionRouter: Sendable {
             score: score,
             rejectReason: rejectReason
         )
+    }
+
+    private func primitiveScore(
+        kind: MotionTokenKind,
+        features: GestureSampleFeatures,
+        signature: GestureSignature
+    ) -> PrimitiveRecognitionResult? {
+        switch kind {
+        case .impulse:
+            return signature.impulse.map { ImpulsePrimitiveRecognizer().score(features: features, signature: $0) }
+        case .rotation:
+            return signature.rotation.map { RotationPrimitiveRecognizer().score(features: features, signature: $0) }
+        case .oscillation:
+            return signature.oscillation.map { OscillationPrimitiveRecognizer().score(features: features, signature: $0) }
+        case .hold:
+            return signature.hold.map { HoldPrimitiveRecognizer().score(features: features, signature: $0) }
+        case .sweep, .pause, .free:
+            return nil
+        }
     }
 
     private func makeCandidateAndReport(

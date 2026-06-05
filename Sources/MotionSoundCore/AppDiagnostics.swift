@@ -33,8 +33,13 @@ enum AppDiagnostics {
     }
 
     static func diagnosticsRootURL(fileManager: FileManager = .default) throws -> URL {
-        let documents = try documentsURL(fileManager: fileManager)
-        return documents.appendingPathComponent("MotionSoundDiagnostics", isDirectory: true)
+        let support = try applicationSupportURL(fileManager: fileManager)
+        let root = support
+            .appendingPathComponent("MotionSoundWatch", isDirectory: true)
+            .appendingPathComponent("MotionSoundDiagnostics", isDirectory: true)
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        try? MotionSecureFileWriter.applyProtection(to: root, fileManager: fileManager)
+        return root
     }
 
     static func runsRootURL(fileManager: FileManager = .default) throws -> URL {
@@ -130,7 +135,7 @@ enum AppDiagnostics {
     }
 
     static func relativeLogPathDescription() -> String {
-        "Documents/MotionSoundDiagnostics/runs/\(currentRunID())/\(platform)/app.log"
+        "Application Support/MotionSoundWatch/MotionSoundDiagnostics/runs/\(currentRunID())/\(platform)/app.log"
     }
 
     private static func makeLine(event: String, fields: [String: CustomStringConvertible]) -> String {
@@ -168,7 +173,7 @@ enum AppDiagnostics {
                 try handle.write(contentsOf: data)
                 try handle.close()
             } else {
-                try data.write(to: fileURL, options: .atomic)
+                try MotionSecureFileWriter.write(data, to: fileURL)
             }
         } catch {
             logger.error("Failed to append diagnostics log: \(error.localizedDescription, privacy: .public)")
@@ -224,7 +229,7 @@ enum AppDiagnostics {
                 "createdAt": ISO8601DateFormatter().string(from: Date()),
             ]
             let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
-            try data.write(to: directory.appendingPathComponent("manifest-\(platform).json"), options: [.atomic])
+            try MotionSecureFileWriter.write(data, to: directory.appendingPathComponent("manifest-\(platform).json"))
         } catch {
             logger.error("Failed to write diagnostics manifest: \(error.localizedDescription, privacy: .public)")
         }
@@ -233,10 +238,14 @@ enum AppDiagnostics {
     private static func clearDiagnosticsQuietly(fileManager: FileManager = .default) {
         do {
             let documents = try documentsURL(fileManager: fileManager)
+            let support = try applicationSupportURL(fileManager: fileManager)
             let paths = [
                 documents.appendingPathComponent("MotionSoundDiagnostics", isDirectory: true),
                 documents.appendingPathComponent("MotionSoundLogs", isDirectory: true),
                 documents.appendingPathComponent("MotionSoundTriggerLogs", isDirectory: true),
+                support
+                    .appendingPathComponent("MotionSoundWatch", isDirectory: true)
+                    .appendingPathComponent("MotionSoundDiagnostics", isDirectory: true),
             ]
             for url in paths where fileManager.fileExists(atPath: url.path) {
                 try? fileManager.removeItem(at: url)
@@ -249,6 +258,15 @@ enum AppDiagnostics {
     private static func documentsURL(fileManager: FileManager) throws -> URL {
         try fileManager.url(
             for: .documentDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+    }
+
+    private static func applicationSupportURL(fileManager: FileManager) throws -> URL {
+        try fileManager.url(
+            for: .applicationSupportDirectory,
             in: .userDomainMask,
             appropriateFor: nil,
             create: true

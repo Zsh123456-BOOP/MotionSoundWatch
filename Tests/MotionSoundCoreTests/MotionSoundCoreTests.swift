@@ -404,6 +404,57 @@ import Foundation
     #expect(decoded == entry)
 }
 
+@Test func tokenizerEmitsFullSegmentAndSlidingWindowTokens() {
+    let samples = syntheticRotation(duration: 1.4, angle: .pi * 2.1)
+    let segment = GestureSegment(
+        kind: .sequence,
+        samples: samples,
+        startTimestamp: samples.first?.timestamp ?? 0,
+        endTimestamp: samples.last?.timestamp ?? 1.4,
+        peakTimestamp: 0.7,
+        peakEnergy: 1,
+        features: MotionEnergyAnalyzer().features(for: samples)
+    )
+
+    let tokens = MotionTokenizer(windowDuration: 0.8, hopDuration: 0.4).tokenize(segment: segment)
+
+    #expect(tokens.count > 1)
+    #expect(tokens.first?.startTime == segment.startTimestamp)
+    #expect(tokens.first?.endTime == segment.endTimestamp)
+    #expect(tokens.dropFirst().contains { $0.kind == .rotation && $0.confidence > 0 })
+}
+
+@Test func profileSyncManifestAndAckRoundTripThroughJSON() throws {
+    let transactionID = UUID()
+    let manifest = ProfileSyncManifest(
+        transactionID: transactionID,
+        libraryVersion: "lib-test",
+        profileCount: 2,
+        profileFileName: "gesture_profiles.json",
+        profileChecksum: "abc123",
+        audioChecksumsByFileName: ["sound.wav": "def456"],
+        sentAt: Date(timeIntervalSince1970: 10)
+    )
+    let ack = ProfileSyncAck(
+        transactionID: transactionID,
+        libraryVersion: "lib-test",
+        applied: false,
+        profileCount: 2,
+        missingAudioFileNames: ["sound.wav"],
+        reason: "missingAudio",
+        sentAt: Date(timeIntervalSince1970: 11)
+    )
+
+    let encoder = JSONEncoder()
+    let decoder = JSONDecoder()
+
+    let decodedManifest = try decoder.decode(ProfileSyncManifest.self, from: encoder.encode(manifest))
+    let decodedAck = try decoder.decode(ProfileSyncAck.self, from: encoder.encode(ack))
+
+    #expect(decodedManifest == manifest)
+    #expect(decodedAck == ack)
+}
+
 @Test func templateBuilderAttachesFeaturesAndQuality() {
     let builder = MotionTemplateBuilder()
     let samples = syntheticBurst(duration: 0.7, amplitude: 1.1)
