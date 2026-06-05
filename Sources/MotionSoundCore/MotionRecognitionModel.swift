@@ -29,6 +29,7 @@ public enum RejectReason: String, Codable, Equatable, Sendable {
     case marginTooSmall
     case cooldownActive
     case audioMissing
+    case trajectoryDistanceTooHigh
     case poseMismatch
     case stageMismatch
 }
@@ -1639,14 +1640,15 @@ public struct MotionRecognitionRouter: Sendable {
             if let hardRejectReason = hardTrajectoryVetoReason(poseScore?.rejectReason) {
                 return hardRejectReason
             }
-            if match.distance > profile.acceptanceThreshold {
-                return tokenResult.candidate.rejectReason
-                    ?? stageScore?.rejectReason
-                    ?? poseScore?.rejectReason
-                    ?? .scoreBelowThreshold
-            }
             let semanticScore = tokenResult.candidate.recognitionScore ?? tokenResult.candidate.confidence
             let minimumSemanticScore = profile.thresholds?.rejectScore ?? 0.42
+            if match.distance > profile.acceptanceThreshold {
+                let distanceRatio = match.distance / max(profile.acceptanceThreshold, 0.0001)
+                let softDistanceAllowed = distanceRatio <= 1.30 && semanticScore >= minimumSemanticScore
+                if !softDistanceAllowed {
+                    return .trajectoryDistanceTooHigh
+                }
+            }
             if semanticScore < minimumSemanticScore {
                 return tokenResult.candidate.rejectReason ?? .scoreBelowThreshold
             }
@@ -1721,6 +1723,8 @@ public struct MotionRecognitionRouter: Sendable {
              .cooldownActive,
              .audioMissing:
             return nil
+        case .trajectoryDistanceTooHigh:
+            return rejectReason
         }
     }
 
