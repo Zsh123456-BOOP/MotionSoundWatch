@@ -35,6 +35,9 @@ struct PhoneDebugView: View {
     @State private var editingAsset: PhoneGestureAsset?
     @State private var isAppendingRecording = false
     @State private var showingDiagnostics = false
+    @State private var testingAsset: PhoneGestureAsset?
+    @State private var testStartedAt: Date?
+    @State private var testBaselineWatchEventCount = 0
 
     private var captureFiles: [ReceivedSyncedFile] {
         let csvFiles = receiver.receivedFiles
@@ -107,7 +110,7 @@ struct PhoneDebugView: View {
                         subtitle: connectionSubtitle,
                         detail: nil
                     )
-                    if currentStep != .library {
+                    if currentStep != .library && currentStep != .test {
                         StepProgressView(currentStep: currentStep)
                     }
                     activeStepView
@@ -217,6 +220,8 @@ struct PhoneDebugView: View {
             soundStep
         case .sync:
             syncStep
+        case .test:
+            testStep
         }
     }
 
@@ -251,6 +256,8 @@ struct PhoneDebugView: View {
                                 openAssetForSound(asset)
                             } record: {
                                 prepareToRecord(asset)
+                            } test: {
+                                startTest(asset)
                             } resync: {
                                 resyncAsset(asset)
                             } delete: {
@@ -641,6 +648,62 @@ struct PhoneDebugView: View {
         }
     }
 
+    private var testStep: some View {
+        ProductSection("测试动作") {
+            VStack(alignment: .leading, spacing: 14) {
+                if let testingAsset {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(testingAsset.profile.name)
+                            .font(.title3.weight(.semibold))
+                        Text("连续做 5 次这个动作。这里会统计 Watch 实际触发了几次，以及有没有播到别的动作。")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    TestModeSummaryView(summary: currentTestSummary)
+
+                    if currentTestEvents.isEmpty {
+                        EmptyStateView(
+                            title: "等待 Watch 事件",
+                            subtitle: "保持 Watch App 打开并开始做动作。若没有任何事件，说明动作没有被切出或 Watch 没在监听。"
+                        )
+                    } else {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("最近结果")
+                                .font(.subheadline.weight(.semibold))
+                            ForEach(currentTestEvents.prefix(8)) { event in
+                                TestEventRow(event: event, targetProfileID: testingAsset.profile.id)
+                            }
+                        }
+                    }
+
+                    HStack(spacing: 10) {
+                        Button {
+                            receiver.requestWatchRuntime(reason: "testModeRefresh")
+                            receiver.sendDiagnosticsConfiguration(reason: "testModeRefresh")
+                            syncWatchLibrarySnapshot(reason: "testModeRefresh")
+                        } label: {
+                            Label("刷新监听", systemImage: "arrow.clockwise")
+                        }
+                        .buttonStyle(.bordered)
+
+                        Button {
+                            finishTestMode()
+                        } label: {
+                            Label("结束测试", systemImage: "checkmark")
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                } else {
+                    EmptyStateView(title: "未选择动作", subtitle: "返回动作列表选择一个动作开始测试。")
+                    PrimaryActionButton(title: "返回动作列表", systemImage: "list.bullet") {
+                        finishTestMode()
+                    }
+                }
+            }
+        }
+    }
+
     private var connectionTitle: String {
         if receiver.isWatchReachable {
             return "Apple Watch 已连接"
@@ -673,6 +736,20 @@ struct PhoneDebugView: View {
 
     private var currentSampleCollectionPlan: GestureSampleCollectionPlan {
         sampleCollectionPlan(including: nil)
+    }
+
+    private var currentTestEvents: [WatchRecognitionEventSummary] {
+        guard let testStartedAt else { return [] }
+        return receiver.recentWatchEvents
+            .filter { $0.receivedAt >= testStartedAt || $0.createdAt >= testStartedAt }
+            .sorted { $0.receivedAt > $1.receivedAt }
+    }
+
+    private var currentTestSummary: GestureTestSummary {
+        guard let testingAsset else {
+            return GestureTestSummary()
+        }
+        return GestureTestSummary(events: currentTestEvents, targetProfile: testingAsset.profile)
     }
 
     private var recordingSubtitle: String {
@@ -1176,6 +1253,48 @@ struct PhoneDebugView: View {
         )
     }
 
+    private func startTest(_ asset: PhoneGestureAsset) {
+        testingAsset = asset
+        testStartedAt = Date()
+        testBaselineWatchEventCount = receiver.receivedWatchEventCount
+        currentStep = .test
+        _ = receiver.sendProfileFile(asset.fileURL)
+        if let audioName = asset.profile.sound?.fileName,
+           let audioURL = localAudioFiles.first(where: { $0.lastPathComponent == audioName }) {
+            _ = receiver.sendAudioFile(audioURL)
+        }
+        receiver.requestWatchRuntime(reason: "testModeStart")
+        receiver.sendDiagnosticsConfiguration(reason: "testModeStart")
+        AppDiagnostics.record(
+            "phone.testMode.start",
+            [
+                "profile": asset.profile.name,
+                "profileID": asset.profile.id.uuidString,
+                "baselineWatchEvents": testBaselineWatchEventCount,
+            ]
+        )
+    }
+
+    private func finishTestMode() {
+        if let testingAsset {
+            let summary = currentTestSummary
+            AppDiagnostics.record(
+                "phone.testMode.finish",
+                [
+                    "profile": testingAsset.profile.name,
+                    "correct": summary.correctTriggerCount,
+                    "wrong": summary.wrongTriggerCount,
+                    "targetRejected": summary.targetRejectedCount,
+                    "events": summary.totalEventCount,
+                ]
+            )
+        }
+        testingAsset = nil
+        testStartedAt = nil
+        currentStep = .library
+        reloadSavedProfiles()
+    }
+
     private func deleteAsset(_ asset: PhoneGestureAsset) {
         do {
             let store = try GestureProfileFileStore.appDocumentsStore()
@@ -1566,6 +1685,7 @@ private enum SetupStep: String, CaseIterable, Identifiable {
     case trim
     case sound
     case sync
+    case test
 
     var id: String { rawValue }
 
@@ -1587,6 +1707,8 @@ private enum SetupStep: String, CaseIterable, Identifiable {
             return "声音"
         case .sync:
             return "同步"
+        case .test:
+            return "测试"
         }
     }
 
@@ -1604,6 +1726,8 @@ private enum SetupStep: String, CaseIterable, Identifiable {
             return "waveform"
         case .sync:
             return "applewatch"
+        case .test:
+            return "target"
         }
     }
 }
@@ -2209,6 +2333,160 @@ private struct SampleCollectionStatusView: View {
     }
 }
 
+private struct GestureTestSummary: Equatable {
+    var totalEventCount = 0
+    var correctTriggerCount = 0
+    var wrongTriggerCount = 0
+    var targetRejectedCount = 0
+    var otherRejectedCount = 0
+    var audioPlayedCount = 0
+
+    init() {}
+
+    init(events: [WatchRecognitionEventSummary], targetProfile: GestureProfile) {
+        totalEventCount = events.count
+        for event in events {
+            let isTarget = event.profileID == targetProfile.id
+                || event.profileName.caseInsensitiveCompare(targetProfile.name) == .orderedSame
+            if event.triggered, isTarget {
+                correctTriggerCount += 1
+            } else if event.triggered {
+                wrongTriggerCount += 1
+            } else if isTarget {
+                targetRejectedCount += 1
+            } else {
+                otherRejectedCount += 1
+            }
+            if event.audioPlayed {
+                audioPlayedCount += 1
+            }
+        }
+    }
+
+    var missedHintCount: Int {
+        max(0, 5 - correctTriggerCount)
+    }
+}
+
+private struct TestModeSummaryView: View {
+    var summary: GestureTestSummary
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                TestMetricView(title: "正确触发", value: "\(summary.correctTriggerCount)/5", color: .green)
+                TestMetricView(title: "播错动作", value: "\(summary.wrongTriggerCount)", color: summary.wrongTriggerCount > 0 ? .red : .secondary)
+                TestMetricView(title: "未通过", value: "\(summary.targetRejectedCount)", color: summary.targetRejectedCount > 0 ? .orange : .secondary)
+            }
+            Text(testHint)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12)
+        .background(Color(.tertiarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var testHint: String {
+        if summary.totalEventCount == 0 {
+            return "还没有收到 Watch 识别事件。先做几次动作，结果会自动同步到这里。"
+        }
+        if summary.wrongTriggerCount > 0 {
+            return "出现播错动作，需要继续补录或等下一轮融合识别收紧冲突。"
+        }
+        if summary.correctTriggerCount >= 5 {
+            return "5 次测试都正确触发，可以进入下一轮真实使用测试。"
+        }
+        if summary.targetRejectedCount > 0 {
+            return "Watch 已看到相似动作但没有通过，后续应把这些片段作为补录样本或优化 variant。"
+        }
+        return "如果你已经做满 5 次但触发不足，说明部分动作没有被切出，需要继续看 Watch trace。"
+    }
+}
+
+private struct TestMetricView: View {
+    var title: String
+    var value: String
+    var color: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(color)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct TestEventRow: View {
+    var event: WatchRecognitionEventSummary
+    var targetProfileID: UUID
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .foregroundStyle(color)
+                .frame(width: 28, height: 28)
+                .background(color.opacity(0.12))
+                .clipShape(Circle())
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.subheadline.weight(.medium))
+                    .lineLimit(1)
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+        }
+        .padding(10)
+        .background(Color(.tertiarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var isTarget: Bool {
+        event.profileID == targetProfileID
+    }
+
+    private var icon: String {
+        if event.triggered, isTarget { return "checkmark.circle.fill" }
+        if event.triggered { return "exclamationmark.triangle.fill" }
+        return "xmark.circle"
+    }
+
+    private var color: Color {
+        if event.triggered, isTarget { return .green }
+        if event.triggered { return .red }
+        return .orange
+    }
+
+    private var title: String {
+        if event.triggered, isTarget { return "正确触发：\(event.profileName)" }
+        if event.triggered { return "播错为：\(event.profileName)" }
+        return "未通过：\(event.profileName)"
+    }
+
+    private var detail: String {
+        var parts: [String] = []
+        if let variantLabel = event.variantLabel {
+            parts.append(variantLabel)
+        }
+        if !event.recognizerKind.isEmpty {
+            parts.append(event.recognizerKind)
+        }
+        if let rejectReason = event.rejectReason {
+            parts.append(rejectReason)
+        }
+        return parts.isEmpty ? event.outcome : parts.joined(separator: " · ")
+    }
+}
+
 private struct PhoneGestureAsset: Identifiable, Equatable {
     var fileURL: URL
     var profile: GestureProfile
@@ -2232,6 +2510,7 @@ private struct GestureAssetRow: View {
     var asset: PhoneGestureAsset
     var open: () -> Void
     var record: () -> Void
+    var test: () -> Void
     var resync: () -> Void
     var delete: () -> Void
 
@@ -2269,6 +2548,9 @@ private struct GestureAssetRow: View {
                     .lineLimit(1)
                 Spacer()
                 Button("补录", action: record)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                Button("测试", action: test)
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                 Button(action: resync) {

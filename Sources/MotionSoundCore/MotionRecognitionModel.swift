@@ -282,6 +282,37 @@ public struct GestureSignature: Codable, Equatable, Sendable {
     }
 }
 
+public struct GestureProfileVariant: Codable, Equatable, Identifiable, Sendable {
+    public var id: UUID
+    public var label: String
+    public var templateIDs: [UUID]
+    public var signature: GestureSignature
+    public var thresholds: ThresholdProfile
+    public var acceptanceThreshold: Double
+    public var marginThreshold: Double
+    public var quality: GestureQuality
+
+    public init(
+        id: UUID = UUID(),
+        label: String,
+        templateIDs: [UUID],
+        signature: GestureSignature,
+        thresholds: ThresholdProfile,
+        acceptanceThreshold: Double,
+        marginThreshold: Double,
+        quality: GestureQuality
+    ) {
+        self.id = id
+        self.label = label
+        self.templateIDs = templateIDs
+        self.signature = signature
+        self.thresholds = thresholds
+        self.acceptanceThreshold = acceptanceThreshold
+        self.marginThreshold = marginThreshold
+        self.quality = quality
+    }
+}
+
 public struct ThresholdProfile: Codable, Equatable, Sendable {
     public var triggerScore: Double
     public var rejectScore: Double
@@ -335,6 +366,8 @@ public struct TriggerPolicy: Codable, Equatable, Sendable {
 public struct CandidateRecognitionReport: Codable, Equatable, Sendable {
     public var profileID: UUID
     public var profileName: String
+    public var variantID: UUID?
+    public var variantLabel: String?
     public var recognizerKind: MotionTokenKind
     public var score: Double
     public var threshold: Double
@@ -345,6 +378,8 @@ public struct CandidateRecognitionReport: Codable, Equatable, Sendable {
     public init(
         profileID: UUID,
         profileName: String,
+        variantID: UUID? = nil,
+        variantLabel: String? = nil,
         recognizerKind: MotionTokenKind,
         score: Double,
         threshold: Double,
@@ -354,6 +389,8 @@ public struct CandidateRecognitionReport: Codable, Equatable, Sendable {
     ) {
         self.profileID = profileID
         self.profileName = profileName
+        self.variantID = variantID
+        self.variantLabel = variantLabel
         self.recognizerKind = recognizerKind
         self.score = score
         self.threshold = threshold
@@ -1140,6 +1177,167 @@ public struct GestureSignatureBuilder: Sendable {
     }
 }
 
+public struct GestureProfileVariantBuilder: Sendable {
+    public var matcher: MotionTemplateMatcher
+    public var signatureBuilder: GestureSignatureBuilder
+    public var evaluator: GestureQualityEvaluator
+    public var extractor: MotionFeatureExtractor
+    public var tokenizer: MotionTokenizer
+    public var maximumVariantCount: Int
+    public var clusterDistanceThreshold: Double
+
+    public init(
+        matcher: MotionTemplateMatcher = MotionTemplateMatcher(),
+        signatureBuilder: GestureSignatureBuilder = GestureSignatureBuilder(),
+        evaluator: GestureQualityEvaluator = GestureQualityEvaluator(),
+        extractor: MotionFeatureExtractor = MotionFeatureExtractor(),
+        tokenizer: MotionTokenizer = MotionTokenizer(),
+        maximumVariantCount: Int = 4,
+        clusterDistanceThreshold: Double = 0.24
+    ) {
+        self.matcher = matcher
+        self.signatureBuilder = signatureBuilder
+        self.evaluator = evaluator
+        self.extractor = extractor
+        self.tokenizer = tokenizer
+        self.maximumVariantCount = maximumVariantCount
+        self.clusterDistanceThreshold = clusterDistanceThreshold
+    }
+
+    public func makeVariants(
+        templates: [MotionTemplate],
+        negativeTemplates: [MotionTemplate] = [],
+        strictness: Double = 0.5,
+        existingProfiles: [GestureProfile] = []
+    ) -> [GestureProfileVariant] {
+        guard !templates.isEmpty else { return [] }
+
+        let clusters = limitedClusters(clusterTemplates(templates))
+        let useVariantLabels = clusters.count > 1
+
+        return clusters.enumerated().map { index, cluster in
+            let signature = signatureBuilder.makeSignature(templates: cluster)
+            let calibration = matcher.calibrateThreshold(
+                positiveTemplates: cluster,
+                negativeWindows: negativeTemplates.map(\.samples)
+            )
+            var thresholds = signatureBuilder.makeThresholds(
+                signature: signature,
+                templateCount: cluster.count,
+                strictness: strictness
+            )
+            if cluster.count == 1 {
+                thresholds.triggerScore = max(thresholds.triggerScore, 0.80)
+                thresholds.marginScore = max(thresholds.marginScore, 0.14)
+            }
+            let quality = evaluator.evaluate(
+                templates: cluster,
+                negativeTemplates: negativeTemplates,
+                existingProfiles: existingProfiles
+            ).quality
+            return GestureProfileVariant(
+                label: useVariantLabels ? "变体 \(index + 1)" : "主变体",
+                templateIDs: cluster.map(\.id),
+                signature: signature,
+                thresholds: thresholds,
+                acceptanceThreshold: calibration.threshold,
+                marginThreshold: calibration.recommendedMarginThreshold,
+                quality: quality
+            )
+        }
+    }
+
+    private func clusterTemplates(_ templates: [MotionTemplate]) -> [[MotionTemplate]] {
+        guard templates.count > 1 else { return templates.map { [$0] } }
+
+        var clusters: [[MotionTemplate]] = []
+        for template in templates {
+            let templateFeatures = extractor.extract(template.samples)
+            let templateKind = tokenizer.classify(templateFeatures)
+            var bestIndex: Int?
+            var bestDistance = Double.infinity
+
+            for index in clusters.indices {
+                guard let representative = clusters[index].first else { continue }
+                let representativeFeatures = extractor.extract(representative.samples)
+                let representativeKind = tokenizer.classify(representativeFeatures)
+                guard areCompatibleKinds(templateKind, representativeKind) else { continue }
+                guard durationRatio(template.rawDuration, representative.rawDuration) <= 2.8 else { continue }
+
+                let averageDistance = clusters[index]
+                    .map { matcher.distance($0.samples, template.samples) }
+                    .reduce(0.0, +) / Double(clusters[index].count)
+                if dominantAxis(template) != dominantAxis(representative),
+                   averageDistance > clusterDistanceThreshold * 0.55 {
+                    continue
+                }
+                if averageDistance < bestDistance {
+                    bestDistance = averageDistance
+                    bestIndex = index
+                }
+            }
+
+            if let bestIndex, bestDistance <= clusterDistanceThreshold {
+                clusters[bestIndex].append(template)
+            } else {
+                clusters.append([template])
+            }
+        }
+        return clusters
+    }
+
+    private func limitedClusters(_ input: [[MotionTemplate]]) -> [[MotionTemplate]] {
+        var clusters = input.filter { !$0.isEmpty }
+        while clusters.count > max(1, maximumVariantCount) {
+            let singletonIndex = clusters.indices
+                .filter { clusters[$0].count == 1 }
+                .first ?? clusters.indices.last!
+            let moving = clusters.remove(at: singletonIndex)
+            guard let template = moving.first else { continue }
+
+            let targetIndex = clusters.indices.min { lhs, rhs in
+                averageDistance(from: template, to: clusters[lhs]) < averageDistance(from: template, to: clusters[rhs])
+            }
+            if let targetIndex {
+                clusters[targetIndex].append(contentsOf: moving)
+            } else {
+                clusters.append(contentsOf: moving.map { [$0] })
+                break
+            }
+        }
+        return clusters
+    }
+
+    private func averageDistance(from template: MotionTemplate, to cluster: [MotionTemplate]) -> Double {
+        guard !cluster.isEmpty else { return .infinity }
+        return cluster
+            .map { matcher.distance(template.samples, $0.samples) }
+            .reduce(0.0, +) / Double(cluster.count)
+    }
+
+    private func areCompatibleKinds(_ lhs: MotionTokenKind, _ rhs: MotionTokenKind) -> Bool {
+        if lhs == rhs { return true }
+        switch (lhs, rhs) {
+        case (.impulse, .sweep), (.sweep, .impulse),
+             (.rotation, .oscillation), (.oscillation, .rotation),
+             (.free, _), (_, .free):
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func durationRatio(_ lhs: Double, _ rhs: Double) -> Double {
+        let small = max(min(lhs, rhs), 0.0001)
+        let large = max(lhs, rhs)
+        return large / small
+    }
+
+    private func dominantAxis(_ template: MotionTemplate) -> Int {
+        template.features?.dominantAxis ?? MotionEnergyAnalyzer().features(for: template.samples).dominantAxis
+    }
+}
+
 public struct MotionRecognitionRouter: Sendable {
     public var tokenizer: MotionTokenizer
     public var extractor: MotionFeatureExtractor
@@ -1252,6 +1450,55 @@ public struct MotionRecognitionRouter: Sendable {
         segment: GestureSegment,
         tokens: [MotionToken]
     ) -> (candidate: RecognitionCandidate, report: CandidateRecognitionReport)? {
+        let variants = scoringVariants(for: profile)
+        if variants.count > 1 || variants.first?.variant != nil {
+            return variants
+                .compactMap { scoringVariant in
+                    trajectoryScoreForVariant(
+                        profile: scoringVariant.profile,
+                        segment: segment,
+                        tokens: tokens,
+                        variant: scoringVariant.variant
+                    )
+                }
+                .max {
+                    ($0.candidate.recognitionScore ?? $0.candidate.confidence) <
+                        ($1.candidate.recognitionScore ?? $1.candidate.confidence)
+                }
+        }
+        return trajectoryScoreForVariant(profile: profile, segment: segment, tokens: tokens, variant: nil)
+    }
+
+    private func scoringVariants(
+        for profile: GestureProfile
+    ) -> [(variant: GestureProfileVariant?, profile: GestureProfile)] {
+        guard let variants = profile.signatureVariants?.filter({ !$0.templateIDs.isEmpty }),
+              !variants.isEmpty else {
+            return [(nil, profile)]
+        }
+
+        return variants.map { variant in
+            var scopedProfile = profile
+            let templateIDSet = Set(variant.templateIDs)
+            let scopedTemplates = profile.templates.filter { templateIDSet.contains($0.id) }
+            if !scopedTemplates.isEmpty {
+                scopedProfile.templates = scopedTemplates
+            }
+            scopedProfile.signature = variant.signature
+            scopedProfile.thresholds = variant.thresholds
+            scopedProfile.acceptanceThreshold = variant.acceptanceThreshold
+            scopedProfile.marginThreshold = variant.marginThreshold
+            scopedProfile.quality = variant.quality
+            return (variant, scopedProfile)
+        }
+    }
+
+    private func trajectoryScoreForVariant(
+        profile: GestureProfile,
+        segment: GestureSegment,
+        tokens: [MotionToken],
+        variant: GestureProfileVariant?
+    ) -> (candidate: RecognitionCandidate, report: CandidateRecognitionReport)? {
         let matchingSegment = trimmedSegment(segment, for: profile)
         let matchingTokens = tokenizer.tokenize(segment: matchingSegment)
         guard var match = matcher.bestMatch(
@@ -1296,11 +1543,15 @@ public struct MotionRecognitionRouter: Sendable {
             match.rejectReason = rejectReason
         }
         match.recognizerKind = kind
+        match.variantID = variant?.id
+        match.variantLabel = variant?.label
 
         let scoreThreshold = profile.thresholds?.triggerScore ?? (1 - profile.acceptanceThreshold)
         let report = CandidateRecognitionReport(
             profileID: profile.id,
             profileName: profile.name,
+            variantID: variant?.id,
+            variantLabel: variant?.label,
             recognizerKind: kind,
             score: match.recognitionScore ?? match.confidence,
             threshold: scoreThreshold,

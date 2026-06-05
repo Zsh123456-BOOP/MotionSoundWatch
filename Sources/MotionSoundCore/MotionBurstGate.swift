@@ -99,6 +99,7 @@ public struct MotionBurstGate: Equatable, Sendable {
         if configuration.requiresDominantAxisMatch,
            let profileAxis = dominantAxis(for: profile),
            profileAxis != segment.features.dominantAxis,
+           !variantAxisMatches(profile: profile, segmentAxis: segment.features.dominantAxis),
            segment.features.peakAcceleration < configuration.axisMismatchMinimumPeakAcceleration {
             return .rejected(.dominantAxisMismatch)
         }
@@ -150,6 +151,7 @@ public struct MotionBurstGate: Equatable, Sendable {
         if configuration.requiresDominantAxisMatch,
            let profileAxis = dominantAxis(for: profile),
            profileAxis != segment.features.dominantAxis,
+           !variantAxisMatches(profile: profile, segmentAxis: segment.features.dominantAxis),
            segment.features.peakAcceleration < configuration.axisMismatchMinimumPeakAcceleration {
             return .rejected(.dominantAxisMismatch)
         }
@@ -195,5 +197,21 @@ public struct MotionBurstGate: Equatable, Sendable {
             }
             return lhs.value < rhs.value
         }?.key
+    }
+
+    private func variantAxisMatches(profile: GestureProfile, segmentAxis: Int) -> Bool {
+        guard let variants = profile.signatureVariants, !variants.isEmpty else {
+            return false
+        }
+        for variant in variants {
+            let templateIDs = Set(variant.templateIDs)
+            let axes = profile.templates
+                .filter { templateIDs.contains($0.id) }
+                .compactMap(\.features?.dominantAxis)
+            if axes.contains(segmentAxis) {
+                return true
+            }
+        }
+        return false
     }
 }

@@ -121,6 +121,44 @@ public struct GestureRecognitionRuntime: Sendable {
             policy.cooldownSeconds = max(policy.cooldownSeconds, adjusted.cooldownSeconds)
             adjusted.triggerPolicy = policy
         }
+        if var variants = adjusted.signatureVariants {
+            variants = variants.map { variant in
+                var adjustedVariant = variant
+                var thresholds = variant.thresholds
+                let isSingleTemplate = variant.templateIDs.count <= 1
+                let minimumTriggerScore: Double
+                let minimumMarginScore: Double
+                switch variant.signature.primaryKind {
+                case .impulse:
+                    minimumTriggerScore = isSingleTemplate ? 0.80 : 0.72
+                    minimumMarginScore = isSingleTemplate ? 0.14 : 0.08
+                case .rotation:
+                    minimumTriggerScore = isSingleTemplate ? 0.78 : 0.64
+                    minimumMarginScore = isSingleTemplate ? 0.16 : 0.06
+                case .oscillation:
+                    minimumTriggerScore = isSingleTemplate ? 0.76 : 0.60
+                    minimumMarginScore = isSingleTemplate ? 0.14 : 0.06
+                case .hold:
+                    minimumTriggerScore = isSingleTemplate ? 0.80 : 0.72
+                    minimumMarginScore = isSingleTemplate ? 0.12 : 0.08
+                case .sweep:
+                    minimumTriggerScore = isSingleTemplate ? 0.78 : 0.70
+                    minimumMarginScore = isSingleTemplate ? 0.14 : 0.08
+                case .pause:
+                    minimumTriggerScore = 0.84
+                    minimumMarginScore = 0.16
+                case .free:
+                    minimumTriggerScore = isSingleTemplate ? 0.82 : 0.74
+                    minimumMarginScore = isSingleTemplate ? 0.16 : 0.10
+                }
+                thresholds.triggerScore = max(thresholds.triggerScore, minimumTriggerScore)
+                thresholds.marginScore = max(thresholds.marginScore, minimumMarginScore)
+                adjustedVariant.thresholds = thresholds
+                adjustedVariant.marginThreshold = max(adjustedVariant.marginThreshold, isSingleTemplate ? 0.08 : 0.05)
+                return adjustedVariant
+            }
+            adjusted.signatureVariants = variants
+        }
         return adjusted
     }
 

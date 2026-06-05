@@ -215,6 +215,7 @@ public struct GestureProfile: Codable, Equatable, Identifiable, Sendable {
     public var customDelayMilliseconds: Int?
     public var wearContext: WearContext?
     public var signature: GestureSignature?
+    public var signatureVariants: [GestureProfileVariant]?
     public var thresholds: ThresholdProfile?
     public var triggerPolicy: TriggerPolicy?
     public var quality: GestureQuality
@@ -239,6 +240,7 @@ public struct GestureProfile: Codable, Equatable, Identifiable, Sendable {
         customDelayMilliseconds: Int? = nil,
         wearContext: WearContext? = nil,
         signature: GestureSignature? = nil,
+        signatureVariants: [GestureProfileVariant]? = nil,
         thresholds: ThresholdProfile? = nil,
         triggerPolicy: TriggerPolicy? = nil,
         quality: GestureQuality = GestureQuality(score: 0.5),
@@ -262,6 +264,7 @@ public struct GestureProfile: Codable, Equatable, Identifiable, Sendable {
         self.customDelayMilliseconds = customDelayMilliseconds
         self.wearContext = wearContext
         self.signature = signature
+        self.signatureVariants = signatureVariants
         self.thresholds = thresholds
         self.triggerPolicy = triggerPolicy
         self.quality = quality
@@ -372,6 +375,8 @@ public struct RecognitionCandidate: Equatable, Sendable {
     public var recognitionScore: Double?
     public var recognizerKind: MotionTokenKind?
     public var rejectReason: RejectReason?
+    public var variantID: UUID?
+    public var variantLabel: String?
 
     public var shouldTrigger: Bool {
         guard rejectReason == nil else {
@@ -397,7 +402,9 @@ public struct RecognitionCandidate: Equatable, Sendable {
         templateID: UUID,
         recognitionScore: Double? = nil,
         recognizerKind: MotionTokenKind? = nil,
-        rejectReason: RejectReason? = nil
+        rejectReason: RejectReason? = nil,
+        variantID: UUID? = nil,
+        variantLabel: String? = nil
     ) {
         self.profile = profile
         self.distance = distance
@@ -408,6 +415,8 @@ public struct RecognitionCandidate: Equatable, Sendable {
         self.recognitionScore = recognitionScore
         self.recognizerKind = recognizerKind
         self.rejectReason = rejectReason
+        self.variantID = variantID
+        self.variantLabel = variantLabel
     }
 }
 

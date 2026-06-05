@@ -845,6 +845,8 @@ final class WatchMotionRecorder: ObservableObject {
             [
                 "profileID": report.profileID.uuidString,
                 "profileName": report.profileName,
+                "variantID": report.variantID?.uuidString ?? "",
+                "variantLabel": report.variantLabel ?? "",
                 "recognizerKind": report.recognizerKind.rawValue,
                 "score": report.score,
                 "threshold": report.threshold,
@@ -857,6 +859,8 @@ final class WatchMotionRecorder: ObservableObject {
             metadata["candidate"] = [
                 "profileID": candidate.profile.id.uuidString,
                 "profileName": candidate.profile.name,
+                "variantID": candidate.variantID?.uuidString ?? "",
+                "variantLabel": candidate.variantLabel ?? "",
                 "profileKind": candidate.profile.kind.rawValue,
                 "recognizerKind": candidate.recognizerKind?.rawValue ?? "",
                 "recognitionScore": candidate.recognitionScore ?? NSNull(),
@@ -930,6 +934,8 @@ final class WatchMotionRecorder: ObservableObject {
         if let candidate {
             event["profileID"] = candidate.profile.id.uuidString
             event["profileName"] = candidate.profile.name
+            event["variantID"] = candidate.variantID?.uuidString ?? ""
+            event["variantLabel"] = candidate.variantLabel ?? ""
             event["profileKind"] = candidate.profile.kind.rawValue
             event["recognizerKind"] = candidate.recognizerKind?.rawValue ?? ""
             event["recognitionScore"] = candidate.recognitionScore ?? -1
@@ -962,6 +968,8 @@ final class WatchMotionRecorder: ObservableObject {
             [
                 "profileID": report.profileID.uuidString,
                 "profileName": report.profileName,
+                "variantID": report.variantID?.uuidString ?? "",
+                "variantLabel": report.variantLabel ?? "",
                 "recognizerKind": report.recognizerKind.rawValue,
                 "score": report.score,
                 "threshold": report.threshold,

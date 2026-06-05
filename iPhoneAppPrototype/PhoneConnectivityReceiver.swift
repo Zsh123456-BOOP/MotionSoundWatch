@@ -21,6 +21,22 @@ struct RecordingStatusEvent: Identifiable, Equatable {
     var receivedAt: Date
 }
 
+struct WatchRecognitionEventSummary: Identifiable, Equatable {
+    var id: URL { fileURL }
+    var fileURL: URL
+    var fileName: String
+    var profileID: UUID?
+    var profileName: String
+    var variantLabel: String?
+    var outcome: String
+    var triggered: Bool
+    var audioPlayed: Bool
+    var recognizerKind: String
+    var rejectReason: String?
+    var createdAt: Date
+    var receivedAt: Date
+}
+
 struct ProfileSyncResult: Equatable {
     var fileURL: URL
     var archive: GestureProfileArchive
@@ -80,6 +96,7 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
     @Published private(set) var lastRecordingStatus: RecordingStatusEvent?
     @Published private(set) var receivedWatchEventCount = 0
     @Published private(set) var lastWatchEventFileName: String?
+    @Published private(set) var recentWatchEvents: [WatchRecognitionEventSummary] = []
 
     private let fileManager: FileManager
     private let soundPlayer: PhoneSoundPlayer
@@ -810,10 +827,46 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
             .sorted { modificationDate($0) > modificationDate($1) }
             receivedWatchEventCount = files.count
             lastWatchEventFileName = files.first?.lastPathComponent
+            recentWatchEvents = files.prefix(80).compactMap(Self.watchRecognitionEventSummary)
         } catch {
             receivedWatchEventCount = 0
+            recentWatchEvents = []
             AppDiagnostics.record(error: error, event: "phone.watchEvent.reload.error")
         }
+    }
+
+    private static func watchRecognitionEventSummary(fileURL: URL) -> WatchRecognitionEventSummary? {
+        guard let data = try? Data(contentsOf: fileURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+
+        let timestampFormatter = ISO8601DateFormatter()
+        let createdAt = (json["createdAt"] as? String).flatMap(timestampFormatter.date(from:))
+            ?? ((try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate)
+            ?? .distantPast
+        let receivedAt = (json["receivedAt"] as? String).flatMap(timestampFormatter.date(from:))
+            ?? ((try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate)
+            ?? createdAt
+        let profileID = (json["profileID"] as? String).flatMap(UUID.init(uuidString:))
+        let profileName = (json["profileName"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rejectReason = (json["rejectReason"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let variantLabel = (json["variantLabel"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return WatchRecognitionEventSummary(
+            fileURL: fileURL,
+            fileName: fileURL.lastPathComponent,
+            profileID: profileID,
+            profileName: profileName?.isEmpty == false ? profileName! : "未命中",
+            variantLabel: variantLabel?.isEmpty == false ? variantLabel : nil,
+            outcome: (json["outcome"] as? String) ?? "event",
+            triggered: (json["triggered"] as? Bool) ?? false,
+            audioPlayed: (json["audioPlayed"] as? Bool) ?? false,
+            recognizerKind: (json["recognizerKind"] as? String) ?? "",
+            rejectReason: rejectReason?.isEmpty == false ? rejectReason : nil,
+            createdAt: createdAt,
+            receivedAt: receivedAt
+        )
     }
 
     nonisolated private static func persistWatchRecognitionEvent(

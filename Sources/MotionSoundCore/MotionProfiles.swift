@@ -325,15 +325,18 @@ public struct GestureProfileBuilder: Sendable {
     public var matcher: MotionTemplateMatcher
     public var evaluator: GestureQualityEvaluator
     public var signatureBuilder: GestureSignatureBuilder
+    public var variantBuilder: GestureProfileVariantBuilder
 
     public init(
         matcher: MotionTemplateMatcher = MotionTemplateMatcher(),
         evaluator: GestureQualityEvaluator = GestureQualityEvaluator(),
-        signatureBuilder: GestureSignatureBuilder = GestureSignatureBuilder()
+        signatureBuilder: GestureSignatureBuilder = GestureSignatureBuilder(),
+        variantBuilder: GestureProfileVariantBuilder = GestureProfileVariantBuilder()
     ) {
         self.matcher = matcher
         self.evaluator = evaluator
         self.signatureBuilder = signatureBuilder
+        self.variantBuilder = variantBuilder
     }
 
     public func makeProfile(
@@ -363,6 +366,12 @@ public struct GestureProfileBuilder: Sendable {
             templateCount: templates.count,
             strictness: strictness
         )
+        let variants = variantBuilder.makeVariants(
+            templates: templates,
+            negativeTemplates: negativeTemplates,
+            strictness: strictness,
+            existingProfiles: existingProfiles
+        )
 
         return GestureProfile(
             name: name,
@@ -376,6 +385,7 @@ public struct GestureProfileBuilder: Sendable {
             sound: sound,
             wearContext: wearContext,
             signature: signature,
+            signatureVariants: variants,
             thresholds: thresholds,
             triggerPolicy: TriggerPolicy(
                 cooldownSeconds: cooldownSeconds,
@@ -444,6 +454,7 @@ public struct GestureProfileCodec: Sendable {
         }
 
         let builder = GestureSignatureBuilder()
+        let variantBuilder = GestureProfileVariantBuilder()
         let rebuiltSignature = builder.makeSignature(templates: profile.templates)
         var upgraded = profile
         if var signature = upgraded.signature {
@@ -468,6 +479,13 @@ public struct GestureProfileCodec: Sendable {
             upgraded.thresholds = builder.makeThresholds(
                 signature: signature,
                 templateCount: upgraded.templates.count,
+                strictness: upgraded.strictness
+            )
+        }
+        if upgraded.signatureVariants == nil || upgraded.signatureVariants?.isEmpty == true || kindChanged {
+            upgraded.signatureVariants = variantBuilder.makeVariants(
+                templates: upgraded.templates,
+                negativeTemplates: upgraded.negativeTemplates,
                 strictness: upgraded.strictness
             )
         }

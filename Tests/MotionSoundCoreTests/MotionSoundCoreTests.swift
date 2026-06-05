@@ -1073,6 +1073,61 @@ import Foundation
     #expect(event.logEntry.candidateReports.first { $0.profileID == eyePoseProfile.id }?.rejectReason != nil)
 }
 
+@Test func profileBuilderCreatesSignatureVariantsForDivergentRecordings() {
+    let builder = MotionTemplateBuilder()
+    let templates = [
+        builder.makeTemplate(label: "mixed-punch", kind: .burst, samples: syntheticBurst(duration: 0.70, amplitude: 1.0)),
+        builder.makeTemplate(label: "mixed-punch", kind: .burst, samples: syntheticBurst(duration: 0.72, amplitude: 1.03, phase: 0.02)),
+        builder.makeTemplate(label: "mixed-punch", kind: .burst, samples: syntheticBurst(duration: 0.68, amplitude: 0.98, phase: -0.02)),
+        builder.makeTemplate(label: "mixed-punch", kind: .burst, samples: syntheticYAxisBurst(duration: 0.70, amplitude: 0.9)),
+        builder.makeTemplate(label: "mixed-punch", kind: .burst, samples: syntheticYAxisBurst(duration: 0.74, amplitude: 0.92)),
+    ]
+
+    let profile = GestureProfileBuilder().makeProfile(
+        name: "mixed-punch",
+        kind: .burst,
+        templates: templates
+    )
+
+    #expect((profile.signatureVariants?.count ?? 0) >= 2)
+    #expect(profile.signatureVariants?.flatMap(\.templateIDs).count == templates.count)
+    #expect(Set(profile.signatureVariants?.flatMap(\.templateIDs) ?? []) == Set(templates.map(\.id)))
+}
+
+@Test func runtimeMatchesMinorityVariantWithoutProfileAxisGate() {
+    let builder = MotionTemplateBuilder()
+    let templates = [
+        builder.makeTemplate(label: "multi-axis", kind: .burst, samples: syntheticBurst(duration: 0.70, amplitude: 1.0)),
+        builder.makeTemplate(label: "multi-axis", kind: .burst, samples: syntheticBurst(duration: 0.72, amplitude: 1.02, phase: 0.02)),
+        builder.makeTemplate(label: "multi-axis", kind: .burst, samples: syntheticBurst(duration: 0.68, amplitude: 0.98, phase: -0.02)),
+        builder.makeTemplate(label: "multi-axis", kind: .burst, samples: syntheticYAxisBurst(duration: 0.70, amplitude: 0.9)),
+        builder.makeTemplate(label: "multi-axis", kind: .burst, samples: syntheticYAxisBurst(duration: 0.74, amplitude: 0.92)),
+    ]
+    let profile = GestureProfileBuilder().makeProfile(
+        name: "multi-axis",
+        kind: .burst,
+        templates: templates
+    )
+    let candidateSamples = syntheticYAxisBurst(duration: 0.72, amplitude: 0.91)
+    let segment = GestureSegment(
+        kind: .burst,
+        samples: candidateSamples,
+        startTimestamp: 0,
+        endTimestamp: 0.72,
+        peakTimestamp: 0.32,
+        peakEnergy: 0.91,
+        features: MotionEnergyAnalyzer().features(for: candidateSamples)
+    )
+    var runtime = GestureRecognitionRuntime(profiles: [profile])
+
+    let event = runtime.recognize(segment: segment, now: 0.8)
+
+    #expect(event.triggered)
+    #expect(event.profile?.id == profile.id)
+    #expect(event.candidate?.variantID != nil)
+    #expect(event.logEntry.burstGateRejectionReason == nil)
+}
+
 @Test func sampleCollectionPolicyRequiresThreeSamplesBeforeSaving() {
     let builder = MotionTemplateBuilder()
     let templates = [
