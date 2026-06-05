@@ -1054,6 +1054,25 @@ final class WatchMotionRecorder: ObservableObject {
             ] as [String: Any]
         }
         if let candidate {
+            metadata["profileID"] = candidate.profile.id.uuidString
+            metadata["profileName"] = candidate.profile.name
+            metadata["variantID"] = candidate.variantID?.uuidString ?? ""
+            metadata["variantLabel"] = candidate.variantLabel ?? ""
+            metadata["profileKind"] = candidate.profile.kind.rawValue
+            metadata["recognizerKind"] = candidate.recognizerKind?.rawValue ?? ""
+            metadata["recognitionScore"] = candidate.recognitionScore ?? NSNull()
+            metadata["distance"] = candidate.distance
+            metadata["threshold"] = candidate.profile.acceptanceThreshold
+            metadata["scoreThreshold"] = candidate.profile.thresholds?.triggerScore ?? NSNull()
+            metadata["confidence"] = candidate.confidence
+            metadata["margin"] = candidate.margin ?? NSNull()
+            metadata["marginThreshold"] = candidate.profile.marginThreshold
+            metadata["secondBestDistance"] = candidate.secondBestDistance ?? NSNull()
+            metadata["shouldTrigger"] = candidate.shouldTrigger
+            metadata["soundFileName"] = candidate.profile.sound?.fileName ?? ""
+            metadata["playedSoundFileName"] = triggered ? (lastTriggeredSound?.fileName ?? "") : ""
+            metadata["soundSequenceCount"] = candidate.profile.soundSequence?.count ?? 0
+            metadata["soundVolume"] = candidate.profile.sound?.volume ?? 0
             metadata["candidate"] = [
                 "profileID": candidate.profile.id.uuidString,
                 "profileName": candidate.profile.name,

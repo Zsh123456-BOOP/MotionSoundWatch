@@ -13,6 +13,7 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
     @Published private(set) var lastRecordingCommand: RecordingControlCommand?
     @Published private(set) var runtimePrepareRequestCount = 0
     @Published private(set) var profileLibraryChangeCount = 0
+    @Published private(set) var profileLibraryStateChangeCount = 0
     @Published private(set) var profileLibraryVersion: String?
     @Published private(set) var profileLibraryProfileCount = 0
     @Published private(set) var isProfileLibraryReady = false
@@ -269,6 +270,26 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
 
             let data = try Data(contentsOf: fileURL)
             let archive = try GestureProfileCodec().decode(data)
+            let resolvedLibraryVersion = incomingLibraryVersion?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                ? incomingLibraryVersion!
+                : (archive.libraryVersion ?? "single-\(Int(Date().timeIntervalSince1970))")
+            let resolvedProfileCount = incomingProfileCount ?? archive.profiles.count
+
+            if replaceLibrary,
+               isProfileLibraryReady,
+               profileLibraryVersion == resolvedLibraryVersion,
+               profileLibraryProfileCount == resolvedProfileCount {
+                try? fileManager.removeItem(at: fileURL)
+                lastTransferMessage = "Watch 动作库已是最新：\(archive.profiles.count) 个动作"
+                AppDiagnostics.record(
+                    "watch.profileLibrary.duplicateIgnored",
+                    [
+                        "profiles": archive.profiles.count,
+                        "profileLibraryVersion": resolvedLibraryVersion,
+                    ]
+                )
+                return
+            }
 
             let store = try GestureProfileFileStore.appDocumentsStore()
             try fileManager.createDirectory(at: store.directoryURL, withIntermediateDirectories: true)
@@ -287,12 +308,9 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
             )
             try fileManager.moveItem(at: fileURL, to: destination)
             lastReceivedProfileURL = destination
-            let resolvedLibraryVersion = incomingLibraryVersion?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-                ? incomingLibraryVersion!
-                : (archive.libraryVersion ?? "single-\(Int(Date().timeIntervalSince1970))")
             if replaceLibrary {
                 profileLibraryVersion = resolvedLibraryVersion
-                profileLibraryProfileCount = incomingProfileCount ?? archive.profiles.count
+                profileLibraryProfileCount = resolvedProfileCount
                 isProfileLibraryReady = true
             } else if profileLibraryVersion == nil {
                 profileLibraryVersion = resolvedLibraryVersion
@@ -333,6 +351,43 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
             lastTransferMessage = error.localizedDescription
             AppDiagnostics.record(error: error, event: "watch.connectivity.receiveProfile.error", ["file": preferredFileName ?? fileURL.lastPathComponent])
         }
+    }
+
+    private func receiveProfileLibrarySyncBegin(
+        version: String?,
+        profileCount: Int?,
+        reason: String?
+    ) {
+        let normalizedVersion = version?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedVersion = normalizedVersion?.isEmpty == false ? normalizedVersion : nil
+        if isProfileLibraryReady,
+           let resolvedVersion,
+           profileLibraryVersion == resolvedVersion,
+           profileCount.map({ $0 == profileLibraryProfileCount }) ?? true {
+            AppDiagnostics.record(
+                "watch.profileLibrary.syncBegin.skipped",
+                [
+                    "reason": reason ?? "",
+                    "profileLibraryVersion": resolvedVersion,
+                    "profileCount": profileCount ?? profileLibraryProfileCount,
+                ]
+            )
+            return
+        }
+
+        profileLibraryVersion = resolvedVersion
+        profileLibraryProfileCount = profileCount ?? 0
+        isProfileLibraryReady = false
+        profileLibraryStateChangeCount += 1
+        lastTransferMessage = "正在同步 Watch 动作库..."
+        AppDiagnostics.record(
+            "watch.profileLibrary.syncBegin",
+            [
+                "reason": reason ?? "",
+                "profileLibraryVersion": resolvedVersion ?? "",
+                "profileCount": profileCount ?? -1,
+            ]
+        )
     }
 
     private func receiveRecordingCommand(
@@ -649,9 +704,15 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
         let testRunID = message["testRunId"] as? String
         let buildCommit = message["buildCommit"] as? String
         let clearLogs = message["clearLogs"] as? Bool
+        let profileLibraryVersion = message["profileLibraryVersion"] as? String
+        let profileCount = message["profileCount"] as? Int
         Task { @MainActor in
             if command == "configureDiagnostics" {
                 receiveConfigureDiagnostics(runID: testRunID, buildCommit: buildCommit, clearLogs: clearLogs, reason: reason)
+                return
+            }
+            if command == "profileLibrarySyncBegin" {
+                receiveProfileLibrarySyncBegin(version: profileLibraryVersion, profileCount: profileCount, reason: reason)
                 return
             }
             if command == "prepareRuntime" {
@@ -690,6 +751,8 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
         let testRunID = message["testRunId"] as? String
         let buildCommit = message["buildCommit"] as? String
         let clearLogs = message["clearLogs"] as? Bool
+        let profileLibraryVersion = message["profileLibraryVersion"] as? String
+        let profileCount = message["profileCount"] as? Int
 
         if command == "configureDiagnostics" {
             replyHandler([
@@ -699,6 +762,18 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
             ])
             Task { @MainActor in
                 receiveConfigureDiagnostics(runID: testRunID, buildCommit: buildCommit, clearLogs: clearLogs, reason: reason)
+            }
+            return
+        }
+
+        if command == "profileLibrarySyncBegin" {
+            replyHandler([
+                "status": "accepted",
+                "command": "profileLibrarySyncBegin",
+                "receivedAt": Date().timeIntervalSince1970,
+            ])
+            Task { @MainActor in
+                receiveProfileLibrarySyncBegin(version: profileLibraryVersion, profileCount: profileCount, reason: reason)
             }
             return
         }
@@ -767,9 +842,15 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
         let testRunID = userInfo["testRunId"] as? String
         let buildCommit = userInfo["buildCommit"] as? String
         let clearLogs = userInfo["clearLogs"] as? Bool
+        let profileLibraryVersion = userInfo["profileLibraryVersion"] as? String
+        let profileCount = userInfo["profileCount"] as? Int
         Task { @MainActor in
             if command == "configureDiagnostics" {
                 receiveConfigureDiagnostics(runID: testRunID, buildCommit: buildCommit, clearLogs: clearLogs, reason: reason)
+                return
+            }
+            if command == "profileLibrarySyncBegin" {
+                receiveProfileLibrarySyncBegin(version: profileLibraryVersion, profileCount: profileCount, reason: reason)
                 return
             }
             if command == "prepareRuntime" {
@@ -797,9 +878,15 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
         let testRunID = applicationContext["testRunId"] as? String
         let buildCommit = applicationContext["buildCommit"] as? String
         let clearLogs = applicationContext["clearLogs"] as? Bool
+        let profileLibraryVersion = applicationContext["profileLibraryVersion"] as? String
+        let profileCount = applicationContext["profileCount"] as? Int
         Task { @MainActor in
             if command == "configureDiagnostics" {
                 receiveConfigureDiagnostics(runID: testRunID, buildCommit: buildCommit, clearLogs: clearLogs, reason: reason)
+                return
+            }
+            if command == "profileLibrarySyncBegin" {
+                receiveProfileLibrarySyncBegin(version: profileLibraryVersion, profileCount: profileCount, reason: reason)
                 return
             }
             guard command == "prepareRuntime" else { return }

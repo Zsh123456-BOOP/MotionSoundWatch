@@ -132,6 +132,10 @@ struct MotionDebugView: View {
             syncProfileLibraryState(reason: "profileLibraryChanged")
             syncRuntimeSession(reason: "profileLibraryChanged")
         }
+        .onChange(of: fileSender.profileLibraryStateChangeCount) {
+            syncProfileLibraryState(reason: "profileLibraryStateChanged")
+            syncRuntimeSession(reason: "profileLibraryStateChanged")
+        }
         .onReceive(fileSender.$lastRecordingCommand.compactMap { $0 }) { command in
             handleRemoteRecordingCommand(command)
         }

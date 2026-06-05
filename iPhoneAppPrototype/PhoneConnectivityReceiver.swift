@@ -435,6 +435,11 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
             let snapshotURL = fileManager.temporaryDirectory
                 .appendingPathComponent("MotionSoundProfileLibrary-\(libraryVersion).json")
             try data.write(to: snapshotURL, options: [.atomic])
+            sendProfileLibrarySyncBegin(
+                version: libraryVersion,
+                profileCount: profiles.count,
+                reason: reason
+            )
             let queued = sendFile(
                 snapshotURL,
                 kind: .gestureProfile,
@@ -472,28 +477,107 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
         sendProfileLibrarySnapshot(reason: reason)
     }
 
-    private static func profileLibraryVersion(for profiles: [GestureProfile], now: Date = Date()) -> String {
+    private func sendProfileLibrarySyncBegin(
+        version: String,
+        profileCount: Int,
+        reason: String
+    ) {
+        guard let session else {
+            AppDiagnostics.record(
+                "phone.profile.librarySyncBegin.unsupported",
+                [
+                    "reason": reason,
+                    "profileLibraryVersion": version,
+                ]
+            )
+            return
+        }
+        guard session.activationState == .activated else {
+            AppDiagnostics.record(
+                "phone.profile.librarySyncBegin.deferred",
+                [
+                    "reason": reason,
+                    "profileLibraryVersion": version,
+                    "state": Self.description(for: session.activationState),
+                ]
+            )
+            return
+        }
+
+        let message: [String: Any] = [
+            "command": "profileLibrarySyncBegin",
+            "profileLibraryVersion": version,
+            "profileCount": profileCount,
+            "reason": reason,
+            "sentAt": Date().timeIntervalSince1970,
+            "source": "MotionSoundPhone",
+        ]
+
+        if session.isReachable {
+            session.sendMessage(message, replyHandler: nil) { error in
+                session.transferUserInfo(message)
+                AppDiagnostics.record(
+                    "phone.profile.librarySyncBegin.sendMessage.error",
+                    [
+                        "reason": reason,
+                        "profileLibraryVersion": version,
+                        "error": error.localizedDescription,
+                    ]
+                )
+            }
+            AppDiagnostics.record(
+                "phone.profile.librarySyncBegin.sent",
+                [
+                    "reason": reason,
+                    "profileLibraryVersion": version,
+                    "profileCount": profileCount,
+                    "reachable": true,
+                ]
+            )
+            return
+        }
+
+        session.transferUserInfo(message)
+        AppDiagnostics.record(
+            "phone.profile.librarySyncBegin.queued",
+            [
+                "reason": reason,
+                "profileLibraryVersion": version,
+                "profileCount": profileCount,
+                "reachable": false,
+            ]
+        )
+    }
+
+    private static func profileLibraryVersion(for profiles: [GestureProfile]) -> String {
         let sortedProfiles = profiles.sorted {
             if $0.name.caseInsensitiveCompare($1.name) == .orderedSame {
                 return $0.id.uuidString < $1.id.uuidString
             }
             return $0.name.localizedStandardCompare($1.name) == .orderedAscending
         }
-        let seed = sortedProfiles.map { profile in
-            [
-                profile.id.uuidString,
-                profile.name,
-                profile.updatedAt.timeIntervalSince1970.description,
-                "\(profile.templates.count)",
-                profile.sound?.fileName ?? "",
-                profile.soundSequence?.map(\.fileName).joined(separator: ",") ?? "",
-            ].joined(separator: "|")
-        }.joined(separator: "\n")
-        let digest = SHA256.hash(data: Data(seed.utf8))
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .millisecondsSince1970
+        let data = (try? encoder.encode(sortedProfiles)) ?? Data(
+            sortedProfiles.map { profile in
+                [
+                    profile.id.uuidString,
+                    profile.name,
+                    profile.updatedAt.timeIntervalSince1970.description,
+                    "\(profile.templates.count)",
+                    profile.sound?.fileName ?? "",
+                    profile.soundSequence?.map(\.fileName).joined(separator: ",") ?? "",
+                ].joined(separator: "|")
+            }
+            .joined(separator: "\n")
+            .utf8
+        )
+        let digest = SHA256.hash(data: data)
             .prefix(6)
             .map { String(format: "%02x", $0) }
             .joined()
-        return "\(Int(now.timeIntervalSince1970))-\(digest)"
+        return "lib-\(digest)"
     }
 
     func generateAndSendProfile(
@@ -904,10 +988,17 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
         let receivedAt = (json["receivedAt"] as? String).flatMap(timestampFormatter.date(from:))
             ?? ((try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate)
             ?? createdAt
-        let profileID = (json["profileID"] as? String).flatMap(UUID.init(uuidString:))
-        let profileName = (json["profileName"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let rejectReason = (json["rejectReason"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let variantLabel = (json["variantLabel"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let candidate = json["candidate"] as? [String: Any]
+        let profileIDRaw = (json["profileID"] as? String) ?? (candidate?["profileID"] as? String)
+        let profileID = profileIDRaw.flatMap(UUID.init(uuidString:))
+        let profileName = ((json["profileName"] as? String) ?? (candidate?["profileName"] as? String))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let rejectReason = ((json["rejectReason"] as? String) ?? (candidate?["rejectReason"] as? String))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let variantLabel = ((json["variantLabel"] as? String) ?? (candidate?["variantLabel"] as? String))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let recognizerKind = ((json["recognizerKind"] as? String) ?? (candidate?["recognizerKind"] as? String))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
 
         return WatchRecognitionEventSummary(
             fileURL: fileURL,
@@ -919,7 +1010,7 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
             outcome: (json["outcome"] as? String) ?? "event",
             triggered: (json["triggered"] as? Bool) ?? false,
             audioPlayed: (json["audioPlayed"] as? Bool) ?? false,
-            recognizerKind: (json["recognizerKind"] as? String) ?? "",
+            recognizerKind: recognizerKind ?? "",
             rejectReason: rejectReason?.isEmpty == false ? rejectReason : nil,
             createdAt: createdAt,
             receivedAt: receivedAt
