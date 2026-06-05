@@ -185,6 +185,7 @@ public struct GestureRecognitionRuntime: Sendable {
         wearContext: WearContext? = nil,
         audioPlayed: Bool = false
     ) -> GestureRecognitionEvent? {
+        continuousBuffer.append(sample)
         guard let segment = segmenter.ingest(sample) else {
             return nil
         }
@@ -268,6 +269,13 @@ public struct GestureRecognitionRuntime: Sendable {
     }
 
     public func evaluate(segment: GestureSegment, now: Double? = nil) -> RecognitionEvaluation {
+        completedCandidateSegments(for: segment)
+            .map { evaluateSingle(segment: $0, now: now) }
+            .max { evaluationPriority($0) < evaluationPriority($1) }
+            ?? evaluateSingle(segment: segment, now: now)
+    }
+
+    private func evaluateSingle(segment: GestureSegment, now: Double? = nil) -> RecognitionEvaluation {
         let routed = router.evaluate(
             segment: segment,
             profiles: profiles,
@@ -293,6 +301,14 @@ public struct GestureRecognitionRuntime: Sendable {
             candidateReports: routed.candidateReports,
             rejectReason: acceptedCandidate?.shouldTrigger == true ? nil : strictRejectReason
         )
+    }
+
+    private func evaluationPriority(_ evaluation: RecognitionEvaluation) -> Double {
+        guard let candidate = evaluation.candidate else {
+            return -1
+        }
+        let score = candidate.recognitionScore ?? candidate.confidence
+        return candidate.shouldTrigger ? score + 1 : score
     }
 
     private func isContinuousEpisodeProfile(_ profile: GestureProfile) -> Bool {
@@ -332,6 +348,35 @@ public struct GestureRecognitionRuntime: Sendable {
         return durations
             .map { Double($0) / 100.0 }
             .sorted()
+    }
+
+    private func completedCandidateSegments(for segment: GestureSegment) -> [GestureSegment] {
+        var segments = [segment]
+        let endingAt = segment.endTimestamp
+        var durations = Set<Int>()
+
+        for profile in profiles {
+            let expected = max(0.35, averageTemplateDuration(profile))
+            for multiplier in [0.85, 1.0, 1.18, 1.35] {
+                let duration = max(segment.duration, min(8.0, expected * multiplier))
+                guard duration > segment.duration + 0.08 else { continue }
+                durations.insert(Int((duration * 100).rounded()))
+            }
+        }
+
+        for durationKey in durations.sorted() {
+            let duration = Double(durationKey) / 100.0
+            let samples = continuousBuffer.recent(seconds: duration, endingAt: endingAt)
+            guard samples.count >= 12,
+                  let first = samples.first,
+                  first.timestamp < segment.startTimestamp - 0.04,
+                  let completed = makeContinuousSegment(samples: samples) else {
+                continue
+            }
+            segments.append(completed)
+        }
+
+        return segments
     }
 
     private func averageTemplateDuration(_ profile: GestureProfile) -> Double {

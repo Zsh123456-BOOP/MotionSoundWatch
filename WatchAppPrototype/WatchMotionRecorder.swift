@@ -69,6 +69,8 @@ final class WatchMotionRecorder: ObservableObject {
     private var motionCallbackCount = 0
     private var firstMotionSampleLogged = false
     private var motionStartDiagnosticTask: Task<Void, Never>?
+    private var lastPublishedSampleAt: TimeInterval = -.infinity
+    private var lastRecordingAssessmentAt: TimeInterval = -.infinity
 
     private struct GestureRearmState {
         var isArmed: Bool
@@ -117,18 +119,19 @@ final class WatchMotionRecorder: ObservableObject {
         }
 
         motionManager.deviceMotionUpdateInterval = 1 / sampleRate
-        motionManager.startDeviceMotionUpdates(to: .main) { [weak self] motion, error in
+        motionManager.startDeviceMotionUpdates(to: motionQueue) { [weak self] motion, error in
             if let error {
                 AppDiagnostics.record(error: error, event: "watch.motion.callback.error")
                 return
             }
-            guard let self else { return }
             guard let motion else {
                 AppDiagnostics.record("watch.motion.callback.empty")
                 return
             }
             let rawSample = RawMotionSample(motion)
-            self.receive(rawSample)
+            Task { @MainActor [weak self] in
+                self?.receive(rawSample)
+            }
         }
 
         isLive = true
@@ -154,6 +157,8 @@ final class WatchMotionRecorder: ObservableObject {
         recordingElapsedTimestamp = 0
         firstMotionSampleLogged = false
         recognitionSuppressedUntil = 0
+        lastPublishedSampleAt = -.infinity
+        lastRecordingAssessmentAt = -.infinity
         AppDiagnostics.record("watch.motion.stopLiveUpdates")
     }
 
@@ -163,6 +168,7 @@ final class WatchMotionRecorder: ObservableObject {
         recordingStartTimestamp = nil
         recordingPreviousRawTimestamp = nil
         recordingElapsedTimestamp = 0
+        lastRecordingAssessmentAt = -.infinity
         estimatedSampleRate = 0
         lastSegment = nil
         savedProfileURL = nil
@@ -515,17 +521,16 @@ final class WatchMotionRecorder: ObservableObject {
             recordingStartTimestamp = rawSample.timestamp
         }
 
-            let liveSample = rawSample.makeSample(start: liveStartTimestamp)
-            latestSample = liveSample
-            recordFirstMotionSampleIfNeeded(rawSample: rawSample, sample: liveSample)
-            recordMotionHeartbeatIfNeeded(sample: liveSample)
-            updateRearmStates(sample: liveSample)
+        let liveSample = rawSample.makeSample(start: liveStartTimestamp)
+        publishLatestSampleIfNeeded(liveSample)
+        recordFirstMotionSampleIfNeeded(rawSample: rawSample, sample: liveSample)
+        recordMotionHeartbeatIfNeeded(sample: liveSample)
+        updateRearmStates(sample: liveSample)
 
-            if isRecording {
-                let recordingSample = normalizedRecordingSample(from: rawSample)
+        if isRecording {
+            let recordingSample = normalizedRecordingSample(from: rawSample)
             samples.append(recordingSample)
-            lastAssessment = validator.assess(samples)
-            estimatedSampleRate = lastAssessment?.estimatedSampleRate ?? 0
+            updateRecordingAssessmentIfNeeded(sample: recordingSample)
             return
         }
 
@@ -565,6 +570,19 @@ final class WatchMotionRecorder: ObservableObject {
             let evaluation = recognitionRuntime.evaluate(segment: segment, now: liveSample.timestamp)
             processRecognition(segment: segment, evaluation: evaluation, liveSample: liveSample, source: "segment")
         }
+    }
+
+    private func publishLatestSampleIfNeeded(_ sample: MotionSample) {
+        guard sample.timestamp - lastPublishedSampleAt >= 0.20 else { return }
+        lastPublishedSampleAt = sample.timestamp
+        latestSample = sample
+    }
+
+    private func updateRecordingAssessmentIfNeeded(sample: MotionSample) {
+        guard sample.timestamp - lastRecordingAssessmentAt >= 0.25 else { return }
+        lastRecordingAssessmentAt = sample.timestamp
+        lastAssessment = validator.assess(samples)
+        estimatedSampleRate = lastAssessment?.estimatedSampleRate ?? 0
     }
 
     private func processRecognition(

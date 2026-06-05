@@ -912,7 +912,6 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
         do {
             let fileName = try Self.persistWatchRecognitionEvent(message)
             noteWatchEventSaved(fileName: fileName)
-            reloadWatchEventCount()
         } catch {
             AppDiagnostics.record(error: error, event: "phone.watchEvent.receive.error")
         }
@@ -920,6 +919,20 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
 
     private func noteWatchEventSaved(fileName: String) {
         lastWatchEventFileName = fileName
+        receivedWatchEventCount += 1
+        do {
+            let directory = try AppDiagnostics.watchEventsDirectory(fileManager: fileManager)
+            let fileURL = directory.appendingPathComponent(fileName)
+            if let summary = Self.watchRecognitionEventSummary(fileURL: fileURL) {
+                recentWatchEvents.removeAll { $0.fileName == summary.fileName }
+                recentWatchEvents.insert(summary, at: 0)
+                if recentWatchEvents.count > 80 {
+                    recentWatchEvents.removeLast(recentWatchEvents.count - 80)
+                }
+            }
+        } catch {
+            AppDiagnostics.record(error: error, event: "phone.watchEvent.incrementalUpdate.error")
+        }
         AppDiagnostics.record("phone.watchEvent.received", ["file": fileName])
     }
 
@@ -1440,7 +1453,6 @@ extension PhoneConnectivityReceiver: WCSessionDelegate {
             if command == "watchRecognitionEvent" {
                 if let watchEventFileName {
                     noteWatchEventSaved(fileName: watchEventFileName)
-                    reloadWatchEventCount()
                 } else {
                     AppDiagnostics.record("phone.watchEvent.receive.error", ["error": watchEventError ?? "unknown"])
                 }
@@ -1487,7 +1499,6 @@ extension PhoneConnectivityReceiver: WCSessionDelegate {
             if command == "watchRecognitionEvent" {
                 if let watchEventFileName {
                     noteWatchEventSaved(fileName: watchEventFileName)
-                    reloadWatchEventCount()
                 } else {
                     AppDiagnostics.record("phone.watchEvent.receive.error", ["error": watchEventError ?? "unknown"])
                 }

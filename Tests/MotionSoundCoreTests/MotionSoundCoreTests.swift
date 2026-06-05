@@ -851,6 +851,51 @@ import Foundation
     #expect(event.logEntry.rejectReason == nil)
 }
 
+@Test func runtimeRecoversEarlierSamplesForCompleteTrajectoryMatch() {
+    let builder = MotionTemplateBuilder()
+    let samples = syntheticSequence(duration: 1.2, amplitude: 1.0)
+    var profile = GestureProfileBuilder().makeProfile(
+        name: "slash",
+        kind: .sequence,
+        templates: [
+            builder.makeTemplate(label: "slash", kind: .sequence, samples: samples),
+            builder.makeTemplate(label: "slash", kind: .sequence, samples: syntheticSequence(duration: 1.22, amplitude: 1.03)),
+            builder.makeTemplate(label: "slash", kind: .sequence, samples: syntheticSequence(duration: 1.18, amplitude: 0.98)),
+        ]
+    )
+    let fullDistance = MotionTemplateMatcher()
+        .bestMatch(profiles: [profile], candidateSamples: samples)?
+        .distance ?? 0
+    profile.acceptanceThreshold = fullDistance + 0.08
+    var thresholds = profile.thresholds ?? ThresholdProfile()
+    thresholds.triggerScore = 0.62
+    thresholds.marginScore = 0.04
+    profile.thresholds = thresholds
+    let suffix = samples.filter { $0.timestamp >= 0.58 }
+    let suffixDistance = MotionTemplateMatcher()
+        .bestMatch(profiles: [profile], candidateSamples: suffix)?
+        .distance ?? 0
+    let partialSegment = GestureSegment(
+        kind: .sequence,
+        samples: suffix,
+        startTimestamp: suffix.first?.timestamp ?? 0.58,
+        endTimestamp: suffix.last?.timestamp ?? 1.2,
+        peakTimestamp: suffix.first?.timestamp ?? 0.58,
+        peakEnergy: 1.0,
+        features: MotionEnergyAnalyzer().features(for: suffix)
+    )
+    var runtime = GestureRecognitionRuntime(profiles: [profile], continuousEvaluationInterval: 99)
+
+    for sample in samples {
+        _ = runtime.evaluateContinuous(sample: sample, now: sample.timestamp)
+    }
+    let event = runtime.recognize(segment: partialSegment, now: samples.last?.timestamp ?? 1.2)
+
+    #expect(suffixDistance > fullDistance + 0.10)
+    #expect(event.triggered)
+    #expect(event.candidate?.profile.id == profile.id)
+}
+
 @Test func rotationRecognizerExplainsAngleTooSmallRejection() {
     let template = MotionTemplateBuilder().makeTemplate(
         label: "turn",

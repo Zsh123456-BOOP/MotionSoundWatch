@@ -527,13 +527,47 @@ public struct MotionTemplateMatcher: Sendable {
         candidateSamples: [MotionSample]
     ) -> (distance: Double, secondBestDistance: Double?, margin: Double?, templateID: UUID)? {
         let ranked = profile.templates
-            .map { (distance($0.samples, candidateSamples), $0.id) }
+            .map { template in
+                (
+                    completeTrajectoryDistance(template.samples, candidateSamples: candidateSamples),
+                    template.id
+                )
+            }
             .sorted { $0.0 < $1.0 }
 
         guard let best = ranked.first else { return nil }
         let secondBestDistance = ranked.dropFirst().first?.0
         let margin = secondBestDistance.map { $0 - best.0 }
         return (distance: best.0, secondBestDistance: secondBestDistance, margin: margin, templateID: best.1)
+    }
+
+    private func completeTrajectoryDistance(
+        _ templateSamples: [MotionSample],
+        candidateSamples: [MotionSample]
+    ) -> Double {
+        let baseDistance = distance(templateSamples, candidateSamples)
+        let templateDuration = duration(of: templateSamples)
+        let candidateDuration = duration(of: candidateSamples)
+        guard templateDuration > 0.05, candidateDuration > 0.05 else {
+            return baseDistance + 0.20
+        }
+
+        let ratio = candidateDuration / templateDuration
+        let durationPenalty: Double
+        if ratio >= 0.72, ratio <= 1.45 {
+            durationPenalty = 0
+        } else if ratio < 0.72 {
+            durationPenalty = min(0.28, (0.72 - ratio) * 0.55)
+        } else {
+            durationPenalty = min(0.04, (ratio - 1.45) * 0.035)
+        }
+
+        return baseDistance + durationPenalty
+    }
+
+    private func duration(of samples: [MotionSample]) -> Double {
+        guard let first = samples.first, let last = samples.last else { return 0 }
+        return max(0, last.timestamp - first.timestamp)
     }
 
     private func confidenceScore(distance: Double, threshold: Double) -> Double {
@@ -573,7 +607,8 @@ private func resample(_ samples: [MotionSample], targetCount: Int) -> [MotionSam
             timestamp: t - start,
             userAcceleration: interpolate(left.userAcceleration, right.userAcceleration, alpha: alpha),
             rotationRate: interpolate(left.rotationRate, right.rotationRate, alpha: alpha),
-            gravity: interpolateOptional(left.gravity, right.gravity, alpha: alpha)
+            gravity: interpolateOptional(left.gravity, right.gravity, alpha: alpha),
+            attitude: interpolateOptional(left.attitude, right.attitude, alpha: alpha)
         ))
     }
 
@@ -583,7 +618,8 @@ private func resample(_ samples: [MotionSample], targetCount: Int) -> [MotionSam
 private func normalize(_ samples: [MotionSample]) -> [MotionFeatureFrame] {
     guard !samples.isEmpty else { return [] }
 
-    let raw = samples.map {
+    let localized = localizeToInitialAttitude(samples)
+    let raw = localized.map {
         [
             $0.userAcceleration.x,
             $0.userAcceleration.y,
@@ -606,6 +642,22 @@ private func normalize(_ samples: [MotionSample]) -> [MotionFeatureFrame] {
 
     return centered.map { row in
         MotionFeatureFrame(values: row.map { $0 / scale })
+    }
+}
+
+private func localizeToInitialAttitude(_ samples: [MotionSample]) -> [MotionSample] {
+    guard let initialAttitude = samples.first(where: { $0.attitude != nil })?.attitude else {
+        return samples
+    }
+    let inverseInitial = inverse(initialAttitude)
+    return samples.map { sample in
+        MotionSample(
+            timestamp: sample.timestamp,
+            userAcceleration: rotate(sample.userAcceleration, by: inverseInitial),
+            rotationRate: rotate(sample.rotationRate, by: inverseInitial),
+            gravity: sample.gravity.map { rotate($0, by: inverseInitial) },
+            attitude: sample.attitude
+        )
     }
 }
 
@@ -654,4 +706,65 @@ private func interpolate(_ lhs: MotionVector3, _ rhs: MotionVector3, alpha: Doub
 private func interpolateOptional(_ lhs: MotionVector3?, _ rhs: MotionVector3?, alpha: Double) -> MotionVector3? {
     guard let lhs, let rhs else { return lhs ?? rhs }
     return interpolate(lhs, rhs, alpha: alpha)
+}
+
+private func interpolateOptional(_ lhs: MotionQuaternion?, _ rhs: MotionQuaternion?, alpha: Double) -> MotionQuaternion? {
+    guard let lhs, let rhs else { return lhs ?? rhs }
+    return normalized(
+        MotionQuaternion(
+            x: lhs.x + (rhs.x - lhs.x) * alpha,
+            y: lhs.y + (rhs.y - lhs.y) * alpha,
+            z: lhs.z + (rhs.z - lhs.z) * alpha,
+            w: lhs.w + (rhs.w - lhs.w) * alpha
+        )
+    )
+}
+
+private func normalized(_ quaternion: MotionQuaternion) -> MotionQuaternion {
+    let magnitude = sqrt(
+        quaternion.x * quaternion.x
+            + quaternion.y * quaternion.y
+            + quaternion.z * quaternion.z
+            + quaternion.w * quaternion.w
+    )
+    guard magnitude > 0.000001 else {
+        return MotionQuaternion(x: 0, y: 0, z: 0, w: 1)
+    }
+    return MotionQuaternion(
+        x: quaternion.x / magnitude,
+        y: quaternion.y / magnitude,
+        z: quaternion.z / magnitude,
+        w: quaternion.w / magnitude
+    )
+}
+
+private func inverse(_ quaternion: MotionQuaternion) -> MotionQuaternion {
+    let q = normalized(quaternion)
+    return MotionQuaternion(x: -q.x, y: -q.y, z: -q.z, w: q.w)
+}
+
+private func rotate(_ vector: MotionVector3, by quaternion: MotionQuaternion) -> MotionVector3 {
+    let q = normalized(quaternion)
+    let u = MotionVector3(x: q.x, y: q.y, z: q.z)
+    let s = q.w
+    let dotUV = dot(u, vector)
+    let dotUU = dot(u, u)
+    let crossUV = cross(u, vector)
+    return MotionVector3(
+        x: 2 * dotUV * u.x + (s * s - dotUU) * vector.x + 2 * s * crossUV.x,
+        y: 2 * dotUV * u.y + (s * s - dotUU) * vector.y + 2 * s * crossUV.y,
+        z: 2 * dotUV * u.z + (s * s - dotUU) * vector.z + 2 * s * crossUV.z
+    )
+}
+
+private func dot(_ lhs: MotionVector3, _ rhs: MotionVector3) -> Double {
+    lhs.x * rhs.x + lhs.y * rhs.y + lhs.z * rhs.z
+}
+
+private func cross(_ lhs: MotionVector3, _ rhs: MotionVector3) -> MotionVector3 {
+    MotionVector3(
+        x: lhs.y * rhs.z - lhs.z * rhs.y,
+        y: lhs.z * rhs.x - lhs.x * rhs.z,
+        z: lhs.x * rhs.y - lhs.y * rhs.x
+    )
 }
