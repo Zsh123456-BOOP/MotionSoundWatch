@@ -69,6 +69,11 @@ public struct GestureSampleFeatures: Codable, Equatable, Sendable {
     public var directionalityScore: Double
     public var numberOfBursts: Int
 
+    public var rotationDirectionConsistency: Double {
+        guard integratedRotationAngle > 0.0001 else { return 0 }
+        return min(1, abs(signedRotationAngle) / integratedRotationAngle)
+    }
+
     public init(
         duration: Double,
         peakAcc: Double,
@@ -1823,9 +1828,7 @@ public struct MotionRecognitionRouter: Sendable {
     ) -> MotionTokenKind {
         guard let token else { return signature.primaryKind }
         if signature.rotation != nil,
-           (token.kind == .oscillation || token.kind == .free),
-           let features,
-           features.integratedRotationAngle >= max(.pi * 0.75, (signature.rotation?.totalAngleRadians ?? .pi * 2) * 0.45) {
+           (token.kind == .oscillation || token.kind == .free) {
             return .rotation
         }
         if token.kind == signature.primaryKind || signature.secondaryKinds.contains(token.kind) {
@@ -1835,6 +1838,9 @@ public struct MotionRecognitionRouter: Sendable {
             return .free
         }
         if token.kind == .free {
+            if signature.rotation != nil {
+                return .free
+            }
             return signature.primaryKind
         }
         if token.kind == .impulse, signature.impulse != nil {
@@ -1895,14 +1901,26 @@ public struct MotionRecognitionRouter: Sendable {
         guard features.integratedRotationAngle >= minAngle else {
             return (0.25, .rotationAngleTooSmall)
         }
+        let consistency = features.rotationDirectionConsistency
+        guard consistency >= 0.42 else {
+            return (0.35, .rotationDirectionMismatch)
+        }
         let angleScore = ratioScore(value: features.integratedRotationAngle, reference: signature.totalAngleRadians, lower: 0.48, upper: 1.85)
         let axisAlignment = abs(dot(features.dominantRotationAxis, signature.axis))
         let axisScore = clamp(features.rotationAxisStability / max(signature.axisStability * 0.75, 0.25)) * axisAlignment
         let durationScore = ratioScore(value: features.duration, reference: signature.duration, lower: 0.35, upper: 2.6)
         let directionScore = features.signedRotationAngle.sign == signature.direction.sign ? 1.0 : 0.60
         let speedScore = ratioScore(value: features.meanGyro, reference: max(signature.angularSpeedMean, 0.05), lower: 0.20, upper: 3.4)
-        let score = angleScore * 0.30 + axisScore * 0.28 + durationScore * 0.13 + directionScore * 0.18 + speedScore * 0.11
-        let reason: RejectReason? = axisScore < 0.45 ? .rotationAxisUnstable : (score >= 0.55 ? nil : .scoreBelowThreshold)
+        let consistencyScore = ratioScore(value: consistency, reference: 0.82, lower: 0.50, upper: 1.22)
+        let score = angleScore * 0.24
+            + axisScore * 0.23
+            + durationScore * 0.11
+            + directionScore * 0.12
+            + speedScore * 0.10
+            + consistencyScore * 0.20
+        let reason: RejectReason? = axisScore < 0.45
+            ? .rotationAxisUnstable
+            : (score >= 0.55 ? nil : .scoreBelowThreshold)
         return (clamp(score), reason)
     }
 

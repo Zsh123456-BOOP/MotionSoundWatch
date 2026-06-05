@@ -550,34 +550,7 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
     }
 
     private static func profileLibraryVersion(for profiles: [GestureProfile]) -> String {
-        let sortedProfiles = profiles.sorted {
-            if $0.name.caseInsensitiveCompare($1.name) == .orderedSame {
-                return $0.id.uuidString < $1.id.uuidString
-            }
-            return $0.name.localizedStandardCompare($1.name) == .orderedAscending
-        }
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        encoder.dateEncodingStrategy = .millisecondsSince1970
-        let data = (try? encoder.encode(sortedProfiles)) ?? Data(
-            sortedProfiles.map { profile in
-                [
-                    profile.id.uuidString,
-                    profile.name,
-                    profile.updatedAt.timeIntervalSince1970.description,
-                    "\(profile.templates.count)",
-                    profile.sound?.fileName ?? "",
-                    profile.soundSequence?.map(\.fileName).joined(separator: ",") ?? "",
-                ].joined(separator: "|")
-            }
-            .joined(separator: "\n")
-            .utf8
-        )
-        let digest = SHA256.hash(data: data)
-            .prefix(6)
-            .map { String(format: "%02x", $0) }
-            .joined()
-        return "lib-\(digest)"
+        GestureProfileLibraryVersion.make(profiles: profiles)
     }
 
     func generateAndSendProfile(

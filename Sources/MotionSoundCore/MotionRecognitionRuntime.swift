@@ -238,23 +238,25 @@ public struct GestureRecognitionRuntime: Sendable {
 
         let eligible = profiles.filter(isContinuousEpisodeProfile)
         guard !eligible.isEmpty else { return nil }
+        let candidateDurations = continuousCandidateDurations(from: eligible)
 
         var best: ContinuousRecognitionEvaluation?
         var bestScore = 0.0
-        for profile in eligible {
-            for duration in continuousDurations(for: profile) {
-                let samples = continuousBuffer.recent(seconds: duration, endingAt: sample.timestamp)
-                guard samples.count >= 12,
-                      let segment = makeContinuousSegment(samples: samples) else {
-                    continue
-                }
-                let evaluation = evaluateProfileOnly(segment: segment, profile: profile, now: timestamp)
-                guard let candidate = evaluation.candidate else { continue }
-                let score = candidate.recognitionScore ?? candidate.confidence
-                if best == nil || score > bestScore {
-                    bestScore = score
-                    best = ContinuousRecognitionEvaluation(segment: segment, evaluation: evaluation)
-                }
+        for duration in candidateDurations {
+            let samples = continuousBuffer.recent(seconds: duration, endingAt: sample.timestamp)
+            guard samples.count >= 12,
+                  let segment = makeContinuousSegment(samples: samples) else {
+                continue
+            }
+            let evaluation = evaluate(segment: segment, now: timestamp)
+            guard let candidate = evaluation.candidate,
+                  isContinuousEpisodeProfile(candidate.profile) else {
+                continue
+            }
+            let score = candidate.recognitionScore ?? candidate.confidence
+            if best == nil || score > bestScore {
+                bestScore = score
+                best = ContinuousRecognitionEvaluation(segment: segment, evaluation: evaluation)
             }
         }
 
@@ -293,28 +295,6 @@ public struct GestureRecognitionRuntime: Sendable {
         )
     }
 
-    private func evaluateProfileOnly(
-        segment: GestureSegment,
-        profile: GestureProfile,
-        now: Double?
-    ) -> RecognitionEvaluation {
-        let routed = router.evaluate(
-            segment: segment,
-            profiles: [profile],
-            lastTriggerTimes: lastTriggerTimes,
-            now: now,
-            burstGate: burstGate
-        )
-        return RecognitionEvaluation(
-            candidate: routed.candidate,
-            burstGateRejectionReason: routed.candidate?.shouldTrigger == true ? nil : routed.burstGateRejectionReason,
-            tokens: routed.tokens,
-            classifiedKind: routed.classifiedKind,
-            candidateReports: routed.candidateReports,
-            rejectReason: routed.candidate?.shouldTrigger == true ? nil : routed.rejectReason
-        )
-    }
-
     private func isContinuousEpisodeProfile(_ profile: GestureProfile) -> Bool {
         guard let signature = profile.signature else { return false }
         switch signature.primaryKind {
@@ -336,6 +316,18 @@ public struct GestureRecognitionRuntime: Sendable {
         }
         if profile.signature?.rotation != nil {
             durations.insert(Int((min(8.0, max(1.2, expected * 1.8)) * 100).rounded()))
+        }
+        return durations
+            .map { Double($0) / 100.0 }
+            .sorted()
+    }
+
+    private func continuousCandidateDurations(from profiles: [GestureProfile]) -> [Double] {
+        var durations = Set<Int>()
+        for profile in profiles {
+            for duration in continuousDurations(for: profile) {
+                durations.insert(Int((duration * 100).rounded()))
+            }
         }
         return durations
             .map { Double($0) / 100.0 }

@@ -588,7 +588,15 @@ import Foundation
         kind: .sequence,
         samples: syntheticRotation(duration: 1.2, angle: .pi * 2)
     )
-    let profile = GestureProfileBuilder().makeProfile(name: "turn", kind: .sequence, templates: [template])
+    let profile = GestureProfileBuilder().makeProfile(
+        name: "turn",
+        kind: .sequence,
+        templates: [
+            template,
+            MotionTemplateBuilder().makeTemplate(label: "turn", kind: .sequence, samples: syntheticRotation(duration: 1.25, angle: .pi * 2.04)),
+            MotionTemplateBuilder().makeTemplate(label: "turn", kind: .sequence, samples: syntheticRotation(duration: 1.18, angle: .pi * 1.98)),
+        ]
+    )
 
     #expect(profile.signature?.primaryKind == .rotation)
     #expect((profile.signature?.rotation?.totalAngleRadians ?? 0) > .pi * 1.5)
@@ -601,7 +609,15 @@ import Foundation
         kind: .sequence,
         samples: syntheticRotation(duration: 1.2, angle: .pi * 2)
     )
-    let profile = GestureProfileBuilder().makeProfile(name: "turn", kind: .sequence, templates: [template])
+    let profile = GestureProfileBuilder().makeProfile(
+        name: "turn",
+        kind: .sequence,
+        templates: [
+            template,
+            MotionTemplateBuilder().makeTemplate(label: "turn", kind: .sequence, samples: syntheticRotation(duration: 1.25, angle: .pi * 2.04)),
+            MotionTemplateBuilder().makeTemplate(label: "turn", kind: .sequence, samples: syntheticRotation(duration: 1.18, angle: .pi * 1.98)),
+        ]
+    )
     let samples = syntheticRotation(duration: 3.0, angle: .pi * 2.05)
     let segment = GestureSegment(
         kind: .sequence,
@@ -628,13 +644,21 @@ import Foundation
         kind: .sequence,
         samples: syntheticRotation(duration: 1.2, angle: .pi * 2)
     )
-    let profile = GestureProfileBuilder().makeProfile(name: "turn", kind: .sequence, templates: [template])
+    let profile = GestureProfileBuilder().makeProfile(
+        name: "turn",
+        kind: .sequence,
+        templates: [
+            template,
+            MotionTemplateBuilder().makeTemplate(label: "turn", kind: .sequence, samples: syntheticRotation(duration: 1.25, angle: .pi * 2.04)),
+            MotionTemplateBuilder().makeTemplate(label: "turn", kind: .sequence, samples: syntheticRotation(duration: 1.18, angle: .pi * 1.98)),
+        ]
+    )
     let interval = 0.02
-    var stream: [MotionSample] = (0..<30).map {
+    var stream: [MotionSample] = (0..<10).map {
         flatSample(timestamp: Double($0) * interval, acceleration: 0.01, rotation: 0.01)
     }
     let offset = (stream.last?.timestamp ?? 0) + interval
-    stream.append(contentsOf: syntheticRotation(duration: 2.6, angle: .pi * 2.1).map {
+    stream.append(contentsOf: syntheticRotation(duration: 1.36, angle: .pi * 2.08).map {
         MotionSample(
             timestamp: $0.timestamp + offset,
             userAcceleration: $0.userAcceleration,
@@ -645,7 +669,7 @@ import Foundation
     })
     var runtime = GestureRecognitionRuntime(
         profiles: [profile],
-        continuousEvaluationInterval: 0.02
+        continuousEvaluationInterval: 0.08
     )
     var triggered: ContinuousRecognitionEvaluation?
 
@@ -687,7 +711,7 @@ import Foundation
     #expect(emitted == nil)
 }
 
-@Test func rotationRecognizerRoutesHighAngleOscillationLikeTokenAsRotation() {
+@Test func rotationRecognizerRejectsHighAngleBackAndForthMotion() {
     let template = MotionTemplateBuilder().makeTemplate(
         label: "turn",
         kind: .sequence,
@@ -708,9 +732,47 @@ import Foundation
 
     let event = runtime.recognize(segment: segment, now: 22.4)
 
-    #expect(event.candidate?.recognizerKind == .rotation)
-    #expect(event.logEntry.classifiedKind == .rotation)
+    #expect(event.triggered == false)
+    #expect(event.logEntry.rejectReason == .rotationDirectionMismatch)
     #expect((event.logEntry.tokens.first?.integratedAngle ?? 0) > .pi * 1.5)
+    #expect(MotionFeatureExtractor().extract(samples).rotationDirectionConsistency < 0.55)
+}
+
+@Test func continuousEpisodeRecognizerUsesFullLibraryCompetition() {
+    let builder = MotionTemplateBuilder()
+    let turnProfile = GestureProfileBuilder().makeProfile(
+        name: "turn",
+        kind: .sequence,
+        templates: [
+            builder.makeTemplate(label: "turn-a", kind: .sequence, samples: syntheticRotation(duration: 1.2, angle: .pi * 2.0)),
+            builder.makeTemplate(label: "turn-b", kind: .sequence, samples: syntheticRotation(duration: 1.25, angle: .pi * 2.04)),
+            builder.makeTemplate(label: "turn-c", kind: .sequence, samples: syntheticRotation(duration: 1.18, angle: .pi * 1.96)),
+        ]
+    )
+    let nearTurnProfile = GestureProfileBuilder().makeProfile(
+        name: "near-turn",
+        kind: .sequence,
+        templates: [
+            builder.makeTemplate(label: "near-turn-a", kind: .sequence, samples: syntheticRotation(duration: 1.23, angle: .pi * 2.02)),
+            builder.makeTemplate(label: "near-turn-b", kind: .sequence, samples: syntheticRotation(duration: 1.27, angle: .pi * 2.05)),
+            builder.makeTemplate(label: "near-turn-c", kind: .sequence, samples: syntheticRotation(duration: 1.19, angle: .pi * 1.98)),
+        ]
+    )
+    let stream = syntheticRotation(duration: 1.42, angle: .pi * 2.03)
+    var runtime = GestureRecognitionRuntime(
+        profiles: [turnProfile, nearTurnProfile],
+        continuousEvaluationInterval: 0.18
+    )
+    var emitted: ContinuousRecognitionEvaluation?
+
+    for sample in stream {
+        if let evaluation = runtime.evaluateContinuous(sample: sample, now: sample.timestamp) {
+            emitted = evaluation
+            break
+        }
+    }
+
+    #expect(emitted == nil)
 }
 
 @Test func trajectoryRecognizerTreatsDistanceThresholdAsTriggerBoundary() {
@@ -907,6 +969,33 @@ import Foundation
 
     try store.delete(fileURL: fileURL)
     #expect(try store.list().isEmpty)
+}
+
+@Test func profileLibraryVersionIgnoresGeneratedRuntimeFields() {
+    let builder = MotionTemplateBuilder()
+    let templates = [
+        builder.makeTemplate(label: "turn", kind: .sequence, samples: syntheticRotation(duration: 1.2, angle: .pi * 2)),
+        builder.makeTemplate(label: "turn", kind: .sequence, samples: syntheticRotation(duration: 1.25, angle: .pi * 2.04)),
+    ]
+    let profile = GestureProfileBuilder().makeProfile(
+        name: "turn",
+        kind: .sequence,
+        templates: templates,
+        sound: SoundAsset(fileName: "日语-成功.wav", duration: 0.4, volume: 1)
+    )
+    var regenerated = profile
+    regenerated.updatedAt = Date(timeIntervalSince1970: 2_000_000_000)
+    regenerated.createdAt = Date(timeIntervalSince1970: 1_900_000_000)
+    regenerated.quality = GestureQuality(score: 0.12, warnings: ["runtime-only"])
+    regenerated.signatureVariants = GestureProfileVariantBuilder().makeVariants(
+        templates: templates,
+        strictness: 0.5
+    )
+
+    let firstVersion = GestureProfileLibraryVersion.make(profiles: [profile])
+    let secondVersion = GestureProfileLibraryVersion.make(profiles: [regenerated])
+
+    #expect(firstVersion == secondVersion)
 }
 
 @Test func motionSampleCSVCodecExportsStableDiagnosticColumns() {

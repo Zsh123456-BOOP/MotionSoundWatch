@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 public enum GestureReliability: String, Codable, Equatable, Sendable {
@@ -424,6 +425,153 @@ public struct GestureProfileArchive: Codable, Equatable, Sendable {
         self.libraryVersion = libraryVersion
         self.profiles = profiles
         self.exportedAt = exportedAt
+    }
+}
+
+public enum GestureProfileLibraryVersion {
+    public static func make(profiles: [GestureProfile]) -> String {
+        let payload = canonicalPayload(for: profiles)
+        let digest = SHA256.hash(data: Data(payload.utf8))
+            .prefix(6)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return "lib-\(digest)"
+    }
+
+    public static func canonicalPayload(for profiles: [GestureProfile]) -> String {
+        profiles
+            .sorted { lhs, rhs in
+                if lhs.name.caseInsensitiveCompare(rhs.name) == .orderedSame {
+                    return lhs.id.uuidString < rhs.id.uuidString
+                }
+                return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+            }
+            .map(canonicalProfile)
+            .joined(separator: "\n")
+    }
+
+    private static func canonicalProfile(_ profile: GestureProfile) -> String {
+        var fields: [String] = [
+            "profile",
+            profile.id.uuidString,
+            profile.name.trimmingCharacters(in: .whitespacesAndNewlines),
+            profile.kind.rawValue,
+            number(profile.acceptanceThreshold),
+            number(profile.marginThreshold),
+            number(profile.cooldownSeconds),
+            number(profile.strictness),
+            profile.triggerTiming.rawValue,
+            profile.customDelayMilliseconds.map(String.init) ?? "",
+            canonicalSound(profile.sound),
+            (profile.soundSequence ?? []).map(canonicalSound).joined(separator: ","),
+            canonicalWearContext(profile.wearContext),
+            canonicalThresholds(profile.thresholds),
+            canonicalTriggerPolicy(profile.triggerPolicy),
+            "templates[\(profile.templates.count)]",
+            profile.templates.map(canonicalTemplate).sorted().joined(separator: "\n"),
+            "negativeTemplates[\(profile.negativeTemplates.count)]",
+            profile.negativeTemplates.map(canonicalTemplate).sorted().joined(separator: "\n"),
+        ]
+        if let minAngle = profile.signature?.rotation?.totalAngleRadians {
+            fields.append("rotationTotalAngle=\(number(minAngle))")
+        }
+        if let primaryKind = profile.signature?.primaryKind {
+            fields.append("primaryKind=\(primaryKind.rawValue)")
+        }
+        return fields.joined(separator: "|")
+    }
+
+    private static func canonicalTemplate(_ template: MotionTemplate) -> String {
+        [
+            "template",
+            template.label.trimmingCharacters(in: .whitespacesAndNewlines),
+            template.kind.rawValue,
+            number(template.rawDuration),
+            number(template.sampleRate),
+            number(template.qualityScore),
+            canonicalFeatures(template.features),
+            "samples[\(template.samples.count)]",
+            template.samples.map(canonicalSample).joined(separator: ";"),
+        ].joined(separator: "|")
+    }
+
+    private static func canonicalSample(_ sample: MotionSample) -> String {
+        [
+            number(sample.timestamp),
+            canonicalVector(sample.userAcceleration),
+            canonicalVector(sample.rotationRate),
+            sample.gravity.map(canonicalVector) ?? "",
+            sample.attitude.map(canonicalQuaternion) ?? "",
+        ].joined(separator: ",")
+    }
+
+    private static func canonicalFeatures(_ features: GestureFeatures?) -> String {
+        guard let features else { return "" }
+        return [
+            number(features.duration),
+            number(features.peakAcceleration),
+            number(features.peakRotationRate),
+            number(features.peakJerk),
+            number(features.meanEnergy),
+            String(features.dominantAxis),
+            features.energyShape.map(number).joined(separator: ","),
+        ].joined(separator: ":")
+    }
+
+    private static func canonicalSound(_ sound: SoundAsset?) -> String {
+        guard let sound else { return "" }
+        return [
+            sound.fileName,
+            number(sound.duration),
+            number(Double(sound.volume)),
+            sound.checksum ?? "",
+        ].joined(separator: ":")
+    }
+
+    private static func canonicalWearContext(_ context: WearContext?) -> String {
+        guard let context else { return "" }
+        return [
+            context.wristLocation,
+            context.crownOrientation,
+            context.watchModel ?? "",
+            context.osVersion ?? "",
+        ].joined(separator: ":")
+    }
+
+    private static func canonicalThresholds(_ thresholds: ThresholdProfile?) -> String {
+        guard let thresholds else { return "" }
+        return [
+            number(thresholds.triggerScore),
+            number(thresholds.rejectScore),
+            number(thresholds.marginScore),
+            thresholds.minEnergy.map(number) ?? "",
+            thresholds.minAngle.map(number) ?? "",
+            thresholds.minOscillationCount.map(number) ?? "",
+            thresholds.minHoldDuration.map(number) ?? "",
+            number(thresholds.strictness),
+        ].joined(separator: ":")
+    }
+
+    private static func canonicalTriggerPolicy(_ policy: TriggerPolicy?) -> String {
+        guard let policy else { return "" }
+        return [
+            number(policy.cooldownSeconds),
+            policy.playTiming.rawValue,
+            policy.soundPolicy.rawValue,
+            policy.allowRepeatedTrigger ? "1" : "0",
+        ].joined(separator: ":")
+    }
+
+    private static func canonicalVector(_ vector: MotionVector3) -> String {
+        "\(number(vector.x)):\(number(vector.y)):\(number(vector.z))"
+    }
+
+    private static func canonicalQuaternion(_ quaternion: MotionQuaternion) -> String {
+        "\(number(quaternion.x)):\(number(quaternion.y)):\(number(quaternion.z)):\(number(quaternion.w))"
+    }
+
+    private static func number(_ value: Double) -> String {
+        String(format: "%.6f", value)
     }
 }
 
