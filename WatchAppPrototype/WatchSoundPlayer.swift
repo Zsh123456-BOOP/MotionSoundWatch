@@ -178,9 +178,61 @@ final class WatchSoundPlayer: ObservableObject {
     }
 
     static func documentsSoundURL(fileName: String) -> URL? {
-        guard let directory = try? soundsDirectory() else { return nil }
-        let url = directory.appendingPathComponent(fileName)
-        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+        let fileManager = FileManager.default
+        let documents = try? fileManager.url(
+            for: .documentDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+        let sounds = try? soundsDirectory()
+        let searchDirectories = [sounds, documents].compactMap { $0 }
+
+        for directory in searchDirectories {
+            let exactURL = directory.appendingPathComponent(fileName)
+            if fileManager.fileExists(atPath: exactURL.path) {
+                return exactURL
+            }
+        }
+
+        return legacyTimestampedSoundURL(
+            fileName: fileName,
+            directories: searchDirectories,
+            fileManager: fileManager
+        )
+    }
+
+    private static func legacyTimestampedSoundURL(
+        fileName: String,
+        directories: [URL],
+        fileManager: FileManager
+    ) -> URL? {
+        let target = URL(fileURLWithPath: fileName)
+        let base = target.deletingPathExtension().lastPathComponent
+        let ext = target.pathExtension.lowercased()
+        guard !base.isEmpty, !ext.isEmpty else { return nil }
+
+        let matches = directories.flatMap { directory -> [URL] in
+            guard let urls = try? fileManager.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+            ) else {
+                return []
+            }
+            return urls.filter { url in
+                url.pathExtension.lowercased() == ext
+                    && url.deletingPathExtension().lastPathComponent.hasPrefix("\(base)-")
+            }
+        }
+
+        return matches.sorted { lhs, rhs in
+            modificationDate(lhs) > modificationDate(rhs)
+        }.first
+    }
+
+    private static func modificationDate(_ url: URL) -> Date {
+        ((try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate) ?? .distantPast
     }
 
     private func preload(fileURL: URL, key: String) {
