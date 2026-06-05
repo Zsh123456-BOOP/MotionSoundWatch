@@ -1318,12 +1318,7 @@ final class WatchMotionRecorder: ObservableObject {
 
         lastRecognitionSummary = candidate.shouldTrigger
             ? "已触发：\(candidate.profile.name)"
-            : String(
-                format: "%@ 未触发，距离 %.3f / 阈值 %.3f",
-                candidate.profile.name,
-                candidate.distance,
-                candidate.profile.acceptanceThreshold
-            )
+            : "检测到动作，但没有达到已保存动作的匹配要求。"
         AppDiagnostics.record(
             candidate.shouldTrigger ? "watch.recognition.candidateTriggered" : "watch.recognition.candidateRejected",
             [

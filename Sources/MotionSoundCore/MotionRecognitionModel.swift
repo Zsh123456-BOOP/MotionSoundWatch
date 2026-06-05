@@ -1406,14 +1406,14 @@ public struct MotionRecognitionRouter: Sendable {
         }
 
         let sortedCandidates = candidates.sorted {
-            ($0.recognitionScore ?? $0.confidence) > ($1.recognitionScore ?? $1.confidence)
+            competitionScore(for: $0) > competitionScore(for: $1)
         }
         var best = sortedCandidates.first
         if let bestCandidate = best {
-            let second = sortedCandidates.dropFirst().first
+            let second = sortedCandidates.dropFirst().first(where: { isMarginCompetitor($0) })
             if let second {
-                let bestScore = bestCandidate.recognitionScore ?? bestCandidate.confidence
-                let secondScore = second.recognitionScore ?? second.confidence
+                let bestScore = competitionScore(for: bestCandidate)
+                let secondScore = competitionScore(for: second)
                 let scoreMargin = bestScore - secondScore
                 best?.margin = scoreMargin
                 best?.secondBestDistance = second.distance
@@ -1552,6 +1552,14 @@ public struct MotionRecognitionRouter: Sendable {
         }
         if let rejectReason {
             match.rejectReason = rejectReason
+        }
+        if let rejectReason, isHardCompetitionReject(rejectReason) {
+            let cappedScore = min(
+                match.recognitionScore ?? match.confidence,
+                hardRejectScoreCap(for: rejectReason)
+            )
+            match.recognitionScore = cappedScore
+            match.confidence = min(match.confidence, cappedScore)
         }
         match.recognizerKind = kind
         match.variantID = variant?.id
@@ -1745,6 +1753,79 @@ public struct MotionRecognitionRouter: Sendable {
             return nil
         case .trajectoryDistanceTooHigh:
             return rejectReason
+        }
+    }
+
+    private func competitionScore(for candidate: RecognitionCandidate) -> Double {
+        let score = candidate.recognitionScore ?? candidate.confidence
+        guard let rejectReason = candidate.rejectReason,
+              isHardCompetitionReject(rejectReason) else {
+            return score
+        }
+        return min(score, hardRejectScoreCap(for: rejectReason))
+    }
+
+    private func isMarginCompetitor(_ candidate: RecognitionCandidate) -> Bool {
+        guard let rejectReason = candidate.rejectReason else {
+            return true
+        }
+        return !isHardCompetitionReject(rejectReason)
+    }
+
+    private func isHardCompetitionReject(_ rejectReason: RejectReason) -> Bool {
+        switch rejectReason {
+        case .trajectoryDistanceTooHigh,
+             .poseMismatch,
+             .stageMismatch,
+             .typeMismatch,
+             .impulseDirectionMismatch,
+             .rotationAngleTooSmall,
+             .rotationDirectionMismatch,
+             .rotationAxisUnstable,
+             .oscillationCountTooLow,
+             .oscillationNotPeriodic,
+             .holdNotStable,
+             .holdTooShort:
+            return true
+        case .noCandidate,
+             .segmentTooShort,
+             .segmentTooLong,
+             .lowEnergy,
+             .impulsePeakTooWeak,
+             .scoreBelowThreshold,
+             .marginTooSmall,
+             .cooldownActive,
+             .audioMissing:
+            return false
+        }
+    }
+
+    private func hardRejectScoreCap(for rejectReason: RejectReason) -> Double {
+        switch rejectReason {
+        case .trajectoryDistanceTooHigh:
+            return 0.34
+        case .poseMismatch, .stageMismatch:
+            return 0.32
+        case .rotationAngleTooSmall,
+             .rotationDirectionMismatch,
+             .rotationAxisUnstable,
+             .oscillationCountTooLow,
+             .oscillationNotPeriodic,
+             .holdNotStable,
+             .holdTooShort:
+            return 0.30
+        case .typeMismatch, .impulseDirectionMismatch:
+            return 0.25
+        case .noCandidate,
+             .segmentTooShort,
+             .segmentTooLong,
+             .lowEnergy,
+             .impulsePeakTooWeak,
+             .scoreBelowThreshold,
+             .marginTooSmall,
+             .cooldownActive,
+             .audioMissing:
+            return 1.0
         }
     }
 

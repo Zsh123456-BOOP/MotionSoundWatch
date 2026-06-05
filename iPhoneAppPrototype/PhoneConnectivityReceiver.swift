@@ -973,15 +973,20 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
         let recognizerKind = ((json["recognizerKind"] as? String) ?? (candidate?["recognizerKind"] as? String))?
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
+        let triggered = (json["triggered"] as? Bool) ?? false
+        let displayProfileName = triggered
+            ? (profileName?.isEmpty == false ? profileName! : "未命中")
+            : "未触发"
+
         return WatchRecognitionEventSummary(
             fileURL: fileURL,
             fileName: fileURL.lastPathComponent,
             profileLibraryVersion: (json["profileLibraryVersion"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
             profileID: profileID,
-            profileName: profileName?.isEmpty == false ? profileName! : "未命中",
+            profileName: displayProfileName,
             variantLabel: variantLabel?.isEmpty == false ? variantLabel : nil,
             outcome: (json["outcome"] as? String) ?? "event",
-            triggered: (json["triggered"] as? Bool) ?? false,
+            triggered: triggered,
             audioPlayed: (json["audioPlayed"] as? Bool) ?? false,
             recognizerKind: recognizerKind ?? "",
             rejectReason: rejectReason?.isEmpty == false ? rejectReason : nil,

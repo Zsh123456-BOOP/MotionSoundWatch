@@ -2470,7 +2470,7 @@ private struct TestEventRow: View {
     private var title: String {
         if event.triggered, isTarget { return "正确触发：\(event.profileName)" }
         if event.triggered { return "播错为：\(event.profileName)" }
-        return "未通过：\(event.profileName)"
+        return "未触发"
     }
 
     private var detail: String {

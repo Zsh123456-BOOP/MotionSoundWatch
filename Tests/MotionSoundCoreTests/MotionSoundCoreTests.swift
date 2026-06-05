@@ -935,6 +935,47 @@ import Foundation
     #expect(event.logEntry.rejectReason == .marginTooSmall)
 }
 
+@Test func hardTrajectoryRejectDoesNotBlockMatchingImpulse() {
+    let builder = MotionTemplateBuilder()
+    let punchProfile = GestureProfileBuilder().makeProfile(
+        name: "punch",
+        kind: .burst,
+        templates: [
+            builder.makeTemplate(label: "punch-a", kind: .burst, samples: syntheticBurst(duration: 1.0, amplitude: 5.0)),
+            builder.makeTemplate(label: "punch-b", kind: .burst, samples: syntheticBurst(duration: 1.05, amplitude: 5.2, phase: 0.02)),
+            builder.makeTemplate(label: "punch-c", kind: .burst, samples: syntheticBurst(duration: 0.96, amplitude: 4.8, phase: -0.02)),
+        ]
+    )
+    let eyePoseProfile = GestureProfileBuilder().makeProfile(
+        name: "eye-pose",
+        kind: .burst,
+        templates: [
+            builder.makeTemplate(label: "eye-a", kind: .burst, samples: syntheticYAxisBurst(duration: 1.0, amplitude: 5.0)),
+            builder.makeTemplate(label: "eye-b", kind: .burst, samples: syntheticYAxisBurst(duration: 1.04, amplitude: 5.15)),
+            builder.makeTemplate(label: "eye-c", kind: .burst, samples: syntheticYAxisBurst(duration: 0.88, amplitude: 4.85)),
+        ]
+    )
+    let samples = syntheticBurst(duration: 0.82, amplitude: 5.1, phase: 0.01)
+    let segment = GestureSegment(
+        kind: .burst,
+        samples: samples,
+        startTimestamp: 70,
+        endTimestamp: 70.82,
+        peakTimestamp: 70.44,
+        peakEnergy: 3.5,
+        features: MotionEnergyAnalyzer().features(for: samples)
+    )
+    var runtime = GestureRecognitionRuntime(profiles: [punchProfile, eyePoseProfile])
+
+    let event = runtime.recognize(segment: segment, now: 70.9)
+
+    #expect(event.triggered)
+    #expect(event.profile?.name == "punch")
+    let wrongReport = event.logEntry.candidateReports.first { $0.profileName == "eye-pose" }
+    #expect(wrongReport?.rejectReason == .trajectoryDistanceTooHigh || wrongReport?.rejectReason == .impulseDirectionMismatch)
+    #expect((wrongReport?.score ?? 1) <= 0.34)
+}
+
 @Test func profileFileStoreSavesListsLoadsAndDeletesArchives() throws {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("MotionSoundCoreTests-\(UUID().uuidString)", isDirectory: true)
