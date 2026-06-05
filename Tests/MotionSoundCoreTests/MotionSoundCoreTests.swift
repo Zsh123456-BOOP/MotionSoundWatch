@@ -663,6 +663,56 @@ import Foundation
     #expect((triggered?.evaluation.tokens.first?.integratedAngle ?? 0) > .pi * 1.5)
 }
 
+@Test func continuousEpisodeRecognizerDoesNotEmitRejectedCandidates() {
+    let template = MotionTemplateBuilder().makeTemplate(
+        label: "turn",
+        kind: .sequence,
+        samples: syntheticRotation(duration: 1.2, angle: .pi * 2)
+    )
+    let profile = GestureProfileBuilder().makeProfile(name: "turn", kind: .sequence, templates: [template])
+    let stream = syntheticRotation(duration: 2.0, angle: .pi * 1.05)
+    var runtime = GestureRecognitionRuntime(
+        profiles: [profile],
+        continuousEvaluationInterval: 0.02
+    )
+    var emitted: ContinuousRecognitionEvaluation?
+
+    for sample in stream {
+        if let evaluation = runtime.evaluateContinuous(sample: sample, now: sample.timestamp) {
+            emitted = evaluation
+            break
+        }
+    }
+
+    #expect(emitted == nil)
+}
+
+@Test func rotationRecognizerRoutesHighAngleOscillationLikeTokenAsRotation() {
+    let template = MotionTemplateBuilder().makeTemplate(
+        label: "turn",
+        kind: .sequence,
+        samples: syntheticRotation(duration: 1.4, angle: .pi * 2)
+    )
+    let profile = GestureProfileBuilder().makeProfile(name: "turn", kind: .sequence, templates: [template])
+    let samples = syntheticOscillatingRotation(duration: 2.3, angle: .pi * 2.05)
+    let segment = GestureSegment(
+        kind: .sequence,
+        samples: samples,
+        startTimestamp: 20,
+        endTimestamp: 22.3,
+        peakTimestamp: 21.1,
+        peakEnergy: 0.9,
+        features: MotionEnergyAnalyzer().features(for: samples)
+    )
+    var runtime = GestureRecognitionRuntime(profiles: [profile])
+
+    let event = runtime.recognize(segment: segment, now: 22.4)
+
+    #expect(event.candidate?.recognizerKind == .rotation)
+    #expect(event.logEntry.classifiedKind == .rotation)
+    #expect((event.logEntry.tokens.first?.integratedAngle ?? 0) > .pi * 1.5)
+}
+
 @Test func trajectoryRecognizerTreatsDistanceThresholdAsTriggerBoundary() {
     let builder = MotionTemplateBuilder()
     var profile = GestureProfileBuilder().makeProfile(
@@ -1496,6 +1546,38 @@ private func syntheticRotation(
         return MotionSample(
             timestamp: timestamp,
             userAcceleration: MotionVector3(x: wobble * 0.2, y: wobble * 0.1, z: 0.02 * cos(progress * .pi * 2)),
+            rotationRate: rotation
+        )
+    }
+}
+
+private func syntheticOscillatingRotation(
+    duration: Double,
+    angle: Double,
+    sampleRate: Double = 50,
+    axis: Int = 2
+) -> [MotionSample] {
+    let count = max(12, Int(duration * sampleRate))
+    let interval = duration / Double(count - 1)
+    let baseVelocity = angle / duration
+    return (0..<count).map { index in
+        let progress = Double(index) / Double(count - 1)
+        let timestamp = Double(index) * interval
+        let sign = sin(progress * .pi * 4) >= 0 ? 1.0 : -1.0
+        let velocity = baseVelocity * sign
+        let wobble = 0.02 * cos(progress * .pi * 6)
+        let rotation: MotionVector3
+        switch axis {
+        case 0:
+            rotation = MotionVector3(x: velocity, y: wobble, z: wobble * 0.5)
+        case 1:
+            rotation = MotionVector3(x: wobble, y: velocity, z: wobble * 0.5)
+        default:
+            rotation = MotionVector3(x: wobble, y: wobble * 0.5, z: velocity)
+        }
+        return MotionSample(
+            timestamp: timestamp,
+            userAcceleration: MotionVector3(x: wobble * 0.2, y: wobble * 0.1, z: 0.03 * sin(progress * .pi * 2)),
             rotationRate: rotation
         )
     }

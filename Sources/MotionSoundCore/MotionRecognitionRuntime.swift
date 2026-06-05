@@ -258,11 +258,8 @@ public struct GestureRecognitionRuntime: Sendable {
             }
         }
 
-        guard let best else { return nil }
-        if best.evaluation.candidate?.shouldTrigger == true {
-            return best
-        }
-        guard bestScore >= 0.42 else {
+        guard let best,
+              best.evaluation.candidate?.shouldTrigger == true else {
             return nil
         }
         return best
@@ -320,13 +317,14 @@ public struct GestureRecognitionRuntime: Sendable {
 
     private func isContinuousEpisodeProfile(_ profile: GestureProfile) -> Bool {
         guard let signature = profile.signature else { return false }
-        if signature.rotation != nil || signature.oscillation != nil || signature.hold != nil {
+        switch signature.primaryKind {
+        case .rotation, .oscillation, .hold:
             return true
+        case .free:
+            return signature.rotation != nil || signature.oscillation != nil || signature.hold != nil
+        case .impulse, .sweep, .pause:
+            return false
         }
-        if profile.kind == .sequence || profile.kind == .combo {
-            return averageTemplateDuration(profile) >= 1.2
-        }
-        return false
     }
 
     private func continuousDurations(for profile: GestureProfile) -> [Double] {

@@ -633,17 +633,17 @@ public struct MotionTokenizer: Sendable {
             return .impulse
         }
 
-        if features.zeroCrossingCount >= 3,
-           features.periodicityScore >= 0.35,
-           features.duration >= 0.45 {
-            return .oscillation
-        }
-
         if features.integratedRotationAngle >= .pi * 1.15,
            features.rotationAxisStability >= 0.55,
            features.zeroCrossingCount <= max(5, Int(features.duration * 2.5)),
            features.duration >= 0.45 {
             return .rotation
+        }
+
+        if features.zeroCrossingCount >= 3,
+           features.periodicityScore >= 0.35,
+           features.duration >= 0.45 {
+            return .oscillation
         }
 
         if features.directionalityScore >= 0.42,
@@ -1822,14 +1822,14 @@ public struct MotionRecognitionRouter: Sendable {
         features: GestureSampleFeatures? = nil
     ) -> MotionTokenKind {
         guard let token else { return signature.primaryKind }
-        if token.kind == signature.primaryKind || signature.secondaryKinds.contains(token.kind) {
-            return token.kind
-        }
         if signature.rotation != nil,
            (token.kind == .oscillation || token.kind == .free),
            let features,
            features.integratedRotationAngle >= max(.pi * 0.75, (signature.rotation?.totalAngleRadians ?? .pi * 2) * 0.45) {
             return .rotation
+        }
+        if token.kind == signature.primaryKind || signature.secondaryKinds.contains(token.kind) {
+            return token.kind
         }
         if signature.primaryKind == .free {
             return .free
