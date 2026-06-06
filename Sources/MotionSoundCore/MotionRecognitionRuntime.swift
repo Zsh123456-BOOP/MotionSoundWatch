@@ -553,6 +553,10 @@ public struct GestureRecognitionRuntime: Sendable {
         logs.removeAll(keepingCapacity: keepingCapacity)
     }
 
+    public mutating func markTriggered(profileID: UUID, at timestamp: Double) {
+        lastTriggerTimes[profileID] = timestamp
+    }
+
     public mutating func resetRuntimeState() {
         segmenter.reset()
         continuousBuffer.removeAll()

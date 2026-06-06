@@ -44,52 +44,18 @@ final class WatchMotionRecorder: ObservableObject {
     private let profileBuilder = GestureProfileBuilder()
     private let feedbackEngine = GestureFeedbackEngine()
     private let soundPlayer: WatchSoundPlayer?
-    private var segmenter = MotionGestureSegmenter(
-        configuration: GestureSegmenterConfiguration(
-            postRollDuration: 0.05,
-            endConfirmationDuration: 0.12,
-            cooldownDuration: 0.22
-        )
-    )
+    private let runtimeActor = MotionRuntimeActor()
     private var recognitionRuntime = GestureRecognitionRuntime()
-    private var recordingStartTimestamp: TimeInterval?
-    private var recordingPreviousRawTimestamp: TimeInterval?
-    private var recordingElapsedTimestamp: TimeInterval = 0
-    private var liveStartTimestamp: TimeInterval?
     private var standardTemplates: [MotionTemplate] = []
     private var standardNegativeTemplates: [MotionTemplate] = []
     private var standardLabel: String?
     private var standardKind: GestureKind?
     private var triggerCountsByProfileID: [UUID: Int] = [:]
-    private var rearmStatesByProfileID: [UUID: GestureRearmState] = [:]
-    private var lastMotionHeartbeatAt: TimeInterval = 0
     private var lastNoProfileSummaryLogAt: TimeInterval = -.infinity
     private var lastNonCandidateTraceAt: TimeInterval = -.infinity
-    private var recognitionSuppressedUntil: TimeInterval = 0
     private var motionCallbackCount = 0
-    private var firstMotionSampleLogged = false
     private var motionStartDiagnosticTask: Task<Void, Never>?
-    private var lastPublishedSampleAt: TimeInterval = -.infinity
     private var lastRecordingAssessmentAt: TimeInterval = -.infinity
-
-    private struct GestureRearmState {
-        var isArmed: Bool
-        var lastTriggerTimestamp: TimeInterval
-        var quietSinceTimestamp: TimeInterval?
-        var minimumCooldown: TimeInterval
-
-        init(
-            isArmed: Bool = true,
-            lastTriggerTimestamp: TimeInterval = -.infinity,
-            quietSinceTimestamp: TimeInterval? = nil,
-            minimumCooldown: TimeInterval = 0.9
-        ) {
-            self.isArmed = isArmed
-            self.lastTriggerTimestamp = lastTriggerTimestamp
-            self.quietSinceTimestamp = quietSinceTimestamp
-            self.minimumCooldown = minimumCooldown
-        }
-    }
 
     init(soundPlayer: WatchSoundPlayer? = nil) {
         self.soundPlayer = soundPlayer
@@ -119,6 +85,8 @@ final class WatchMotionRecorder: ObservableObject {
         }
 
         motionManager.deviceMotionUpdateInterval = 1 / sampleRate
+        let runtimeActor = runtimeActor
+        Task { await runtimeActor.configure(nominalSampleInterval: 1 / sampleRate) }
         motionManager.startDeviceMotionUpdates(to: motionQueue) { [weak self] motion, error in
             if let error {
                 AppDiagnostics.record(error: error, event: "watch.motion.callback.error")
@@ -129,8 +97,12 @@ final class WatchMotionRecorder: ObservableObject {
                 return
             }
             let rawSample = RawMotionSample(motion)
-            Task { @MainActor [weak self] in
-                self?.receive(rawSample)
+            Task { [weak self] in
+                let output = await runtimeActor.ingest(rawSample)
+                guard output.hasMainActorWork else { return }
+                await MainActor.run {
+                    self?.applyRuntimeOutput(output)
+                }
             }
         }
 
@@ -151,32 +123,23 @@ final class WatchMotionRecorder: ObservableObject {
         motionManager.stopDeviceMotionUpdates()
         isLive = false
         isRecording = false
-        liveStartTimestamp = nil
-        recordingStartTimestamp = nil
-        recordingPreviousRawTimestamp = nil
-        recordingElapsedTimestamp = 0
-        firstMotionSampleLogged = false
-        recognitionSuppressedUntil = 0
-        lastPublishedSampleAt = -.infinity
         lastRecordingAssessmentAt = -.infinity
+        Task { await runtimeActor.stop() }
         AppDiagnostics.record("watch.motion.stopLiveUpdates")
     }
 
     func startRecording() {
         samples.removeAll(keepingCapacity: true)
         lastAssessment = nil
-        recordingStartTimestamp = nil
-        recordingPreviousRawTimestamp = nil
-        recordingElapsedTimestamp = 0
         lastRecordingAssessmentAt = -.infinity
         estimatedSampleRate = 0
         lastSegment = nil
         savedProfileURL = nil
         savedRecordingURL = nil
-        segmenter.reset()
-        recognitionSuppressedUntil = (latestSample?.timestamp ?? 0) + 30
+        let recognitionSuppressedUntil = (latestSample?.timestamp ?? 0) + 30
         lastRecognitionSummary = "录制中，已暂停动作触发。"
         isRecording = true
+        Task { await runtimeActor.startRecording() }
         if !isLive {
             startLiveUpdates()
         }
@@ -191,6 +154,7 @@ final class WatchMotionRecorder: ObservableObject {
             let store = try GestureProfileFileStore.appDocumentsStore()
             let profiles = deduplicateProfiles(try store.list().flatMap(\.archive.profiles))
             recognitionRuntime.replaceProfiles(profiles)
+            Task { await runtimeActor.replaceProfiles(profiles) }
             triggerCountsByProfileID = triggerCountsByProfileID.filter { id, _ in
                 profiles.contains { $0.id == id }
             }
@@ -210,6 +174,7 @@ final class WatchMotionRecorder: ObservableObject {
         } catch {
             loadedProfileCount = 0
             lastFeedbackMessage = error.localizedDescription
+            Task { await runtimeActor.replaceProfiles([]) }
             AppDiagnostics.record(error: error, event: "watch.profiles.reload.error")
         }
     }
@@ -227,6 +192,14 @@ final class WatchMotionRecorder: ObservableObject {
         } else {
             lastFeedbackMessage = "等待 iPhone 同步动作库。"
             recognitionRuntime.resetRuntimeState()
+            Task { await runtimeActor.resetRuntimeState() }
+        }
+        Task {
+            await runtimeActor.updateProfileLibraryState(
+                isReady: isReady,
+                version: activeProfileLibraryVersion,
+                expectedProfileCount: expectedProfileCount
+            )
         }
         AppDiagnostics.record(
             "watch.profileLibrary.state",
@@ -274,6 +247,7 @@ final class WatchMotionRecorder: ObservableObject {
             let store = try GestureProfileFileStore.appDocumentsStore()
             _ = try store.save(archive, preferredName: "feedback-updated-profiles")
             recognitionRuntime.replaceProfiles(updatedProfiles)
+            Task { await runtimeActor.replaceProfiles(updatedProfiles) }
             loadedProfileCount = updatedProfiles.count
             lastFeedbackMessage = "已记录误触反馈并更新阈值"
             AppDiagnostics.record("watch.feedback.falseTriggerApplied", ["profileCount": updatedProfiles.count])
@@ -286,10 +260,8 @@ final class WatchMotionRecorder: ObservableObject {
     func stopRecording() -> [MotionSample] {
         isRecording = false
         lastAssessment = validator.assess(samples)
-        segmenter.reset()
-        if let latestSample {
-            recognitionSuppressedUntil = latestSample.timestamp + 1.25
-        }
+        let recognitionSuppressedUntil = (latestSample?.timestamp ?? 0) + 1.25
+        Task { await runtimeActor.stopRecording() }
         AppDiagnostics.record(
             "watch.recording.stop",
             [
@@ -512,75 +484,26 @@ final class WatchMotionRecorder: ObservableObject {
         )
     }
 
-    private func receive(_ rawSample: RawMotionSample) {
-        motionCallbackCount += 1
-        if liveStartTimestamp == nil {
-            liveStartTimestamp = rawSample.timestamp
+    private func applyRuntimeOutput(_ output: MotionRuntimeOutput) {
+        if let motionCallbackCount = output.motionCallbackCount {
+            self.motionCallbackCount = motionCallbackCount
         }
-        if isRecording, recordingStartTimestamp == nil {
-            recordingStartTimestamp = rawSample.timestamp
+        if let latestSample = output.latestSample {
+            self.latestSample = latestSample
         }
-
-        let liveSample = rawSample.makeSample(start: liveStartTimestamp)
-        publishLatestSampleIfNeeded(liveSample)
-        recordFirstMotionSampleIfNeeded(rawSample: rawSample, sample: liveSample)
-        recordMotionHeartbeatIfNeeded(sample: liveSample)
-        updateRearmStates(sample: liveSample)
-
-        if isRecording {
-            let recordingSample = normalizedRecordingSample(from: rawSample)
+        if let recordingSample = output.recordingSample {
             samples.append(recordingSample)
             updateRecordingAssessmentIfNeeded(sample: recordingSample)
-            return
         }
-
-        guard liveSample.timestamp >= recognitionSuppressedUntil else {
-            return
-        }
-
-        guard isProfileLibraryReady else {
-            recordRecognitionSuppressedIfNeeded(
-                sample: liveSample,
-                reason: "profileLibraryNotReady"
-            )
-            return
-        }
-
-        guard !recognitionRuntime.profiles.isEmpty else {
-            recordRecognitionSuppressedIfNeeded(
-                sample: liveSample,
-                reason: "noProfiles"
-            )
-            return
-        }
-
-        let continuousStart = ProcessInfo.processInfo.systemUptime
-        if let continuousEvaluation = recognitionRuntime.evaluateContinuous(sample: liveSample, now: liveSample.timestamp) {
-            let recognitionMs = (ProcessInfo.processInfo.systemUptime - continuousStart) * 1000
+        if let recognition = output.recognition {
             processRecognition(
-                segment: continuousEvaluation.segment,
-                evaluation: continuousEvaluation.evaluation,
-                liveSample: liveSample,
-                source: "continuous",
-                recognitionMs: recognitionMs
+                segment: recognition.segment,
+                evaluation: recognition.evaluation,
+                liveSample: recognition.liveSample,
+                source: recognition.source,
+                recognitionMs: recognition.recognitionMs
             )
-            if lastRecognitionEvent?.triggered == true {
-                return
-            }
         }
-
-        if let segment = segmenter.ingest(liveSample) {
-            let recognitionStart = ProcessInfo.processInfo.systemUptime
-            let evaluation = recognitionRuntime.evaluate(segment: segment, now: liveSample.timestamp)
-            let recognitionMs = (ProcessInfo.processInfo.systemUptime - recognitionStart) * 1000
-            processRecognition(segment: segment, evaluation: evaluation, liveSample: liveSample, source: "segment", recognitionMs: recognitionMs)
-        }
-    }
-
-    private func publishLatestSampleIfNeeded(_ sample: MotionSample) {
-        guard sample.timestamp - lastPublishedSampleAt >= 0.20 else { return }
-        lastPublishedSampleAt = sample.timestamp
-        latestSample = sample
     }
 
     private func updateRecordingAssessmentIfNeeded(sample: MotionSample) {
@@ -608,22 +531,8 @@ final class WatchMotionRecorder: ObservableObject {
             ]
         )
 
-        var candidate = evaluation.candidate
-        var rejectReason = evaluation.rejectReason
-        if candidate?.shouldTrigger == true,
-           let profile = candidate?.profile,
-           !isArmedForTrigger(profile: profile, at: liveSample.timestamp) {
-            candidate?.rejectReason = .cooldownActive
-            rejectReason = .cooldownActive
-            AppDiagnostics.record(
-                "watch.recognition.rearmBlocked",
-                [
-                    "profile": profile.name,
-                    "timestamp": liveSample.timestamp,
-                    "source": source,
-                ]
-            )
-        }
+        let candidate = evaluation.candidate
+        let rejectReason = evaluation.rejectReason
 
         lastBurstGateRejectionReason = evaluation.burstGateRejectionReason
         updateRecognitionSummary(segment: segment, candidate: candidate, rejectionReason: evaluation.burstGateRejectionReason)
@@ -651,7 +560,6 @@ final class WatchMotionRecorder: ObservableObject {
         if lastRecognitionEvent?.triggered == true {
             if let profile = lastRecognitionEvent?.profile {
                 triggerCountsByProfileID[profile.id, default: 0] += 1
-                markTriggered(profile: profile, at: liveSample.timestamp)
             }
             triggerCount += 1
             if audioPlayed {
@@ -703,115 +611,6 @@ final class WatchMotionRecorder: ObservableObject {
         )
     }
 
-    private func isArmedForTrigger(profile: GestureProfile, at timestamp: TimeInterval) -> Bool {
-        rearmStatesByProfileID[profile.id, default: GestureRearmState()].isArmed
-    }
-
-    private func markTriggered(profile: GestureProfile, at timestamp: TimeInterval) {
-        let cooldown = max(0.9, profile.cooldownSeconds)
-        rearmStatesByProfileID[profile.id] = GestureRearmState(
-            isArmed: false,
-            lastTriggerTimestamp: timestamp,
-            quietSinceTimestamp: nil,
-            minimumCooldown: cooldown
-        )
-    }
-
-    private func updateRearmStates(sample: MotionSample) {
-        guard !rearmStatesByProfileID.isEmpty else { return }
-        let energy = sample.userAcceleration.magnitude + 0.25 * sample.rotationRate.magnitude
-        let quietThreshold = 0.34
-        let quietDuration = 0.34
-        let maxLockedDuration = 3.5
-
-        for profileID in rearmStatesByProfileID.keys {
-            guard var state = rearmStatesByProfileID[profileID], !state.isArmed else {
-                continue
-            }
-
-            let elapsed = sample.timestamp - state.lastTriggerTimestamp
-            if elapsed >= maxLockedDuration {
-                state.isArmed = true
-                state.quietSinceTimestamp = nil
-                rearmStatesByProfileID[profileID] = state
-                AppDiagnostics.record("watch.recognition.rearmed", ["profileID": profileID.uuidString, "reason": "timeout"])
-                continue
-            }
-
-            guard elapsed >= state.minimumCooldown else {
-                state.quietSinceTimestamp = nil
-                rearmStatesByProfileID[profileID] = state
-                continue
-            }
-
-            if energy <= quietThreshold {
-                if state.quietSinceTimestamp == nil {
-                    state.quietSinceTimestamp = sample.timestamp
-                }
-                if let quietSince = state.quietSinceTimestamp,
-                   sample.timestamp - quietSince >= quietDuration {
-                    state.isArmed = true
-                    state.quietSinceTimestamp = nil
-                    AppDiagnostics.record(
-                        "watch.recognition.rearmed",
-                        [
-                            "profileID": profileID.uuidString,
-                            "reason": "quiet",
-                            "quietDuration": sample.timestamp - quietSince,
-                        ]
-                    )
-                }
-            } else {
-                state.quietSinceTimestamp = nil
-            }
-            rearmStatesByProfileID[profileID] = state
-        }
-    }
-
-    private func recordRecognitionSuppressedIfNeeded(sample: MotionSample, reason: String) {
-        guard sample.timestamp - lastNoProfileSummaryLogAt >= 5 else {
-            return
-        }
-        lastNoProfileSummaryLogAt = sample.timestamp
-        AppDiagnostics.record(
-            "watch.recognition.suppressed",
-            [
-                "reason": reason,
-                "profileLibraryReady": isProfileLibraryReady,
-                "profileLibraryVersion": activeProfileLibraryVersion,
-                "loadedProfileCount": loadedProfileCount,
-            ]
-        )
-    }
-
-    private func normalizedRecordingSample(from rawSample: RawMotionSample) -> MotionSample {
-        let nominalInterval = motionManager.deviceMotionUpdateInterval > 0
-            ? motionManager.deviceMotionUpdateInterval
-            : 0.02
-        if let previous = recordingPreviousRawTimestamp {
-            let rawDelta = rawSample.timestamp - previous
-            if rawDelta > 0, rawDelta <= 0.20 {
-                recordingElapsedTimestamp += rawDelta
-            } else {
-                recordingElapsedTimestamp += nominalInterval
-                if rawDelta > 0.50 {
-                    AppDiagnostics.record(
-                        "watch.recording.timestampGap.clamped",
-                        [
-                            "rawDelta": rawDelta,
-                            "nominalDelta": nominalInterval,
-                            "sampleCount": samples.count,
-                        ]
-                    )
-                }
-            }
-        } else {
-            recordingElapsedTimestamp = 0
-        }
-        recordingPreviousRawTimestamp = rawSample.timestamp
-        return rawSample.makeSample(timestamp: recordingElapsedTimestamp)
-    }
-
     private func scheduleMotionCallbackDiagnostic(previousCount: Int) {
         motionStartDiagnosticTask?.cancel()
         motionStartDiagnosticTask = Task { @MainActor in
@@ -835,20 +634,6 @@ final class WatchMotionRecorder: ObservableObject {
                 )
             }
         }
-    }
-
-    private func recordFirstMotionSampleIfNeeded(rawSample: RawMotionSample, sample: MotionSample) {
-        guard !firstMotionSampleLogged else { return }
-        firstMotionSampleLogged = true
-        AppDiagnostics.record(
-            "watch.motion.firstSample",
-            [
-                "rawTimestamp": rawSample.timestamp,
-                "liveTimestamp": sample.timestamp,
-                "acceleration": sample.userAcceleration.magnitude,
-                "rotation": sample.rotationRate.magnitude,
-            ]
-        )
     }
 
     private func persistRecognitionTraceIfNeeded(
@@ -1301,35 +1086,6 @@ final class WatchMotionRecorder: ObservableObject {
         ((try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate) ?? .distantPast
     }
 
-    private func recordMotionHeartbeatIfNeeded(sample: MotionSample) {
-        guard isLive else { return }
-        let now = sample.timestamp
-        guard now - lastMotionHeartbeatAt >= 2 else { return }
-        lastMotionHeartbeatAt = now
-
-        let accelerationMagnitude = sqrt(
-            sample.userAcceleration.x * sample.userAcceleration.x
-                + sample.userAcceleration.y * sample.userAcceleration.y
-                + sample.userAcceleration.z * sample.userAcceleration.z
-        )
-        let rotationMagnitude = sqrt(
-            sample.rotationRate.x * sample.rotationRate.x
-                + sample.rotationRate.y * sample.rotationRate.y
-                + sample.rotationRate.z * sample.rotationRate.z
-        )
-        AppDiagnostics.record(
-            "watch.motion.heartbeat",
-            [
-                "timestamp": sample.timestamp,
-                "acceleration": accelerationMagnitude,
-                "rotation": rotationMagnitude,
-                "isRecording": isRecording,
-                "profileCount": recognitionRuntime.profiles.count,
-                "loadedProfileCount": loadedProfileCount,
-            ]
-        )
-    }
-
     private func updateRecognitionSummary(
         segment: GestureSegment,
         candidate: RecognitionCandidate?,
@@ -1462,6 +1218,397 @@ private struct RawMotionSample: Sendable {
             rotationRate: rotationRate,
             gravity: gravity,
             attitude: attitude
+        )
+    }
+}
+
+private struct MotionRuntimeRecognition: Sendable {
+    var segment: GestureSegment
+    var evaluation: RecognitionEvaluation
+    var liveSample: MotionSample
+    var source: String
+    var recognitionMs: Double
+}
+
+private struct MotionRuntimeOutput: Sendable {
+    var latestSample: MotionSample?
+    var recordingSample: MotionSample?
+    var recognition: MotionRuntimeRecognition?
+    var motionCallbackCount: Int?
+
+    var hasMainActorWork: Bool {
+        latestSample != nil || recordingSample != nil || recognition != nil || motionCallbackCount != nil
+    }
+}
+
+private actor MotionRuntimeActor {
+    private var segmenter = MotionGestureSegmenter(
+        configuration: GestureSegmenterConfiguration(
+            postRollDuration: 0.05,
+            endConfirmationDuration: 0.12,
+            cooldownDuration: 0.22
+        )
+    )
+    private var recognitionRuntime = GestureRecognitionRuntime()
+    private var liveStartTimestamp: TimeInterval?
+    private var recordingPreviousRawTimestamp: TimeInterval?
+    private var recordingElapsedTimestamp: TimeInterval = 0
+    private var nominalSampleInterval: TimeInterval = 0.02
+    private var isRecording = false
+    private var isProfileLibraryReady = false
+    private var activeProfileLibraryVersion = ""
+    private var expectedProfileCount = 0
+    private var motionCallbackCount = 0
+    private var firstMotionSampleLogged = false
+    private var lastPublishedSampleAt: TimeInterval = -.infinity
+    private var lastMotionHeartbeatAt: TimeInterval = 0
+    private var lastSuppressedLogAt: TimeInterval = -.infinity
+    private var recognitionSuppressedUntil: TimeInterval = 0
+    private var rearmStatesByProfileID: [UUID: GestureRearmState] = [:]
+
+    private struct GestureRearmState: Sendable {
+        var isArmed: Bool
+        var lastTriggerTimestamp: TimeInterval
+        var quietSinceTimestamp: TimeInterval?
+        var minimumCooldown: TimeInterval
+
+        init(
+            isArmed: Bool = true,
+            lastTriggerTimestamp: TimeInterval = -.infinity,
+            quietSinceTimestamp: TimeInterval? = nil,
+            minimumCooldown: TimeInterval = 0.9
+        ) {
+            self.isArmed = isArmed
+            self.lastTriggerTimestamp = lastTriggerTimestamp
+            self.quietSinceTimestamp = quietSinceTimestamp
+            self.minimumCooldown = minimumCooldown
+        }
+    }
+
+    func configure(nominalSampleInterval: TimeInterval) {
+        self.nominalSampleInterval = max(0.005, nominalSampleInterval)
+    }
+
+    func replaceProfiles(_ profiles: [GestureProfile]) {
+        recognitionRuntime.replaceProfiles(profiles)
+        rearmStatesByProfileID = rearmStatesByProfileID.filter { id, _ in
+            profiles.contains { $0.id == id }
+        }
+        AppDiagnostics.record("watch.runtimeActor.profiles.replace", ["count": profiles.count])
+    }
+
+    func updateProfileLibraryState(isReady: Bool, version: String, expectedProfileCount: Int) {
+        isProfileLibraryReady = isReady
+        activeProfileLibraryVersion = version
+        self.expectedProfileCount = expectedProfileCount
+        if !isReady {
+            resetRuntimeState()
+        }
+    }
+
+    func resetRuntimeState() {
+        segmenter.reset()
+        recognitionRuntime.resetRuntimeState()
+        rearmStatesByProfileID.removeAll()
+        lastSuppressedLogAt = -.infinity
+    }
+
+    func startRecording() {
+        isRecording = true
+        recordingPreviousRawTimestamp = nil
+        recordingElapsedTimestamp = 0
+        segmenter.reset()
+        recognitionSuppressedUntil = (currentLiveTimestamp ?? 0) + 30
+        AppDiagnostics.record("watch.runtimeActor.recording.start", ["recognitionSuppressedUntil": recognitionSuppressedUntil])
+    }
+
+    func stopRecording() {
+        isRecording = false
+        recordingPreviousRawTimestamp = nil
+        recordingElapsedTimestamp = 0
+        segmenter.reset()
+        recognitionSuppressedUntil = (currentLiveTimestamp ?? 0) + 1.25
+        AppDiagnostics.record("watch.runtimeActor.recording.stop", ["recognitionSuppressedUntil": recognitionSuppressedUntil])
+    }
+
+    func stop() {
+        isRecording = false
+        liveStartTimestamp = nil
+        recordingPreviousRawTimestamp = nil
+        recordingElapsedTimestamp = 0
+        firstMotionSampleLogged = false
+        lastPublishedSampleAt = -.infinity
+        lastMotionHeartbeatAt = 0
+        lastSuppressedLogAt = -.infinity
+        recognitionSuppressedUntil = 0
+        resetRuntimeState()
+    }
+
+    func ingest(_ rawSample: RawMotionSample) -> MotionRuntimeOutput {
+        motionCallbackCount += 1
+        if liveStartTimestamp == nil {
+            liveStartTimestamp = rawSample.timestamp
+        }
+        let liveSample = rawSample.makeSample(start: liveStartTimestamp)
+        let latestSample = publishLatestSampleIfNeeded(liveSample)
+        var output = MotionRuntimeOutput(
+            latestSample: latestSample,
+            recordingSample: nil,
+            recognition: nil,
+            motionCallbackCount: latestSample == nil ? nil : motionCallbackCount
+        )
+
+        recordFirstMotionSampleIfNeeded(rawSample: rawSample, sample: liveSample)
+        recordMotionHeartbeatIfNeeded(sample: liveSample)
+        updateRearmStates(sample: liveSample)
+
+        if isRecording {
+            output.recordingSample = normalizedRecordingSample(from: rawSample)
+            output.motionCallbackCount = motionCallbackCount
+            return output
+        }
+
+        guard liveSample.timestamp >= recognitionSuppressedUntil else {
+            return output
+        }
+
+        guard isProfileLibraryReady else {
+            recordRecognitionSuppressedIfNeeded(sample: liveSample, reason: "profileLibraryNotReady")
+            return output
+        }
+
+        guard !recognitionRuntime.profiles.isEmpty else {
+            recordRecognitionSuppressedIfNeeded(sample: liveSample, reason: "noProfiles")
+            return output
+        }
+
+        if let recognition = evaluateContinuous(sample: liveSample) {
+            output.recognition = recognition
+            output.motionCallbackCount = motionCallbackCount
+            if recognition.evaluation.candidate?.shouldTrigger == true {
+                return output
+            }
+        }
+
+        if let segment = segmenter.ingest(liveSample) {
+            output.recognition = evaluate(segment: segment, liveSample: liveSample, source: "segment")
+            output.motionCallbackCount = motionCallbackCount
+        }
+        return output
+    }
+
+    private var currentLiveTimestamp: TimeInterval? {
+        guard let liveStartTimestamp else { return nil }
+        return ProcessInfo.processInfo.systemUptime - liveStartTimestamp
+    }
+
+    private func publishLatestSampleIfNeeded(_ sample: MotionSample) -> MotionSample? {
+        guard sample.timestamp - lastPublishedSampleAt >= 0.20 else { return nil }
+        lastPublishedSampleAt = sample.timestamp
+        return sample
+    }
+
+    private func evaluateContinuous(sample liveSample: MotionSample) -> MotionRuntimeRecognition? {
+        let start = ProcessInfo.processInfo.systemUptime
+        guard let continuous = recognitionRuntime.evaluateContinuous(sample: liveSample, now: liveSample.timestamp) else {
+            return nil
+        }
+        let recognitionMs = (ProcessInfo.processInfo.systemUptime - start) * 1000
+        let evaluation = applyRearmPolicy(
+            to: continuous.evaluation,
+            at: liveSample.timestamp,
+            source: "continuous"
+        )
+        return MotionRuntimeRecognition(
+            segment: continuous.segment,
+            evaluation: evaluation,
+            liveSample: liveSample,
+            source: "continuous",
+            recognitionMs: recognitionMs
+        )
+    }
+
+    private func evaluate(segment: GestureSegment, liveSample: MotionSample, source: String) -> MotionRuntimeRecognition {
+        let start = ProcessInfo.processInfo.systemUptime
+        let rawEvaluation = recognitionRuntime.evaluate(segment: segment, now: liveSample.timestamp)
+        let recognitionMs = (ProcessInfo.processInfo.systemUptime - start) * 1000
+        let evaluation = applyRearmPolicy(to: rawEvaluation, at: liveSample.timestamp, source: source)
+        return MotionRuntimeRecognition(
+            segment: segment,
+            evaluation: evaluation,
+            liveSample: liveSample,
+            source: source,
+            recognitionMs: recognitionMs
+        )
+    }
+
+    private func applyRearmPolicy(
+        to evaluation: RecognitionEvaluation,
+        at timestamp: TimeInterval,
+        source: String
+    ) -> RecognitionEvaluation {
+        var evaluation = evaluation
+        guard var candidate = evaluation.candidate,
+              candidate.shouldTrigger else {
+            return evaluation
+        }
+
+        if !isArmedForTrigger(profile: candidate.profile) {
+            candidate.rejectReason = .cooldownActive
+            evaluation.candidate = candidate
+            evaluation.rejectReason = .cooldownActive
+            AppDiagnostics.record(
+                "watch.recognition.rearmBlocked",
+                [
+                    "profile": candidate.profile.name,
+                    "timestamp": timestamp,
+                    "source": source,
+                ]
+            )
+            return evaluation
+        }
+
+        markTriggered(profile: candidate.profile, at: timestamp)
+        recognitionRuntime.markTriggered(profileID: candidate.profile.id, at: timestamp)
+        return evaluation
+    }
+
+    private func isArmedForTrigger(profile: GestureProfile) -> Bool {
+        rearmStatesByProfileID[profile.id, default: GestureRearmState()].isArmed
+    }
+
+    private func markTriggered(profile: GestureProfile, at timestamp: TimeInterval) {
+        let cooldown = max(0.9, profile.cooldownSeconds)
+        rearmStatesByProfileID[profile.id] = GestureRearmState(
+            isArmed: false,
+            lastTriggerTimestamp: timestamp,
+            quietSinceTimestamp: nil,
+            minimumCooldown: cooldown
+        )
+    }
+
+    private func updateRearmStates(sample: MotionSample) {
+        guard !rearmStatesByProfileID.isEmpty else { return }
+        let energy = sample.userAcceleration.magnitude + 0.25 * sample.rotationRate.magnitude
+        let quietThreshold = 0.34
+        let quietDuration = 0.34
+        let maxLockedDuration = 3.5
+
+        for profileID in rearmStatesByProfileID.keys {
+            guard var state = rearmStatesByProfileID[profileID], !state.isArmed else {
+                continue
+            }
+
+            let elapsed = sample.timestamp - state.lastTriggerTimestamp
+            if elapsed >= maxLockedDuration {
+                state.isArmed = true
+                state.quietSinceTimestamp = nil
+                rearmStatesByProfileID[profileID] = state
+                AppDiagnostics.record("watch.recognition.rearmed", ["profileID": profileID.uuidString, "reason": "timeout"])
+                continue
+            }
+
+            guard elapsed >= state.minimumCooldown else {
+                state.quietSinceTimestamp = nil
+                rearmStatesByProfileID[profileID] = state
+                continue
+            }
+
+            if energy <= quietThreshold {
+                if state.quietSinceTimestamp == nil {
+                    state.quietSinceTimestamp = sample.timestamp
+                }
+                if let quietSince = state.quietSinceTimestamp,
+                   sample.timestamp - quietSince >= quietDuration {
+                    state.isArmed = true
+                    state.quietSinceTimestamp = nil
+                    AppDiagnostics.record(
+                        "watch.recognition.rearmed",
+                        [
+                            "profileID": profileID.uuidString,
+                            "reason": "quiet",
+                            "quietDuration": sample.timestamp - quietSince,
+                        ]
+                    )
+                }
+            } else {
+                state.quietSinceTimestamp = nil
+            }
+            rearmStatesByProfileID[profileID] = state
+        }
+    }
+
+    private func normalizedRecordingSample(from rawSample: RawMotionSample) -> MotionSample {
+        if let previous = recordingPreviousRawTimestamp {
+            let rawDelta = rawSample.timestamp - previous
+            if rawDelta > 0, rawDelta <= 0.20 {
+                recordingElapsedTimestamp += rawDelta
+            } else {
+                recordingElapsedTimestamp += nominalSampleInterval
+                if rawDelta > 0.50 {
+                    AppDiagnostics.record(
+                        "watch.recording.timestampGap.clamped",
+                        [
+                            "rawDelta": rawDelta,
+                            "nominalDelta": nominalSampleInterval,
+                        ]
+                    )
+                }
+            }
+        } else {
+            recordingElapsedTimestamp = 0
+        }
+        recordingPreviousRawTimestamp = rawSample.timestamp
+        return rawSample.makeSample(timestamp: recordingElapsedTimestamp)
+    }
+
+    private func recordFirstMotionSampleIfNeeded(rawSample: RawMotionSample, sample: MotionSample) {
+        guard !firstMotionSampleLogged else { return }
+        firstMotionSampleLogged = true
+        AppDiagnostics.record(
+            "watch.motion.firstSample",
+            [
+                "rawTimestamp": rawSample.timestamp,
+                "liveTimestamp": sample.timestamp,
+                "acceleration": sample.userAcceleration.magnitude,
+                "rotation": sample.rotationRate.magnitude,
+                "runtime": "actor",
+            ]
+        )
+    }
+
+    private func recordMotionHeartbeatIfNeeded(sample: MotionSample) {
+        let now = sample.timestamp
+        guard now - lastMotionHeartbeatAt >= 2 else { return }
+        lastMotionHeartbeatAt = now
+        AppDiagnostics.record(
+            "watch.motion.heartbeat",
+            [
+                "timestamp": sample.timestamp,
+                "acceleration": sample.userAcceleration.magnitude,
+                "rotation": sample.rotationRate.magnitude,
+                "isRecording": isRecording,
+                "profileCount": recognitionRuntime.profiles.count,
+                "expectedProfileCount": expectedProfileCount,
+                "runtime": "actor",
+            ]
+        )
+    }
+
+    private func recordRecognitionSuppressedIfNeeded(sample: MotionSample, reason: String) {
+        guard sample.timestamp - lastSuppressedLogAt >= 5 else {
+            return
+        }
+        lastSuppressedLogAt = sample.timestamp
+        AppDiagnostics.record(
+            "watch.recognition.suppressed",
+            [
+                "reason": reason,
+                "profileLibraryReady": isProfileLibraryReady,
+                "profileLibraryVersion": activeProfileLibraryVersion,
+                "loadedProfileCount": recognitionRuntime.profiles.count,
+                "runtime": "actor",
+            ]
         )
     }
 }
