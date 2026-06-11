@@ -16,6 +16,37 @@ import Foundation
     #expect(longAssessment.warnings.contains { $0.contains("长动作") })
 }
 
+@Test func recordingQualityRejectsClearlyBadSamples() {
+    let validator = MotionRecordingValidator()
+    let lowAmplitude = syntheticBurst(duration: 0.7, amplitude: 0.03)
+
+    let report = validator.qualityReport(samples: lowAmplitude, draftKind: .burst)
+
+    #expect(report.canUseForTraining == false)
+    #expect(report.shouldAskRerecord)
+    #expect(report.energyScore < 0.18)
+    #expect(report.warnings.contains { $0.contains("动作幅度太低") })
+}
+
+@Test func recordingQualityFlagsSamplesThatDriftFromExistingPositives() {
+    let builder = MotionTemplateBuilder()
+    let positives = [
+        builder.makeTemplate(label: "punch", kind: .burst, samples: syntheticBurst(duration: 0.7, amplitude: 1.0)),
+        builder.makeTemplate(label: "punch", kind: .burst, samples: syntheticBurst(duration: 0.72, amplitude: 1.04, phase: 0.02)),
+    ]
+
+    let report = MotionRecordingValidator().qualityReport(
+        samples: syntheticRotation(duration: 1.4, angle: .pi * 2),
+        draftKind: .burst,
+        existingPositiveTemplates: positives
+    )
+
+    #expect(report.canUseForTraining == false)
+    #expect(report.shouldAskRerecord)
+    #expect(report.similarityToExistingSamples != nil)
+    #expect(report.warnings.contains { $0.contains("不一致") })
+}
+
 @Test func matcherScoresSimilarGestureCloserThanDifferentGesture() {
     let matcher = MotionTemplateMatcher()
     let template = syntheticBurst(duration: 0.8, amplitude: 1.0)
@@ -26,6 +57,26 @@ import Foundation
     let differentDistance = matcher.distance(template, different)
 
     #expect(similarDistance < differentDistance)
+}
+
+@Test func tokenizerCalibrationAllowsLightUserImpulse() {
+    let features = MotionFeatureExtractor().extract(syntheticBurst(duration: 0.7, amplitude: 0.38))
+    let calibration = TokenizerCalibration(
+        impulsePeakAccP20: 0.35,
+        impulsePeakGyroP20: 0.12
+    )
+
+    #expect(MotionTokenizer().classify(features, calibration: calibration) == .impulse)
+}
+
+@Test func dominantAxisEstimateSupportsDiagonalRotation() {
+    let samples = syntheticDiagonalRotation(duration: 1.2, angle: .pi * 2)
+    let estimate = MotionFeatureExtractor().dominantAxisEstimate(samples)
+
+    #expect(estimate.absoluteAngle > .pi * 1.8)
+    #expect(estimate.stability > 0.92)
+    #expect(abs(estimate.axis.x) > 0.45)
+    #expect(abs(estimate.axis.z) > 0.45)
 }
 
 @Test func calibrationUsesPositiveAndNegativeSamples() {
@@ -51,6 +102,26 @@ import Foundation
     #expect(calibration.threshold > calibration.positiveMaxDistance)
     #expect(positiveMatch?.shouldTrigger == true)
     #expect(negativeMatch?.shouldTrigger == false)
+}
+
+@Test func calibrationReportUsesLeaveOneOutAndHardNegatives() {
+    let matcher = MotionTemplateMatcher()
+    let builder = MotionTemplateBuilder()
+    let templates = [
+        builder.makeTemplate(label: "punch", kind: .burst, samples: syntheticBurst(duration: 0.7, amplitude: 1.0)),
+        builder.makeTemplate(label: "punch", kind: .burst, samples: syntheticBurst(duration: 0.72, amplitude: 1.04, phase: 0.02)),
+        builder.makeTemplate(label: "punch", kind: .burst, samples: syntheticBurst(duration: 0.68, amplitude: 0.98, phase: -0.02)),
+    ]
+    let negatives = [templates[0].samples]
+
+    let report = matcher.calibrationReport(
+        positiveTemplates: templates,
+        negativeWindows: negatives
+    )
+
+    #expect(report.positiveRecallEstimate >= 0.66)
+    #expect(report.hardNegativeCount > 0)
+    #expect(report.recommendedStrictness > 0.55)
 }
 
 @Test func singleTemplateCalibrationSupportsMVPTriggering() {
@@ -725,10 +796,11 @@ import Foundation
     var triggered: ContinuousRecognitionEvaluation?
 
     for sample in stream {
-        if let evaluation = runtime.evaluateContinuous(sample: sample, now: sample.timestamp),
-           evaluation.evaluation.candidate?.shouldTrigger == true {
-            triggered = evaluation
-            break
+        if let evaluation = runtime.evaluateContinuous(sample: sample, now: sample.timestamp) {
+            if evaluation.evaluation.candidate?.shouldTrigger == true {
+                triggered = evaluation
+                break
+            }
         }
     }
 
@@ -1246,6 +1318,48 @@ import Foundation
     #expect(runtime.lastTriggerTimes[profile.id] == 10.8)
 }
 
+@Test func recognitionRuntimeOnlyEvaluatesActiveProfiles() {
+    let templateBuilder = MotionTemplateBuilder()
+    let profileBuilder = GestureProfileBuilder()
+    let templates = [
+        templateBuilder.makeTemplate(label: "punch", kind: .burst, samples: syntheticBurst(duration: 0.70, amplitude: 1.0)),
+        templateBuilder.makeTemplate(label: "punch", kind: .burst, samples: syntheticBurst(duration: 0.73, amplitude: 1.03, phase: 0.03)),
+        templateBuilder.makeTemplate(label: "punch", kind: .burst, samples: syntheticBurst(duration: 0.68, amplitude: 0.97, phase: -0.03)),
+    ]
+    let activeProfile = profileBuilder.makeProfile(name: "active-punch", kind: .burst, templates: templates)
+    let inactiveProfile = profileBuilder.makeProfile(name: "inactive-punch", kind: .burst, templates: templates)
+    let samples = syntheticBurst(duration: 0.71, amplitude: 1.02)
+    let segment = GestureSegment(
+        kind: .burst,
+        samples: samples,
+        startTimestamp: 20,
+        endTimestamp: 20.71,
+        peakTimestamp: 20.32,
+        peakEnergy: 1.2,
+        features: MotionEnergyAnalyzer().features(for: samples)
+    )
+    var runtime = GestureRecognitionRuntime(
+        profiles: [activeProfile, inactiveProfile],
+        activeRecognitionSelection: .inactive
+    )
+
+    let noActiveEvaluation = runtime.evaluate(segment: segment, now: 20.8)
+    #expect(noActiveEvaluation.candidate == nil)
+    #expect(noActiveEvaluation.rejectReason == .noActiveProfile)
+
+    runtime.setActiveProfileIDs([activeProfile.id])
+    let activeEvaluation = runtime.evaluate(segment: segment, now: 20.9)
+    #expect(activeEvaluation.candidate?.profile.id == activeProfile.id)
+    #expect(activeEvaluation.candidate?.shouldTrigger == true)
+    #expect(activeEvaluation.candidate?.rejectReason != .marginTooSmall)
+    #expect(activeEvaluation.candidateReports.map(\.profileID) == [activeProfile.id])
+
+    runtime.setActiveProfileIDs([inactiveProfile.id])
+    let switchedEvaluation = runtime.evaluate(segment: segment, now: 21.0)
+    #expect(switchedEvaluation.candidate?.profile.id == inactiveProfile.id)
+    #expect(switchedEvaluation.candidateReports.map(\.profileID) == [inactiveProfile.id])
+}
+
 @Test func routedRecognitionRejectsLowScoreEvenWhenTrajectoryDistancePasses() {
     let templateBuilder = MotionTemplateBuilder()
     var profile = GestureProfileBuilder().makeProfile(
@@ -1342,6 +1456,57 @@ import Foundation
     #expect((trimmed.last?.timestamp ?? 0) - (trimmed.first?.timestamp ?? 0) < 1.6)
     #expect(trimmed.first?.timestamp == 0)
     #expect(features.peakAcceleration > 1.0)
+}
+
+@Test func activityTrimmerKeepsSlowRotationAngleProgress() {
+    var samples: [MotionSample] = []
+    let interval = 0.02
+    for index in 0..<60 {
+        samples.append(flatSample(timestamp: Double(index) * interval, acceleration: 0.005, rotation: 0.005))
+    }
+    let offset = Double(samples.count) * interval
+    samples.append(contentsOf: syntheticRotation(duration: 3.0, angle: .pi * 2, sampleRate: 50).map {
+        MotionSample(
+            timestamp: $0.timestamp + offset,
+            userAcceleration: $0.userAcceleration,
+            rotationRate: $0.rotationRate,
+            gravity: $0.gravity
+        )
+    })
+    let tailOffset = (samples.last?.timestamp ?? offset) + interval
+    for index in 0..<70 {
+        samples.append(flatSample(timestamp: tailOffset + Double(index) * interval, acceleration: 0.005, rotation: 0.005))
+    }
+
+    let trimmed = MotionSampleActivityTrimmer().trimForTemplate(
+        samples,
+        requestedKind: .sequence,
+        strategy: .rotationAngleWindow
+    )
+    let duration = (trimmed.last?.timestamp ?? 0) - (trimmed.first?.timestamp ?? 0)
+    let features = MotionFeatureExtractor().extract(trimmed)
+
+    #expect(trimmed.count < samples.count)
+    #expect(duration > 2.5)
+    #expect(duration < 3.6)
+    #expect(features.integratedRotationAngle > .pi * 1.6)
+}
+
+@Test func activityTrimmerKeepsHoldStableSuffix() {
+    let samples = syntheticHoldTransition(duration: 2.2, transitionDuration: 0.7, sampleRate: 50)
+
+    let trimmed = MotionSampleActivityTrimmer().trimForTemplate(
+        samples,
+        requestedKind: .posture,
+        strategy: .holdStableWindow
+    )
+    let duration = (trimmed.last?.timestamp ?? 0) - (trimmed.first?.timestamp ?? 0)
+    let features = MotionFeatureExtractor().extract(trimmed)
+
+    #expect(trimmed.count < samples.count)
+    #expect(duration > 1.2)
+    #expect(duration < 1.9)
+    #expect(features.holdStability > 0.70)
 }
 
 @Test func runtimeTrimsLongCandidateBeforeTrajectoryMatching() {
@@ -1778,6 +1943,56 @@ private func syntheticRotation(
             timestamp: timestamp,
             userAcceleration: MotionVector3(x: wobble * 0.2, y: wobble * 0.1, z: 0.02 * cos(progress * .pi * 2)),
             rotationRate: rotation
+        )
+    }
+}
+
+private func syntheticDiagonalRotation(
+    duration: Double,
+    angle: Double,
+    sampleRate: Double = 50
+) -> [MotionSample] {
+    let count = max(12, Int(duration * sampleRate))
+    let angularVelocity = angle / duration
+    let axisScale = 1.0 / sqrt(2.0)
+    return (0..<count).map { index in
+        let progress = Double(index) / Double(count - 1)
+        let timestamp = progress * duration
+        let wobble = 0.015 * sin(progress * .pi * 4)
+        return MotionSample(
+            timestamp: timestamp,
+            userAcceleration: MotionVector3(x: wobble, y: wobble * 0.5, z: wobble),
+            rotationRate: MotionVector3(
+                x: angularVelocity * axisScale,
+                y: wobble,
+                z: angularVelocity * axisScale
+            )
+        )
+    }
+}
+
+private func syntheticHoldTransition(
+    duration: Double,
+    transitionDuration: Double,
+    sampleRate: Double = 50
+) -> [MotionSample] {
+    let count = max(12, Int(duration * sampleRate))
+    return (0..<count).map { index in
+        let progress = Double(index) / Double(count - 1)
+        let timestamp = progress * duration
+        let movementProgress = min(1, timestamp / transitionDuration)
+        let pulse = timestamp <= transitionDuration
+            ? exp(-pow((movementProgress - 0.45) * 5, 2))
+            : 0
+        return MotionSample(
+            timestamp: timestamp,
+            userAcceleration: MotionVector3(x: pulse * 0.35, y: pulse * 0.12, z: 0.02),
+            rotationRate: MotionVector3(x: pulse * 0.18, y: pulse * 0.12, z: pulse * 0.08),
+            gravity: MotionVector3(
+                x: 0.2 * movementProgress,
+                y: 0.4 * movementProgress,
+                z: -1 + 0.08 * movementProgress
+            )
         )
     }
 }

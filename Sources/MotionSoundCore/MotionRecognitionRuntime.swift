@@ -62,6 +62,7 @@ public struct GestureRecognitionRuntime: Sendable {
     public var burstGate: MotionBurstGate
     public var router: MotionRecognitionRouter
     public var continuousEvaluationInterval: Double
+    public private(set) var activeRecognitionSelection: ActiveRecognitionSelection
     public private(set) var lastTriggerTimes: [UUID: Double]
     public private(set) var logs: [RecognitionLogEntry]
     private var continuousBuffer: MotionRingBuffer
@@ -73,7 +74,8 @@ public struct GestureRecognitionRuntime: Sendable {
         segmenter: MotionGestureSegmenter = MotionGestureSegmenter(),
         burstGate: MotionBurstGate = MotionBurstGate(),
         router: MotionRecognitionRouter = MotionRecognitionRouter(),
-        continuousEvaluationInterval: Double = 0.18
+        continuousEvaluationInterval: Double = 0.18,
+        activeRecognitionSelection: ActiveRecognitionSelection? = nil
     ) {
         self.profiles = profiles
         self.matcher = matcher
@@ -81,6 +83,8 @@ public struct GestureRecognitionRuntime: Sendable {
         self.burstGate = burstGate
         self.router = router
         self.continuousEvaluationInterval = continuousEvaluationInterval
+        self.activeRecognitionSelection = activeRecognitionSelection
+            ?? ActiveRecognitionSelection(mode: .allProfiles, activeProfileIDs: Set(profiles.map(\.id)))
         self.lastTriggerTimes = [:]
         self.logs = []
         self.continuousBuffer = MotionRingBuffer(maxDuration: 10)
@@ -92,6 +96,45 @@ public struct GestureRecognitionRuntime: Sendable {
         lastTriggerTimes = lastTriggerTimes.filter { id, _ in
             profiles.contains { $0.id == id }
         }
+        activeRecognitionSelection.activeProfileIDs = activeRecognitionSelection.activeProfileIDs.filter { id in
+            profiles.contains { $0.id == id }
+        }
+    }
+
+    public var activeProfileIDs: Set<UUID> {
+        activeRecognitionSelection.activeProfileIDs
+    }
+
+    public var activeProfiles: [GestureProfile] {
+        profilesForRecognition()
+    }
+
+    public mutating func setActiveProfileIDs(_ profileIDs: Set<UUID>) {
+        setActiveRecognitionSelection(ActiveRecognitionSelection(mode: .activeProfiles, activeProfileIDs: profileIDs))
+    }
+
+    public mutating func setActiveRecognitionSelection(_ selection: ActiveRecognitionSelection) {
+        let validIDs = Set(profiles.map(\.id))
+        var next = selection
+        next.activeProfileIDs = next.activeProfileIDs.intersection(validIDs)
+        guard next != activeRecognitionSelection else { return }
+        activeRecognitionSelection = next
+        continuousBuffer.removeAll()
+        lastContinuousEvaluationAt = -.infinity
+    }
+
+    private func profilesForRecognition() -> [GestureProfile] {
+        switch activeRecognitionSelection.mode {
+        case .allProfiles:
+            return profiles
+        case .activeProfiles:
+            guard !activeRecognitionSelection.activeProfileIDs.isEmpty else { return [] }
+            return profiles.filter { activeRecognitionSelection.activeProfileIDs.contains($0.id) }
+        }
+    }
+
+    private var shouldRejectForMissingActiveProfile: Bool {
+        activeRecognitionSelection.mode == .activeProfiles && profilesForRecognition().isEmpty
     }
 
     private func runtimeAdjustedProfile(_ profile: GestureProfile) -> GestureProfile {
@@ -237,7 +280,8 @@ public struct GestureRecognitionRuntime: Sendable {
         }
         lastContinuousEvaluationAt = timestamp
 
-        let eligible = profiles.filter(isContinuousEpisodeProfile)
+        let recognitionProfiles = profilesForRecognition()
+        let eligible = recognitionProfiles.filter(isContinuousEpisodeProfile)
         guard !eligible.isEmpty else { return nil }
         let candidateDurations = continuousCandidateDurations(from: eligible)
 
@@ -265,11 +309,16 @@ public struct GestureRecognitionRuntime: Sendable {
               best.evaluation.candidate?.shouldTrigger == true else {
             return nil
         }
+        continuousBuffer.removeAll(keepingCapacity: true)
+        lastContinuousEvaluationAt = timestamp
         return best
     }
 
     public func evaluate(segment: GestureSegment, now: Double? = nil) -> RecognitionEvaluation {
-        completedCandidateSegments(for: segment)
+        guard !shouldRejectForMissingActiveProfile else {
+            return RecognitionEvaluation(candidate: nil, rejectReason: .noActiveProfile)
+        }
+        return completedCandidateSegments(for: segment)
             .map { evaluateSingle(segment: $0, now: now) }
             .max { evaluationPriority($0) < evaluationPriority($1) }
             ?? evaluateSingle(segment: segment, now: now)
@@ -278,7 +327,7 @@ public struct GestureRecognitionRuntime: Sendable {
     private func evaluateSingle(segment: GestureSegment, now: Double? = nil) -> RecognitionEvaluation {
         let routed = router.evaluate(
             segment: segment,
-            profiles: profiles,
+            profiles: profilesForRecognition(),
             lastTriggerTimes: lastTriggerTimes,
             now: now,
             burstGate: burstGate
@@ -326,12 +375,29 @@ public struct GestureRecognitionRuntime: Sendable {
     private func continuousDurations(for profile: GestureProfile) -> [Double] {
         let expected = max(0.45, averageTemplateDuration(profile))
         var durations: Set<Int> = []
-        for multiplier in [0.72, 1.0, 1.35] {
+        let multipliers: [Double]
+        switch profile.signature?.primaryKind {
+        case .rotation:
+            multipliers = [0.55, 0.72, 1.0, 1.35, 1.80]
+        case .oscillation:
+            multipliers = [0.50, 0.72, 1.0, 1.25]
+        case .hold:
+            multipliers = [0.65, 1.0, 1.25]
+        default:
+            multipliers = [0.72, 1.0, 1.35]
+        }
+        for multiplier in multipliers {
             let duration = max(0.45, min(8.0, expected * multiplier))
             durations.insert(Int((duration * 100).rounded()))
         }
-        if profile.signature?.rotation != nil {
-            durations.insert(Int((min(8.0, max(1.2, expected * 1.8)) * 100).rounded()))
+        if let minAngle = profile.thresholds?.minAngle,
+           let rotation = profile.signature?.rotation,
+           rotation.totalAngleRadians > 0 {
+            let ratio = max(0.35, min(1.0, minAngle / rotation.totalAngleRadians))
+            durations.insert(Int((max(0.45, min(8.0, expected * ratio)) * 100).rounded()))
+        }
+        if let minHold = profile.thresholds?.minHoldDuration {
+            durations.insert(Int((max(0.45, min(8.0, minHold * 1.05)) * 100).rounded()))
         }
         return durations
             .map { Double($0) / 100.0 }
@@ -355,7 +421,7 @@ public struct GestureRecognitionRuntime: Sendable {
         let endingAt = segment.endTimestamp
         var durations = Set<Int>()
 
-        for profile in profiles {
+        for profile in profilesForRecognition() {
             let expected = max(0.35, averageTemplateDuration(profile))
             for multiplier in [0.85, 1.0, 1.18, 1.35] {
                 let duration = max(segment.duration, min(8.0, expected * multiplier))
@@ -413,7 +479,7 @@ public struct GestureRecognitionRuntime: Sendable {
     }
 
     public func eligibleProfiles(for segment: GestureSegment) -> [GestureProfile] {
-        let matchingProfiles = profiles.filter { $0.kind == segment.kind || $0.kind == .combo }
+        let matchingProfiles = profilesForRecognition().filter { $0.kind == segment.kind || $0.kind == .combo }
         return matchingProfiles.filter { burstGate.decision(for: segment, profile: $0).isAllowed }
     }
 

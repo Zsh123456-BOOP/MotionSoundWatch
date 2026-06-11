@@ -39,6 +39,17 @@ struct MotionDebugView: View {
                     triggerCount: recorder.triggerCount
                 )
 
+                if recorder.loadedProfileCount > 0 {
+                    WatchStatusPanel {
+                        Label("当前识别动作", systemImage: "scope")
+                            .foregroundStyle(.white)
+                        Text(recorder.activeRecognitionProfileName ?? "未选择")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(recorder.activeRecognitionProfileName == nil ? PajiTheme.pink : PajiTheme.cyan)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
                 if recorder.triggerCount > 0 {
                     WatchStatusPanel {
                         HStack {
@@ -158,6 +169,13 @@ struct MotionDebugView: View {
         }
         .onReceive(fileSender.$lastRecordingCommand.compactMap { $0 }) { command in
             handleRemoteRecordingCommand(command)
+        }
+        .onReceive(fileSender.$lastActiveProfileCommand.compactMap { $0 }) { command in
+            recorder.setActiveRecognitionProfile(
+                profileID: command.profileID,
+                name: command.name,
+                reason: command.reason ?? "phoneCommand"
+            )
         }
         .onDisappear {
             AppDiagnostics.record("watch.debugView.onDisappear")

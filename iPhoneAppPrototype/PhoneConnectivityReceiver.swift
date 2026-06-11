@@ -930,6 +930,60 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
     }
 
     @discardableResult
+    func sendSetActiveProfileCommand(profileID: UUID?, name: String?, reason: String = "manual") -> Bool {
+        guard let session else {
+            lastMessage = "当前设备不支持 WatchConnectivity"
+            AppDiagnostics.record("phone.profile.activeCommand.unsupported", ["profile": name ?? ""])
+            return false
+        }
+
+        var message: [String: Any] = [
+            "command": "setActiveProfile",
+            "reason": reason,
+            "sentAt": Date().timeIntervalSince1970,
+            "source": "MotionSoundPhone",
+        ]
+        if let profileID {
+            message["profileID"] = profileID.uuidString
+        }
+        if let name {
+            message["name"] = name
+        }
+
+        if session.isReachable {
+            session.sendMessage(message) { [weak self] reply in
+                let status = reply["status"] as? String
+                self?.lastMessage = status == "accepted"
+                    ? "Watch 已切换当前识别动作：\(name ?? profileID?.uuidString ?? "未选择")"
+                    : "Watch 回执异常"
+                AppDiagnostics.record(
+                    "phone.profile.activeCommand.reply",
+                    [
+                        "status": status ?? "",
+                        "profileID": profileID?.uuidString ?? "",
+                        "profile": name ?? "",
+                    ]
+                )
+            } errorHandler: { [weak self] error in
+                session.transferUserInfo(message)
+                self?.lastMessage = "Watch 当前不可达，已排队切换当前识别动作"
+                AppDiagnostics.record(
+                    "phone.profile.activeCommand.sendMessage.error",
+                    ["profile": name ?? "", "error": error.localizedDescription]
+                )
+            }
+            lastMessage = "已发送当前识别动作：\(name ?? profileID?.uuidString ?? "未选择")"
+            AppDiagnostics.record("phone.profile.activeCommand.sent", ["profile": name ?? "", "reachable": true])
+            return true
+        }
+
+        session.transferUserInfo(message)
+        lastMessage = "Watch 当前不可达，已排队切换当前识别动作"
+        AppDiagnostics.record("phone.profile.activeCommand.queued", ["profile": name ?? "", "reachable": false])
+        return true
+    }
+
+    @discardableResult
     private func sendFile(
         _ sourceURL: URL,
         kind: SyncedFileKind,

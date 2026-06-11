@@ -2,6 +2,12 @@ import Foundation
 import WatchConnectivity
 import CryptoKit
 
+struct ActiveProfileSelectionCommand: Equatable {
+    var profileID: UUID?
+    var name: String?
+    var reason: String?
+}
+
 @MainActor
 final class WatchConnectivityFileSender: NSObject, ObservableObject {
     @Published private(set) var isSupported = WCSession.isSupported()
@@ -11,6 +17,7 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
     @Published private(set) var receivedSoundFiles: [URL] = []
     @Published private(set) var lastReceivedProfileURL: URL?
     @Published private(set) var lastRecordingCommand: RecordingControlCommand?
+    @Published private(set) var lastActiveProfileCommand: ActiveProfileSelectionCommand?
     @Published private(set) var runtimePrepareRequestCount = 0
     @Published private(set) var profileLibraryChangeCount = 0
     @Published private(set) var profileLibraryStateChangeCount = 0
@@ -553,6 +560,26 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
         )
     }
 
+    private func receiveActiveProfileCommand(profileID: String?, name: String?, reason: String?) {
+        let command = ActiveProfileSelectionCommand(
+            profileID: profileID.flatMap(UUID.init(uuidString:)),
+            name: name?.trimmingCharacters(in: .whitespacesAndNewlines),
+            reason: reason
+        )
+        lastActiveProfileCommand = command
+        lastTransferMessage = command.profileID == nil && (command.name ?? "").isEmpty
+            ? "已清空当前识别动作"
+            : "已切换当前识别动作：\(command.name ?? command.profileID?.uuidString ?? "")"
+        AppDiagnostics.record(
+            "watch.connectivity.activeProfile.received",
+            [
+                "profileID": command.profileID?.uuidString ?? "",
+                "name": command.name ?? "",
+                "reason": reason ?? "",
+            ]
+        )
+    }
+
     private func receiveDeleteProfile(profileID: String?, name: String?, kind: String?) {
         do {
             let store = try GestureProfileFileStore.appDocumentsStore()
@@ -852,6 +879,10 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
                 receiveDeleteProfile(profileID: profileID, name: name, kind: kind)
                 return
             }
+            if command == "setActiveProfile" {
+                receiveActiveProfileCommand(profileID: profileID, name: name, reason: reason)
+                return
+            }
             guard command == "recordingControl" else { return }
             receiveRecordingCommand(
                 action: action,
@@ -944,6 +975,18 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
             return
         }
 
+        if command == "setActiveProfile" {
+            replyHandler([
+                "status": "accepted",
+                "command": "setActiveProfile",
+                "receivedAt": Date().timeIntervalSince1970,
+            ])
+            Task { @MainActor in
+                receiveActiveProfileCommand(profileID: profileID, name: name, reason: reason)
+            }
+            return
+        }
+
         guard command == "recordingControl",
               RecordingControlAction(rawValue: action ?? "") != nil else {
             replyHandler([
@@ -1006,6 +1049,10 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
             }
             if command == "deleteProfile" {
                 receiveDeleteProfile(profileID: profileID, name: name, kind: kind)
+                return
+            }
+            if command == "setActiveProfile" {
+                receiveActiveProfileCommand(profileID: profileID, name: name, reason: reason)
                 return
             }
             guard command == "recordingControl" else { return }

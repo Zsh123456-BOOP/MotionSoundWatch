@@ -298,19 +298,62 @@ public struct RecordingAssessment: Equatable, Sendable {
     }
 }
 
+public struct RecordingQualityReport: Codable, Equatable, Sendable {
+    public var canUseForTraining: Bool
+    public var shouldAskRerecord: Bool
+    public var detectedKind: MotionTokenKind
+    public var duration: Double
+    public var sampleRate: Double
+    public var energyScore: Double
+    public var stabilityScore: Double
+    public var clippingRisk: Double
+    public var similarityToExistingSamples: Double?
+    public var warnings: [String]
+    public var errors: [String]
+
+    public init(
+        canUseForTraining: Bool,
+        shouldAskRerecord: Bool,
+        detectedKind: MotionTokenKind,
+        duration: Double,
+        sampleRate: Double,
+        energyScore: Double,
+        stabilityScore: Double,
+        clippingRisk: Double,
+        similarityToExistingSamples: Double? = nil,
+        warnings: [String] = [],
+        errors: [String] = []
+    ) {
+        self.canUseForTraining = canUseForTraining
+        self.shouldAskRerecord = shouldAskRerecord
+        self.detectedKind = detectedKind
+        self.duration = duration
+        self.sampleRate = sampleRate
+        self.energyScore = energyScore
+        self.stabilityScore = stabilityScore
+        self.clippingRisk = clippingRisk
+        self.similarityToExistingSamples = similarityToExistingSamples
+        self.warnings = warnings
+        self.errors = errors
+    }
+}
+
 public struct MotionRecordingValidator: Sendable {
     public var shortDurationHint: Double
     public var longDurationHint: Double
     public var minimumSamples: Int
+    public var minimumSampleRate: Double
 
     public init(
         shortDurationHint: Double = 0.25,
         longDurationHint: Double = 4.0,
-        minimumSamples: Int = 12
+        minimumSamples: Int = 12,
+        minimumSampleRate: Double = 30
     ) {
         self.shortDurationHint = shortDurationHint
         self.longDurationHint = longDurationHint
         self.minimumSamples = minimumSamples
+        self.minimumSampleRate = minimumSampleRate
     }
 
     public func assess(_ samples: [MotionSample]) -> RecordingAssessment {
@@ -360,8 +403,132 @@ public struct MotionRecordingValidator: Sendable {
         )
     }
 
+    public func qualityReport(
+        samples: [MotionSample],
+        draftKind: GestureKind,
+        existingPositiveTemplates: [MotionTemplate] = [],
+        existingNegativeTemplates: [MotionTemplate] = []
+    ) -> RecordingQualityReport {
+        let assessment = assess(samples)
+        let extractor = MotionFeatureExtractor()
+        let tokenizer = MotionTokenizer()
+        let matcher = MotionTemplateMatcher()
+        let features = extractor.extract(samples)
+        let detectedKind = tokenizer.classify(features)
+
+        var warnings = assessment.warnings
+        let errors = assessment.errors
+        var shouldAskRerecord = false
+
+        if assessment.estimatedSampleRate > 0, assessment.estimatedSampleRate < minimumSampleRate {
+            warnings.append("采样率低于 \(Int(minimumSampleRate))Hz，建议重录以提升识别稳定性。")
+            shouldAskRerecord = true
+        }
+
+        if !Self.kind(detectedKind, matches: draftKind) {
+            warnings.append("这次动作和当前动作类型不一致，建议重录。")
+            shouldAskRerecord = true
+        }
+
+        let energyScore = min(1, max(features.peakAcc, features.meanAcc * 2.0) / 1.2)
+        if energyScore < 0.18 {
+            warnings.append("动作幅度太低，容易被日常移动淹没，建议重录。")
+            shouldAskRerecord = true
+        }
+
+        let stabilityScore = Self.stabilityScore(features: features, detectedKind: detectedKind)
+        let clippingRisk = Self.clippingRisk(samples)
+        if clippingRisk > 0.08 {
+            warnings.append("录制片段存在较高削顶风险，建议降低动作冲击或重录。")
+            shouldAskRerecord = true
+        }
+
+        let similarityToExistingSamples = existingPositiveTemplates
+            .map { matcher.distance($0.samples, samples) }
+            .min()
+        if let similarityToExistingSamples {
+            let positiveSpread = Self.positiveDistanceSpread(existingPositiveTemplates, matcher: matcher)
+            let farThreshold = max(0.42, positiveSpread * 1.8)
+            if similarityToExistingSamples > farThreshold {
+                warnings.append("这次动作和前几次不一致，建议重录。")
+                shouldAskRerecord = true
+            }
+        }
+
+        let nearestNegativeDistance = existingNegativeTemplates
+            .map { matcher.distance($0.samples, samples) }
+            .min()
+        if let nearestNegativeDistance, nearestNegativeDistance < 0.28 {
+            warnings.append("这次录制接近已有误触样本，误触风险高。")
+            shouldAskRerecord = true
+        }
+
+        let canUseForTraining = errors.isEmpty && !shouldAskRerecord
+        return RecordingQualityReport(
+            canUseForTraining: canUseForTraining,
+            shouldAskRerecord: shouldAskRerecord,
+            detectedKind: detectedKind,
+            duration: assessment.duration,
+            sampleRate: assessment.estimatedSampleRate,
+            energyScore: energyScore,
+            stabilityScore: stabilityScore,
+            clippingRisk: clippingRisk,
+            similarityToExistingSamples: similarityToExistingSamples,
+            warnings: warnings,
+            errors: errors
+        )
+    }
+
     private func peakEnergy(_ samples: [MotionSample]) -> Double {
         samples.map { $0.userAcceleration.magnitude + 0.25 * $0.rotationRate.magnitude }.max() ?? 0
+    }
+
+    private static func kind(_ detectedKind: MotionTokenKind, matches draftKind: GestureKind) -> Bool {
+        switch draftKind {
+        case .burst:
+            return detectedKind == .impulse || detectedKind == .sweep || detectedKind == .free
+        case .sequence:
+            return detectedKind == .rotation || detectedKind == .oscillation || detectedKind == .sweep || detectedKind == .free
+        case .posture:
+            return detectedKind == .hold || detectedKind == .pause || detectedKind == .free
+        case .combo:
+            return true
+        }
+    }
+
+    private static func stabilityScore(features: GestureSampleFeatures, detectedKind: MotionTokenKind) -> Double {
+        switch detectedKind {
+        case .rotation:
+            return features.rotationAxisStability
+        case .oscillation:
+            return features.periodicityScore
+        case .hold:
+            return features.holdStability
+        default:
+            return min(1, features.directionalityScore)
+        }
+    }
+
+    private static func clippingRisk(_ samples: [MotionSample]) -> Double {
+        guard !samples.isEmpty else { return 0 }
+        let clipped = samples.filter {
+            $0.userAcceleration.magnitude >= 2.7 || $0.rotationRate.magnitude >= 18
+        }.count
+        return Double(clipped) / Double(samples.count)
+    }
+
+    private static func positiveDistanceSpread(
+        _ templates: [MotionTemplate],
+        matcher: MotionTemplateMatcher
+    ) -> Double {
+        guard templates.count >= 2 else { return 0.24 }
+        var distances: [Double] = []
+        for i in templates.indices {
+            for j in templates.indices where j > i {
+                distances.append(matcher.distance(templates[i].samples, templates[j].samples))
+            }
+        }
+        return distances.max() ?? 0.24
     }
 }
 
@@ -428,6 +595,40 @@ public struct ThresholdCalibration: Equatable, Sendable {
     public var recommendedMarginThreshold: Double
 }
 
+public struct CalibrationReport: Codable, Equatable, Sendable {
+    public var threshold: Double
+    public var triggerScore: Double
+    public var marginScore: Double
+    public var positiveRecallEstimate: Double
+    public var negativeFalseTriggerEstimate: Double
+    public var separationScore: Double
+    public var hardNegativeCount: Int
+    public var recommendedStrictness: Double
+    public var warnings: [String]
+
+    public init(
+        threshold: Double,
+        triggerScore: Double,
+        marginScore: Double,
+        positiveRecallEstimate: Double,
+        negativeFalseTriggerEstimate: Double,
+        separationScore: Double,
+        hardNegativeCount: Int,
+        recommendedStrictness: Double,
+        warnings: [String] = []
+    ) {
+        self.threshold = threshold
+        self.triggerScore = triggerScore
+        self.marginScore = marginScore
+        self.positiveRecallEstimate = positiveRecallEstimate
+        self.negativeFalseTriggerEstimate = negativeFalseTriggerEstimate
+        self.separationScore = separationScore
+        self.hardNegativeCount = hardNegativeCount
+        self.recommendedStrictness = recommendedStrictness
+        self.warnings = warnings
+    }
+}
+
 public struct MotionTemplateMatcher: Sendable {
     public var targetSampleCount: Int
     public var sakoeChibaRadius: Int
@@ -483,13 +684,14 @@ public struct MotionTemplateMatcher: Sendable {
         negativeWindows: [[MotionSample]] = [],
         paddingRatio: Double = 0.18
     ) -> ThresholdCalibration {
+        let report = calibrationReport(positiveTemplates: positiveTemplates, negativeWindows: negativeWindows)
         guard positiveTemplates.count >= 2 else {
             return ThresholdCalibration(
-                threshold: 0.30,
+                threshold: report.threshold,
                 positiveMaxDistance: 0,
                 negativeMinDistance: nil,
-                margin: 0.30,
-                recommendedMarginThreshold: 0
+                margin: report.threshold,
+                recommendedMarginThreshold: report.marginScore
             )
         }
 
@@ -501,25 +703,126 @@ public struct MotionTemplateMatcher: Sendable {
         }
 
         let positiveMax = positiveDistances.max() ?? 0.25
-        let paddedPositive = max(positiveMax * (1 + paddingRatio), positiveMax + 0.05)
         let negativeMin = negativeWindows
             .flatMap { negative in positiveTemplates.map { distance($0.samples, negative) } }
             .min()
 
-        let threshold: Double
-        if let negativeMin {
-            threshold = min(paddedPositive, max(positiveMax + 0.02, negativeMin * 0.72))
-        } else {
-            threshold = paddedPositive
-        }
+        let threshold = min(report.threshold, negativeMin.map { max(positiveMax + 0.02, $0 * 0.88) } ?? report.threshold)
 
         return ThresholdCalibration(
             threshold: threshold,
             positiveMaxDistance: positiveMax,
             negativeMinDistance: negativeMin,
             margin: (negativeMin ?? threshold) - positiveMax,
-            recommendedMarginThreshold: max(0, ((negativeMin ?? threshold) - positiveMax) * 0.35)
+            recommendedMarginThreshold: max(report.marginScore, max(0, ((negativeMin ?? threshold) - positiveMax) * 0.25))
         )
+    }
+
+    public func calibrationReport(
+        positiveTemplates: [MotionTemplate],
+        negativeWindows: [[MotionSample]] = []
+    ) -> CalibrationReport {
+        var warnings: [String] = []
+        guard positiveTemplates.count >= 2 else {
+            warnings.append("单模板风险高，建议至少录制 3 次。")
+            return CalibrationReport(
+                threshold: 0.30,
+                triggerScore: 0.80,
+                marginScore: 0.14,
+                positiveRecallEstimate: positiveTemplates.isEmpty ? 0 : 1,
+                negativeFalseTriggerEstimate: 0,
+                separationScore: 0,
+                hardNegativeCount: negativeWindows.count,
+                recommendedStrictness: 0.72,
+                warnings: warnings
+            )
+        }
+
+        var leaveOneOutDistances: [Double] = []
+        for index in positiveTemplates.indices {
+            let candidate = positiveTemplates[index]
+            let others = positiveTemplates.enumerated()
+                .filter { $0.offset != index }
+                .map(\.element)
+            let nearest = others
+                .map { distance($0.samples, candidate.samples) }
+                .min()
+            if let nearest {
+                leaveOneOutDistances.append(nearest)
+            }
+        }
+
+        var pairwisePositiveDistances: [Double] = []
+        for i in positiveTemplates.indices {
+            for j in positiveTemplates.indices where j > i {
+                pairwisePositiveDistances.append(distance(positiveTemplates[i].samples, positiveTemplates[j].samples))
+            }
+        }
+
+        let positiveP50 = percentile(leaveOneOutDistances, pct: 0.50) ?? 0.20
+        let positiveP80 = percentile(leaveOneOutDistances, pct: 0.80) ?? positiveP50
+        let positiveP95 = percentile(leaveOneOutDistances, pct: 0.95) ?? positiveP80
+        let positiveMax = pairwisePositiveDistances.max() ?? positiveP95
+        if positiveMax > max(0.42, positiveP50 * 2.2) {
+            warnings.append("正样本内部差异过大，存在离群录制。")
+        }
+
+        let negativeDistances = negativeWindows.flatMap { negative in
+            positiveTemplates.map { distance($0.samples, negative) }
+        }
+        let negativeP05 = percentile(negativeDistances, pct: 0.05)
+        let negativeMin = negativeDistances.min()
+        let targetPositive = max(positiveP80 + 0.03, positiveP95 * 1.04)
+        let threshold: Double
+        if let negativeP05 {
+            threshold = min(targetPositive, max(positiveP80 + 0.015, negativeP05 * 0.82))
+        } else {
+            threshold = targetPositive
+        }
+
+        let positiveRecall = leaveOneOutDistances.isEmpty
+            ? 0
+            : Double(leaveOneOutDistances.filter { $0 <= threshold }.count) / Double(leaveOneOutDistances.count)
+        let negativeFalseTrigger = negativeDistances.isEmpty
+            ? 0
+            : Double(negativeDistances.filter { $0 <= threshold }.count) / Double(negativeDistances.count)
+        let separation = max(0, ((negativeP05 ?? threshold) - positiveP80) / max(negativeP05 ?? threshold, 0.0001))
+        let hardNegativeCount = negativeDistances.filter { $0 <= positiveP95 * 1.35 }.count
+
+        if let negativeMin, negativeMin <= positiveP95 {
+            warnings.append("正样本和负样本距离重叠，容易误触发。")
+        }
+        if negativeFalseTrigger > 0 {
+            warnings.append("负样本接近阈值，建议提高严格度或补充 hard negative。")
+        }
+
+        let strictness = min(1, max(0.35, 0.55 + Double(hardNegativeCount) * 0.04 + negativeFalseTrigger * 0.20 - separation * 0.10))
+        return CalibrationReport(
+            threshold: threshold,
+            triggerScore: min(0.90, max(0.58, 1 - threshold * 0.62 + strictness * 0.06)),
+            marginScore: max(0.04, separation * 0.18),
+            positiveRecallEstimate: positiveRecall,
+            negativeFalseTriggerEstimate: negativeFalseTrigger,
+            separationScore: separation,
+            hardNegativeCount: hardNegativeCount,
+            recommendedStrictness: strictness,
+            warnings: warnings
+        )
+    }
+
+    private func percentile(_ values: [Double], pct: Double) -> Double? {
+        let ordered = values.filter { $0.isFinite }.sorted()
+        guard !ordered.isEmpty else { return nil }
+        guard ordered.count > 1 else { return ordered[0] }
+        let clamped = max(0, min(1, pct))
+        let position = Double(ordered.count - 1) * clamped
+        let lower = Int(floor(position))
+        let upper = Int(ceil(position))
+        if lower == upper {
+            return ordered[lower]
+        }
+        let fraction = position - Double(lower)
+        return ordered[lower] * (1 - fraction) + ordered[upper] * fraction
     }
 
     private func bestTemplateDistance(

@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "root": "data/eval",
+  "layout": {
+    "positive": "User-confirmed executions of the target gesture.",
+    "negative": "Daily motions that should not trigger this gesture.",
+    "distractor": "Other saved gestures or similar non-target motions.",
+    "missed": "User-confirmed missed executions, pending promotion to positive.",
+    "false-trigger": "User-confirmed false triggers, treated as hard negatives."
+  },
+  "metrics": [
+    "recall",
+    "false_positive_rate",
+    "false_triggers_per_hour_estimate",
+    "average_latency",
+    "p50_recognitionMs",
+    "p95_recognitionMs",
+    "confusion_matrix",
+    "reject_reason_histogram",
+    "threshold_sweep"
+  ]
+}

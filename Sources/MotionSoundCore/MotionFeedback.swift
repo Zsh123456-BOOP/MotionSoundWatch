@@ -49,6 +49,10 @@ public struct GestureFeedbackEngine: Sendable {
             positiveTemplates: updated.templates,
             negativeWindows: updated.negativeTemplates.map(\.samples)
         )
+        let calibrationReport = matcher.calibrationReport(
+            positiveTemplates: updated.templates,
+            negativeWindows: updated.negativeTemplates.map(\.samples)
+        )
         let report = evaluator.evaluate(
             templates: updated.templates,
             negativeTemplates: updated.negativeTemplates
@@ -56,7 +60,13 @@ public struct GestureFeedbackEngine: Sendable {
 
         updated.acceptanceThreshold = calibration.threshold
         updated.marginThreshold = max(updated.marginThreshold, calibration.recommendedMarginThreshold)
-        updated.strictness = min(1, updated.strictness + 0.08)
+        updated.strictness = min(1, max(updated.strictness + 0.08, calibrationReport.recommendedStrictness))
+        if var thresholds = updated.thresholds {
+            thresholds.triggerScore = max(thresholds.triggerScore, calibrationReport.triggerScore)
+            thresholds.marginScore = max(thresholds.marginScore, calibrationReport.marginScore)
+            thresholds.strictness = max(thresholds.strictness, updated.strictness)
+            updated.thresholds = thresholds
+        }
         updated.quality = report.quality
         updated.updatedAt = updatedAt
         return updated

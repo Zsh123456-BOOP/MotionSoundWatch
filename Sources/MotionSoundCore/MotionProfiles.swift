@@ -120,6 +120,11 @@ public struct GestureQualityEvaluator: Sendable {
             positiveTemplates: templates,
             negativeWindows: negativeTemplates.map(\.samples)
         )
+        let calibrationReport = matcher.calibrationReport(
+            positiveTemplates: templates,
+            negativeWindows: negativeTemplates.map(\.samples)
+        )
+        warnings.append(contentsOf: calibrationReport.warnings)
 
         if let negativeMin = calibration.negativeMinDistance, negativeMin <= calibration.positiveMaxDistance {
             warnings.append("正样本和负样本距离重叠，容易误触发。")
@@ -349,17 +354,23 @@ public struct GestureProfileBuilder: Sendable {
             positiveTemplates: templates,
             negativeWindows: negativeTemplates.map(\.samples)
         )
+        let calibrationReport = matcher.calibrationReport(
+            positiveTemplates: templates,
+            negativeWindows: negativeTemplates.map(\.samples)
+        )
         let report = evaluator.evaluate(
             templates: templates,
             negativeTemplates: negativeTemplates,
             existingProfiles: existingProfiles
         )
         let signature = signatureBuilder.makeSignature(templates: templates)
-        let thresholds = signatureBuilder.makeThresholds(
+        var thresholds = signatureBuilder.makeThresholds(
             signature: signature,
             templateCount: templates.count,
-            strictness: strictness
+            strictness: max(strictness, calibrationReport.recommendedStrictness)
         )
+        thresholds.triggerScore = max(thresholds.triggerScore, calibrationReport.triggerScore)
+        thresholds.marginScore = max(thresholds.marginScore, calibrationReport.marginScore)
         let variants = variantBuilder.makeVariants(
             templates: templates,
             negativeTemplates: negativeTemplates,

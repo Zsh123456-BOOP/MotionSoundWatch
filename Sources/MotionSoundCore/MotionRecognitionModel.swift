@@ -29,9 +29,104 @@ public enum RejectReason: String, Codable, Equatable, Sendable {
     case marginTooSmall
     case cooldownActive
     case audioMissing
+    case noActiveProfile
     case trajectoryDistanceTooHigh
     case poseMismatch
     case stageMismatch
+}
+
+public enum RecognitionMode: String, Codable, Equatable, Sendable {
+    case allProfiles
+    case activeProfiles
+}
+
+public enum TrimStrategy: String, Codable, Sendable {
+    case impulsePeakWindow
+    case rotationAngleWindow
+    case oscillationCycleWindow
+    case holdStableWindow
+    case fullActiveWindow
+}
+
+public struct TokenizerCalibration: Codable, Equatable, Sendable {
+    public var impulsePeakAccP20: Double?
+    public var impulsePeakGyroP20: Double?
+    public var rotationAngleP20: Double?
+    public var rotationAxisStabilityP20: Double?
+    public var oscillationCountP20: Double?
+    public var periodicityP20: Double?
+    public var holdStabilityP20: Double?
+
+    public init(
+        impulsePeakAccP20: Double? = nil,
+        impulsePeakGyroP20: Double? = nil,
+        rotationAngleP20: Double? = nil,
+        rotationAxisStabilityP20: Double? = nil,
+        oscillationCountP20: Double? = nil,
+        periodicityP20: Double? = nil,
+        holdStabilityP20: Double? = nil
+    ) {
+        self.impulsePeakAccP20 = impulsePeakAccP20
+        self.impulsePeakGyroP20 = impulsePeakGyroP20
+        self.rotationAngleP20 = rotationAngleP20
+        self.rotationAxisStabilityP20 = rotationAxisStabilityP20
+        self.oscillationCountP20 = oscillationCountP20
+        self.periodicityP20 = periodicityP20
+        self.holdStabilityP20 = holdStabilityP20
+    }
+}
+
+public struct DominantAxisEstimate: Codable, Equatable, Sendable {
+    public var axis: MotionVector3
+    public var signedAngle: Double
+    public var absoluteAngle: Double
+    public var stability: Double
+
+    public init(axis: MotionVector3, signedAngle: Double, absoluteAngle: Double, stability: Double) {
+        self.axis = axis
+        self.signedAngle = signedAngle
+        self.absoluteAngle = absoluteAngle
+        self.stability = stability
+    }
+}
+
+public struct RecognitionFusionPolicy: Codable, Equatable, Sendable {
+    public var trajectoryWeight: Double
+    public var semanticWeight: Double
+    public var stageWeight: Double
+    public var poseWeight: Double
+    public var maxSoftDistanceRatio: Double
+    public var requireHardVetoPass: Bool
+
+    public init(
+        trajectoryWeight: Double = 0.52,
+        semanticWeight: Double = 0.26,
+        stageWeight: Double = 0.10,
+        poseWeight: Double = 0.10,
+        maxSoftDistanceRatio: Double = 1.30,
+        requireHardVetoPass: Bool = true
+    ) {
+        self.trajectoryWeight = trajectoryWeight
+        self.semanticWeight = semanticWeight
+        self.stageWeight = stageWeight
+        self.poseWeight = poseWeight
+        self.maxSoftDistanceRatio = maxSoftDistanceRatio
+        self.requireHardVetoPass = requireHardVetoPass
+    }
+}
+
+public struct ActiveRecognitionSelection: Codable, Equatable, Sendable {
+    public var mode: RecognitionMode
+    public var activeProfileIDs: Set<UUID>
+
+    public init(mode: RecognitionMode = .activeProfiles, activeProfileIDs: Set<UUID> = []) {
+        self.mode = mode
+        self.activeProfileIDs = activeProfileIDs
+    }
+
+    public static var inactive: ActiveRecognitionSelection {
+        ActiveRecognitionSelection(mode: .activeProfiles, activeProfileIDs: [])
+    }
 }
 
 public enum PlayTiming: String, Codable, Equatable, Sendable {
@@ -255,6 +350,8 @@ public struct GestureSignature: Codable, Equatable, Sendable {
     public var primaryKind: MotionTokenKind
     public var secondaryKinds: [MotionTokenKind]
     public var tokenPatterns: [MotionTokenPattern]
+    public var tokenizerCalibration: TokenizerCalibration?
+    public var fusionPolicy: RecognitionFusionPolicy?
     public var stages: [MotionStageSignature]?
     public var pose: MotionPoseSignature?
     public var impulse: ImpulseSignature?
@@ -267,6 +364,8 @@ public struct GestureSignature: Codable, Equatable, Sendable {
         primaryKind: MotionTokenKind,
         secondaryKinds: [MotionTokenKind] = [],
         tokenPatterns: [MotionTokenPattern] = [],
+        tokenizerCalibration: TokenizerCalibration? = nil,
+        fusionPolicy: RecognitionFusionPolicy? = nil,
         stages: [MotionStageSignature]? = nil,
         pose: MotionPoseSignature? = nil,
         impulse: ImpulseSignature? = nil,
@@ -278,6 +377,8 @@ public struct GestureSignature: Codable, Equatable, Sendable {
         self.primaryKind = primaryKind
         self.secondaryKinds = secondaryKinds
         self.tokenPatterns = tokenPatterns
+        self.tokenizerCalibration = tokenizerCalibration
+        self.fusionPolicy = fusionPolicy
         self.stages = stages
         self.pose = pose
         self.impulse = impulse
@@ -328,6 +429,7 @@ public struct ThresholdProfile: Codable, Equatable, Sendable {
     public var minOscillationCount: Double?
     public var minHoldDuration: Double?
     public var strictness: Double
+    public var fusionPolicy: RecognitionFusionPolicy?
 
     public init(
         triggerScore: Double = 0.68,
@@ -337,7 +439,8 @@ public struct ThresholdProfile: Codable, Equatable, Sendable {
         minAngle: Double? = nil,
         minOscillationCount: Double? = nil,
         minHoldDuration: Double? = nil,
-        strictness: Double = 0.5
+        strictness: Double = 0.5,
+        fusionPolicy: RecognitionFusionPolicy? = nil
     ) {
         self.triggerScore = triggerScore
         self.rejectScore = rejectScore
@@ -347,6 +450,7 @@ public struct ThresholdProfile: Codable, Equatable, Sendable {
         self.minOscillationCount = minOscillationCount
         self.minHoldDuration = minHoldDuration
         self.strictness = strictness
+        self.fusionPolicy = fusionPolicy
     }
 }
 
@@ -446,8 +550,8 @@ public struct MotionFeatureExtractor: Sendable {
 
         let axisData = dominantRotationAxis(samples)
         let projectedGyro = samples.map { dot($0.rotationRate, axisData.axis) }
-        let integratedSignedAngle = integrate(projectedGyro, samples: samples, absolute: false)
-        let integratedAbsAngle = integrate(projectedGyro, samples: samples, absolute: true)
+        let integratedSignedAngle = axisData.signedAngle
+        let integratedAbsAngle = axisData.absoluteAngle
         let zeroCrossings = zeroCrossingCount(projectedGyro, deadband: max(0.04, peakGyro * 0.08))
         let oscillationCount = Double(zeroCrossings) / 2.0
         let periodicity = periodicityScore(projectedGyro, zeroCrossings: zeroCrossings)
@@ -477,36 +581,94 @@ public struct MotionFeatureExtractor: Sendable {
         )
     }
 
-    private func dominantRotationAxis(_ samples: [MotionSample]) -> (axis: MotionVector3, stability: Double) {
+    public func dominantAxisEstimate(_ samples: [MotionSample]) -> DominantAxisEstimate {
+        dominantRotationAxis(samples)
+    }
+
+    private func dominantRotationAxis(_ samples: [MotionSample]) -> DominantAxisEstimate {
+        guard samples.count >= 2 else {
+            return DominantAxisEstimate(
+                axis: MotionVector3(x: 1, y: 0, z: 0),
+                signedAngle: 0,
+                absoluteAngle: 0,
+                stability: 0
+            )
+        }
+
+        var totalGyroEnergy = 0.0
+        for sample in samples {
+            let magnitude = sample.rotationRate.magnitude
+            totalGyroEnergy += magnitude * magnitude
+        }
+
+        var axis = principalGyroAxis(samples)
+        if axis.magnitude < 0.001 {
+            axis = discreteFallbackAxis(samples)
+        }
+
+        let projected = samples.map { dot($0.rotationRate, axis) }
+        let signedAngle = integrate(projected, samples: samples, absolute: false)
+        if signedAngle < 0 {
+            axis = MotionVector3(x: -axis.x, y: -axis.y, z: -axis.z)
+        }
+        let orientedProjected = samples.map { dot($0.rotationRate, axis) }
+        let orientedSignedAngle = integrate(orientedProjected, samples: samples, absolute: false)
+        let absoluteAngle = integrate(orientedProjected, samples: samples, absolute: true)
+        let projectionEnergy = orientedProjected.map { $0 * $0 }.reduce(0.0, +)
+        let stability = totalGyroEnergy > 0 ? min(1, projectionEnergy / totalGyroEnergy) : 0
+        return DominantAxisEstimate(
+            axis: axis,
+            signedAngle: orientedSignedAngle,
+            absoluteAngle: absoluteAngle,
+            stability: stability
+        )
+    }
+
+    private func principalGyroAxis(_ samples: [MotionSample]) -> MotionVector3 {
+        var xx = 0.0, xy = 0.0, xz = 0.0
+        var yy = 0.0, yz = 0.0, zz = 0.0
+        for sample in samples {
+            let g = sample.rotationRate
+            xx += g.x * g.x
+            xy += g.x * g.y
+            xz += g.x * g.z
+            yy += g.y * g.y
+            yz += g.y * g.z
+            zz += g.z * g.z
+        }
+
+        var axis = discreteFallbackAxis(samples)
+        for _ in 0..<8 {
+            let next = MotionVector3(
+                x: xx * axis.x + xy * axis.y + xz * axis.z,
+                y: xy * axis.x + yy * axis.y + yz * axis.z,
+                z: xz * axis.x + yz * axis.y + zz * axis.z
+            )
+            axis = normalized(next)
+            if axis.magnitude < 0.001 { break }
+        }
+        return axis
+    }
+
+    private func discreteFallbackAxis(_ samples: [MotionSample]) -> MotionVector3 {
         let totals = [
             samples.map { abs($0.rotationRate.x) }.reduce(0.0, +),
             samples.map { abs($0.rotationRate.y) }.reduce(0.0, +),
             samples.map { abs($0.rotationRate.z) }.reduce(0.0, +),
         ]
-        let total = max(totals.reduce(0.0, +), 0.0001)
         let maxIndex = totals.enumerated().max { $0.element < $1.element }?.offset ?? 0
-        let sign = averageAxisSign(samples, axis: maxIndex)
-        let axis: MotionVector3
-        switch maxIndex {
-        case 0:
-            axis = MotionVector3(x: sign, y: 0, z: 0)
-        case 1:
-            axis = MotionVector3(x: 0, y: sign, z: 0)
-        default:
-            axis = MotionVector3(x: 0, y: 0, z: sign)
-        }
-        return (axis, totals[maxIndex] / total)
-    }
-
-    private func averageAxisSign(_ samples: [MotionSample], axis: Int) -> Double {
-        let sum = samples.map { sample in
-            switch axis {
+        let sign = samples.map { sample in
+            switch maxIndex {
             case 0: return sample.rotationRate.x
             case 1: return sample.rotationRate.y
             default: return sample.rotationRate.z
             }
-        }.reduce(0.0, +)
-        return sum >= 0 ? 1 : -1
+        }.reduce(0.0, +) >= 0 ? 1.0 : -1.0
+        switch maxIndex {
+        case 0: return MotionVector3(x: sign, y: 0, z: 0)
+        case 1: return MotionVector3(x: 0, y: sign, z: 0)
+        default: return MotionVector3(x: 0, y: 0, z: sign)
+        }
     }
 
     private func integrate(_ values: [Double], samples: [MotionSample], absolute: Bool) -> Double {
@@ -518,6 +680,12 @@ public struct MotionFeatureExtractor: Sendable {
             output += (absolute ? abs(value) : value) * dt
         }
         return output
+    }
+
+    private func normalized(_ vector: MotionVector3) -> MotionVector3 {
+        let magnitude = vector.magnitude
+        guard magnitude >= 0.001 else { return MotionVector3(x: 0, y: 0, z: 0) }
+        return MotionVector3(x: vector.x / magnitude, y: vector.y / magnitude, z: vector.z / magnitude)
     }
 
     private func zeroCrossingCount(_ values: [Double], deadband: Double) -> Int {
@@ -663,8 +831,72 @@ public struct MotionTokenizer: Sendable {
         return makeToken(features: features, start: start, end: end)
     }
 
+    public func tokenize(segment: GestureSegment, calibration: TokenizerCalibration?) -> [MotionToken] {
+        guard let calibration else {
+            return tokenize(segment: segment)
+        }
+        let fullSegmentToken = makeToken(
+            features: extractor.extract(segment.samples),
+            start: segment.startTimestamp,
+            end: segment.endTimestamp,
+            calibration: calibration
+        )
+        guard segment.samples.count >= 8, segment.duration >= windowDuration * 1.35 else {
+            return [fullSegmentToken]
+        }
+
+        var rawTokens: [MotionToken] = []
+        var windowStartIndex = 0
+        while windowStartIndex < segment.samples.count - 2 {
+            let windowStart = segment.samples[windowStartIndex].timestamp
+            let windowEnd = windowStart + windowDuration
+            var windowEndIndex = windowStartIndex
+            while windowEndIndex + 1 < segment.samples.count,
+                  segment.samples[windowEndIndex + 1].timestamp <= windowEnd {
+                windowEndIndex += 1
+            }
+
+            let count = windowEndIndex - windowStartIndex + 1
+            if count >= 6 {
+                let samples = Array(segment.samples[windowStartIndex...windowEndIndex])
+                let token = makeToken(
+                    features: extractor.extract(samples),
+                    start: samples.first?.timestamp ?? windowStart,
+                    end: samples.last?.timestamp ?? windowEnd,
+                    calibration: calibration
+                )
+                if token.confidence >= 0.18 || token.kind == .pause {
+                    rawTokens.append(token)
+                }
+            }
+
+            let nextStart = windowStart + hopDuration
+            while windowStartIndex + 1 < segment.samples.count,
+                  segment.samples[windowStartIndex].timestamp < nextStart {
+                windowStartIndex += 1
+            }
+            if windowStartIndex >= segment.samples.count - 2 {
+                break
+            }
+        }
+
+        let merged = merge(tokens: rawTokens)
+        return merged.isEmpty
+            ? [fullSegmentToken]
+            : [fullSegmentToken] + merged
+    }
+
     private func makeToken(features: GestureSampleFeatures, start: Double, end: Double) -> MotionToken {
-        let kind = classify(features)
+        makeToken(features: features, start: start, end: end, calibration: nil)
+    }
+
+    private func makeToken(
+        features: GestureSampleFeatures,
+        start: Double,
+        end: Double,
+        calibration: TokenizerCalibration?
+    ) -> MotionToken {
+        let kind = classify(features, calibration: calibration)
         let direction = features.signedRotationAngle >= 0 ? 1.0 : -1.0
         let magnitude = tokenMagnitude(kind: kind, features: features)
         let confidence = tokenConfidence(kind: kind, features: features)
@@ -721,29 +953,41 @@ public struct MotionTokenizer: Sendable {
     }
 
     public func classify(_ features: GestureSampleFeatures) -> MotionTokenKind {
+        classify(features, calibration: nil)
+    }
+
+    public func classify(_ features: GestureSampleFeatures, calibration: TokenizerCalibration?) -> MotionTokenKind {
+        let impulsePeakAcc = max(0.18, (calibration?.impulsePeakAccP20 ?? 1.6) * 0.72)
+        let impulsePeakGyro = max(0.35, (calibration?.impulsePeakGyroP20 ?? 6.0) * 0.72)
+        let rotationAngle = max(.pi * 0.45, (calibration?.rotationAngleP20 ?? .pi * 1.15) * 0.70)
+        let rotationStability = max(0.38, (calibration?.rotationAxisStabilityP20 ?? 0.55) * 0.78)
+        let oscillationCount = max(1.0, (calibration?.oscillationCountP20 ?? 1.5) * 0.75)
+        let periodicity = max(0.24, (calibration?.periodicityP20 ?? 0.35) * 0.75)
+        let holdStability = max(0.58, (calibration?.holdStabilityP20 ?? 0.78) * 0.82)
+
         if features.duration >= 0.35,
-           features.holdStability >= 0.78,
+           features.holdStability >= holdStability,
            features.peakGyro < 0.45,
            features.peakAcc < 0.28 {
             return .hold
         }
 
-        if (features.peakAcc >= 1.6 || features.peakJerk >= 32 || features.peakGyro >= 6.0),
-           features.duration <= 2.2 {
-            return .impulse
-        }
-
-        if features.integratedRotationAngle >= .pi * 1.15,
-           features.rotationAxisStability >= 0.55,
+        if features.integratedRotationAngle >= rotationAngle,
+           features.rotationAxisStability >= rotationStability,
            features.zeroCrossingCount <= max(5, Int(features.duration * 2.5)),
            features.duration >= 0.45 {
             return .rotation
         }
 
-        if features.zeroCrossingCount >= 3,
-           features.periodicityScore >= 0.35,
+        if Double(features.zeroCrossingCount) / 2.0 >= oscillationCount,
+           features.periodicityScore >= periodicity,
            features.duration >= 0.45 {
             return .oscillation
+        }
+
+        if (features.peakAcc >= impulsePeakAcc || features.peakJerk >= 32 || features.peakGyro >= impulsePeakGyro),
+           features.duration <= 2.2 {
+            return .impulse
         }
 
         if features.directionalityScore >= 0.42,
@@ -1195,7 +1439,8 @@ public struct MotionPoseAnalyzer: Sendable {
 
         let terminalHoldMissing = signature.terminalHoldDuration >= 0.22
             && summary.terminalHoldDuration < signature.terminalHoldDuration * 0.35
-        let rejectReason: RejectReason? = terminalHoldMissing || (signature.confidence >= 0.62 && score < 0.36)
+        let endPoseMismatch = signature.confidence >= 0.50 && endScore < 0.62
+        let rejectReason: RejectReason? = terminalHoldMissing || endPoseMismatch || (signature.confidence >= 0.62 && score < 0.36)
             ? .poseMismatch
             : nil
         return MotionPoseMatchResult(score: score, rejectReason: rejectReason)
@@ -1233,20 +1478,24 @@ public struct GestureSignatureBuilder: Sendable {
 
     public func makeSignature(templates: [MotionTemplate]) -> GestureSignature {
         let templateFeatures = templates.map { extractor.extract($0.samples) }
+        let calibration = makeTokenizerCalibration(features: templateFeatures)
         let primary = primaryKind(features: templateFeatures)
         let secondary = secondaryKinds(features: templateFeatures, primary: primary)
         let patterns = templateFeatures.map {
-            MotionTokenPattern(
-                kind: tokenizer.classify($0),
+            let kind = tokenizer.classify($0, calibration: calibration)
+            return MotionTokenPattern(
+                kind: kind,
                 minDuration: max(0, $0.duration * 0.55),
                 maxDuration: max($0.duration * 1.65, 0.25),
-                expectedMagnitude: expectedMagnitude(kind: tokenizer.classify($0), features: $0)
+                expectedMagnitude: expectedMagnitude(kind: kind, features: $0)
             )
         }
         return GestureSignature(
             primaryKind: primary,
             secondaryKinds: secondary,
             tokenPatterns: patterns,
+            tokenizerCalibration: calibration,
+            fusionPolicy: makeFusionPolicy(primaryKind: primary, templateCount: templates.count),
             stages: stageExtractor.makeSignature(templates: templates),
             pose: poseAnalyzer.makeSignature(templates: templates),
             impulse: makeImpulseSignature(features: templateFeatures),
@@ -1286,12 +1535,14 @@ public struct GestureSignatureBuilder: Sendable {
             minAngle: signature.rotation.map { max(.pi * 0.75, $0.totalAngleRadians * 0.70) },
             minOscillationCount: signature.oscillation.map { max(0.5, $0.count * 0.55) },
             minHoldDuration: signature.hold.map { max(0.25, $0.duration * 0.65) },
-            strictness: strictness
+            strictness: strictness,
+            fusionPolicy: signature.fusionPolicy ?? makeFusionPolicy(primaryKind: signature.primaryKind, templateCount: templateCount)
         )
     }
 
     private func primaryKind(features: [GestureSampleFeatures]) -> MotionTokenKind {
-        let kinds = features.map { tokenizer.classify($0) }
+        let calibration = makeTokenizerCalibration(features: features)
+        let kinds = features.map { tokenizer.classify($0, calibration: calibration) }
         if let winner = Dictionary(grouping: kinds, by: { $0 })
             .max(by: { $0.value.count < $1.value.count })?.key {
             return winner
@@ -1300,12 +1551,77 @@ public struct GestureSignatureBuilder: Sendable {
     }
 
     private func secondaryKinds(features: [GestureSampleFeatures], primary: MotionTokenKind) -> [MotionTokenKind] {
-        let kinds = Array(Set(features.map { tokenizer.classify($0) })).filter { $0 != primary }
+        let calibration = makeTokenizerCalibration(features: features)
+        let kinds = Array(Set(features.map { tokenizer.classify($0, calibration: calibration) })).filter { $0 != primary }
         return kinds.sorted { $0.rawValue < $1.rawValue }
     }
 
+    private func makeTokenizerCalibration(features: [GestureSampleFeatures]) -> TokenizerCalibration {
+        TokenizerCalibration(
+            impulsePeakAccP20: percentile(features.map(\.peakAcc), pct: 0.20),
+            impulsePeakGyroP20: percentile(features.map(\.peakGyro), pct: 0.20),
+            rotationAngleP20: percentile(features.map(\.integratedRotationAngle), pct: 0.20),
+            rotationAxisStabilityP20: percentile(features.map(\.rotationAxisStability), pct: 0.20),
+            oscillationCountP20: percentile(features.map(\.oscillationCount), pct: 0.20),
+            periodicityP20: percentile(features.map(\.periodicityScore), pct: 0.20),
+            holdStabilityP20: percentile(features.map(\.holdStability), pct: 0.20)
+        )
+    }
+
+    private func makeFusionPolicy(primaryKind: MotionTokenKind, templateCount: Int) -> RecognitionFusionPolicy {
+        let qualityRelax = templateCount >= 3 ? 0.10 : 0
+        switch primaryKind {
+        case .rotation:
+            return RecognitionFusionPolicy(
+                trajectoryWeight: 0.24,
+                semanticWeight: 0.48,
+                stageWeight: 0.12,
+                poseWeight: 0.10,
+                maxSoftDistanceRatio: 2.20 + qualityRelax,
+                requireHardVetoPass: true
+            )
+        case .impulse, .sweep:
+            return RecognitionFusionPolicy(
+                trajectoryWeight: 0.58,
+                semanticWeight: 0.24,
+                stageWeight: 0.10,
+                poseWeight: 0.08,
+                maxSoftDistanceRatio: 1.22 + qualityRelax,
+                requireHardVetoPass: true
+            )
+        case .hold:
+            return RecognitionFusionPolicy(
+                trajectoryWeight: 0.24,
+                semanticWeight: 0.20,
+                stageWeight: 0.16,
+                poseWeight: 0.34,
+                maxSoftDistanceRatio: 1.15 + qualityRelax,
+                requireHardVetoPass: true
+            )
+        case .oscillation:
+            return RecognitionFusionPolicy(
+                trajectoryWeight: 0.34,
+                semanticWeight: 0.42,
+                stageWeight: 0.14,
+                poseWeight: 0.06,
+                maxSoftDistanceRatio: 1.38 + qualityRelax,
+                requireHardVetoPass: true
+            )
+        case .pause, .free:
+            return RecognitionFusionPolicy(
+                trajectoryWeight: 0.64,
+                semanticWeight: 0.18,
+                stageWeight: 0.08,
+                poseWeight: 0.06,
+                maxSoftDistanceRatio: 1.18,
+                requireHardVetoPass: true
+            )
+        }
+    }
+
     private func makeImpulseSignature(features: [GestureSampleFeatures]) -> ImpulseSignature? {
-        let impulses = features.filter { tokenizer.classify($0) == .impulse || $0.peakAcc >= 1.0 || $0.peakGyro >= 4.0 }
+        let calibration = makeTokenizerCalibration(features: features)
+        let impulses = features.filter { tokenizer.classify($0, calibration: calibration) == .impulse || $0.peakAcc >= 1.0 || $0.peakGyro >= 4.0 }
         guard !impulses.isEmpty else { return nil }
         return ImpulseSignature(
             mainAxis: averageAxis(impulses.map(\.dominantRotationAxis)),
@@ -1318,7 +1634,8 @@ public struct GestureSignatureBuilder: Sendable {
     }
 
     private func makeRotationSignature(features: [GestureSampleFeatures]) -> RotationSignature? {
-        let rotations = features.filter { tokenizer.classify($0) == .rotation || ($0.integratedRotationAngle >= .pi * 1.15 && $0.rotationAxisStability >= 0.55) }
+        let calibration = makeTokenizerCalibration(features: features)
+        let rotations = features.filter { tokenizer.classify($0, calibration: calibration) == .rotation || ($0.integratedRotationAngle >= .pi * 1.15 && $0.rotationAxisStability >= 0.55) }
         guard !rotations.isEmpty else { return nil }
         let angle = average(rotations.map(\.integratedRotationAngle))
         return RotationSignature(
@@ -1334,7 +1651,8 @@ public struct GestureSignatureBuilder: Sendable {
     }
 
     private func makeOscillationSignature(features: [GestureSampleFeatures]) -> OscillationSignature? {
-        let oscillations = features.filter { tokenizer.classify($0) == .oscillation || $0.oscillationCount >= 1.5 }
+        let calibration = makeTokenizerCalibration(features: features)
+        let oscillations = features.filter { tokenizer.classify($0, calibration: calibration) == .oscillation || $0.oscillationCount >= 1.5 }
         guard !oscillations.isEmpty else { return nil }
         return OscillationSignature(
             axis: averageAxis(oscillations.map(\.dominantRotationAxis)),
@@ -1346,7 +1664,8 @@ public struct GestureSignatureBuilder: Sendable {
     }
 
     private func makeHoldSignature(features: [GestureSampleFeatures]) -> HoldSignature? {
-        let holds = features.filter { tokenizer.classify($0) == .hold || $0.holdStability >= 0.78 }
+        let calibration = makeTokenizerCalibration(features: features)
+        let holds = features.filter { tokenizer.classify($0, calibration: calibration) == .hold || $0.holdStability >= 0.78 }
         guard !holds.isEmpty else { return nil }
         return HoldSignature(
             duration: average(holds.map(\.duration)),
@@ -1394,6 +1713,21 @@ public struct GestureSignatureBuilder: Sendable {
         let mean = average(values)
         let variance = values.map { pow($0 - mean, 2) }.reduce(0.0, +) / Double(values.count)
         return sqrt(variance)
+    }
+
+    private func percentile(_ values: [Double], pct: Double) -> Double? {
+        let ordered = values.filter { $0.isFinite }.sorted()
+        guard !ordered.isEmpty else { return nil }
+        guard ordered.count > 1 else { return ordered[0] }
+        let clamped = max(0, min(1, pct))
+        let position = Double(ordered.count - 1) * clamped
+        let lower = Int(floor(position))
+        let upper = Int(ceil(position))
+        if lower == upper {
+            return ordered[lower]
+        }
+        let fraction = position - Double(lower)
+        return ordered[lower] * (1 - fraction) + ordered[upper] * fraction
     }
 }
 
@@ -1715,7 +2049,14 @@ public struct MotionRecognitionRouter: Sendable {
             if !scopedTemplates.isEmpty {
                 scopedProfile.templates = scopedTemplates
             }
-            scopedProfile.signature = variant.signature
+            var scopedSignature = variant.signature
+            if scopedSignature.pose == nil {
+                scopedSignature.pose = profile.signature?.pose
+            }
+            if scopedSignature.stages == nil {
+                scopedSignature.stages = profile.signature?.stages
+            }
+            scopedProfile.signature = scopedSignature
             scopedProfile.thresholds = variant.thresholds
             scopedProfile.acceptanceThreshold = variant.acceptanceThreshold
             scopedProfile.marginThreshold = variant.marginThreshold
@@ -1731,7 +2072,10 @@ public struct MotionRecognitionRouter: Sendable {
         variant: GestureProfileVariant?
     ) -> (candidate: RecognitionCandidate, report: CandidateRecognitionReport)? {
         let matchingSegment = trimmedSegment(segment, for: profile)
-        let matchingTokens = tokenizer.tokenize(segment: matchingSegment)
+        let matchingTokens = tokenizer.tokenize(
+            segment: matchingSegment,
+            calibration: profile.signature?.tokenizerCalibration
+        )
         guard var match = matcher.bestMatch(
             profiles: [profile],
             candidateSamples: matchingSegment.samples
@@ -1772,7 +2116,8 @@ public struct MotionRecognitionRouter: Sendable {
                 poseScore: poseScore?.score,
                 poseConfidence: profile.signature?.pose?.confidence ?? 0,
                 stageCount: profile.signature?.stages?.count ?? 0,
-                recognizerKind: tokenScore?.candidate.recognizerKind
+                recognizerKind: tokenScore?.candidate.recognizerKind,
+                policy: profile.thresholds?.fusionPolicy ?? profile.signature?.fusionPolicy
             )
         }
         if let rejectReason {
@@ -1808,7 +2153,13 @@ public struct MotionRecognitionRouter: Sendable {
 
     private func trimmedSegment(_ segment: GestureSegment, for profile: GestureProfile) -> GestureSegment {
         let kind = trimmingKind(for: profile)
-        let samples = activityTrimmer.trimForTemplate(segment.samples, requestedKind: kind)
+        let samples = profile.signature?.pose == nil
+            ? activityTrimmer.trimForTemplate(
+                segment.samples,
+                requestedKind: kind,
+                strategy: trimStrategy(for: profile)
+            )
+            : segment.samples
         guard samples.count >= 2,
               let first = samples.first,
               let last = samples.last else {
@@ -1853,6 +2204,27 @@ public struct MotionRecognitionRouter: Sendable {
             return .posture
         case .pause, .free:
             return profile.kind
+        }
+    }
+
+    private func trimStrategy(for profile: GestureProfile) -> TrimStrategy? {
+        guard let primaryKind = profile.signature?.primaryKind else {
+            return nil
+        }
+        switch primaryKind {
+        case .impulse:
+            if profile.signature?.pose != nil {
+                return .fullActiveWindow
+            }
+            return .impulsePeakWindow
+        case .rotation:
+            return .rotationAngleWindow
+        case .oscillation:
+            return .oscillationCycleWindow
+        case .hold:
+            return .holdStableWindow
+        case .sweep, .pause, .free:
+            return .fullActiveWindow
         }
     }
 
@@ -1903,9 +2275,9 @@ public struct MotionRecognitionRouter: Sendable {
             }
             if match.distance > profile.acceptanceThreshold {
                 let distanceRatio = match.distance / max(profile.acceptanceThreshold, 0.0001)
-                let softDistanceAllowed = rotationSemanticPass
-                    ? distanceRatio <= 2.25 && semanticScore >= minimumSemanticScore
-                    : distanceRatio <= 1.30 && semanticScore >= minimumSemanticScore
+                let policy = profile.thresholds?.fusionPolicy ?? profile.signature?.fusionPolicy
+                let maxSoftRatio = policy?.maxSoftDistanceRatio ?? (rotationSemanticPass ? 2.25 : 1.30)
+                let softDistanceAllowed = distanceRatio <= maxSoftRatio && semanticScore >= minimumSemanticScore
                 if !softDistanceAllowed {
                     return .trajectoryDistanceTooHigh
                 }
@@ -1913,10 +2285,11 @@ public struct MotionRecognitionRouter: Sendable {
             if semanticScore < minimumSemanticScore {
                 return tokenResult.candidate.rejectReason ?? .scoreBelowThreshold
             }
-            if let stageScore, stageScore.score < 0.30 {
+            if let stageScore, stageScore.score < 0.38 {
                 return stageScore.rejectReason ?? .stageMismatch
             }
-            if let poseScore, poseScore.score < 0.30 {
+            let poseRejectScore = (profile.signature?.pose?.confidence ?? 0) >= 0.62 ? 0.48 : 0.30
+            if let poseScore, poseScore.score < poseRejectScore {
                 return poseScore.rejectReason ?? .poseMismatch
             }
         } else if match.distance > profile.acceptanceThreshold {
@@ -1939,10 +2312,11 @@ public struct MotionRecognitionRouter: Sendable {
         poseScore: Double?,
         poseConfidence: Double,
         stageCount: Int,
-        recognizerKind: MotionTokenKind?
+        recognizerKind: MotionTokenKind?,
+        policy: RecognitionFusionPolicy?
     ) -> Double {
-        let trajectoryWeight = recognizerKind == .rotation ? 0.24 : 0.52
-        let semanticWeight = recognizerKind == .rotation ? 0.48 : 0.26
+        let trajectoryWeight = policy?.trajectoryWeight ?? (recognizerKind == .rotation ? 0.24 : 0.52)
+        let semanticWeight = policy?.semanticWeight ?? (recognizerKind == .rotation ? 0.48 : 0.26)
         var weightedScores: [(weight: Double, score: Double)] = [
             (trajectoryWeight, trajectoryScore)
         ]
@@ -1950,11 +2324,11 @@ public struct MotionRecognitionRouter: Sendable {
             weightedScores.append((semanticWeight, semanticScore))
         }
         if let stageScore {
-            let weight = stageCount > 1 ? 0.17 : 0.10
+            let weight = policy?.stageWeight ?? (stageCount > 1 ? 0.17 : 0.10)
             weightedScores.append((weight, stageScore))
         }
         if let poseScore {
-            let weight = poseConfidence >= 0.62 ? 0.18 : 0.10
+            let weight = policy?.poseWeight ?? (poseConfidence >= 0.62 ? 0.18 : 0.10)
             weightedScores.append((weight, poseScore))
         }
         let totalWeight = weightedScores.map(\.weight).reduce(0.0, +)
@@ -1985,7 +2359,8 @@ public struct MotionRecognitionRouter: Sendable {
              .scoreBelowThreshold,
              .marginTooSmall,
              .cooldownActive,
-             .audioMissing:
+             .audioMissing,
+             .noActiveProfile:
             return nil
         case .trajectoryDistanceTooHigh:
             return rejectReason
@@ -2031,7 +2406,8 @@ public struct MotionRecognitionRouter: Sendable {
              .scoreBelowThreshold,
              .marginTooSmall,
              .cooldownActive,
-             .audioMissing:
+             .audioMissing,
+             .noActiveProfile:
             return false
         }
     }
@@ -2060,7 +2436,8 @@ public struct MotionRecognitionRouter: Sendable {
              .scoreBelowThreshold,
              .marginTooSmall,
              .cooldownActive,
-             .audioMissing:
+             .audioMissing,
+             .noActiveProfile:
             return 1.0
         }
     }
@@ -2217,6 +2594,8 @@ public struct MotionRecognitionRouter: Sendable {
         }
 
         switch (signature.primaryKind, token.kind) {
+        case (.impulse, .sweep), (.sweep, .impulse):
+            return false
         case (.rotation, .oscillation):
             let requiredAngle = signature.rotation.map { max(.pi * 0.75, $0.totalAngleRadians * 0.70) } ?? .pi
             return features.integratedRotationAngle < requiredAngle

@@ -14,12 +14,16 @@ final class WatchMotionRecorder: ObservableObject {
     @Published private(set) var isRecording = false
     @Published private(set) var estimatedSampleRate: Double = 0
     @Published private(set) var lastAssessment: RecordingAssessment?
+    @Published private(set) var lastRecordingQualityReport: RecordingQualityReport?
     @Published private(set) var lastSegment: GestureSegment?
     @Published private(set) var savedProfileURL: URL?
     @Published private(set) var savedRecordingURL: URL?
+    @Published private(set) var lastFeedbackSampleURL: URL?
     @Published private(set) var loadedProfileCount = 0
     @Published private(set) var isProfileLibraryReady = false
     @Published private(set) var activeProfileLibraryVersion = ""
+    @Published private(set) var activeRecognitionProfileID: UUID?
+    @Published private(set) var activeRecognitionProfileName: String?
     @Published private(set) var lastRecognitionEvent: GestureRecognitionEvent?
     @Published private(set) var lastRecognitionSummary: String?
     @Published private(set) var triggerCount = 0
@@ -45,7 +49,7 @@ final class WatchMotionRecorder: ObservableObject {
     private let feedbackEngine = GestureFeedbackEngine()
     private let soundPlayer: WatchSoundPlayer?
     private let runtimeActor = MotionRuntimeActor()
-    private var recognitionRuntime = GestureRecognitionRuntime()
+    private var recognitionRuntime = GestureRecognitionRuntime(activeRecognitionSelection: .inactive)
     private var standardTemplates: [MotionTemplate] = []
     private var standardNegativeTemplates: [MotionTemplate] = []
     private var standardLabel: String?
@@ -155,6 +159,7 @@ final class WatchMotionRecorder: ObservableObject {
             let profiles = deduplicateProfiles(try store.list().flatMap(\.archive.profiles))
             recognitionRuntime.replaceProfiles(profiles)
             Task { await runtimeActor.replaceProfiles(profiles) }
+            refreshActiveRecognitionProfile(afterLoading: profiles, reason: "reloadSavedProfiles")
             triggerCountsByProfileID = triggerCountsByProfileID.filter { id, _ in
                 profiles.contains { $0.id == id }
             }
@@ -169,14 +174,80 @@ final class WatchMotionRecorder: ObservableObject {
                     "count": profiles.count,
                     "profileLibraryReady": isProfileLibraryReady,
                     "profileLibraryVersion": activeProfileLibraryVersion,
+                    "activeProfileID": activeRecognitionProfileID?.uuidString ?? "",
+                    "activeProfileName": activeRecognitionProfileName ?? "",
                 ]
             )
         } catch {
             loadedProfileCount = 0
+            clearActiveRecognitionProfile(reason: "reloadSavedProfiles.error")
             lastFeedbackMessage = error.localizedDescription
             Task { await runtimeActor.replaceProfiles([]) }
             AppDiagnostics.record(error: error, event: "watch.profiles.reload.error")
         }
+    }
+
+    func setActiveRecognitionProfile(profileID: UUID?, name: String?, reason: String) {
+        let normalizedName = name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard profileID != nil || normalizedName?.isEmpty == false else {
+            clearActiveRecognitionProfile(reason: reason)
+            return
+        }
+        guard let profile = recognitionRuntime.profiles.first(where: { profile in
+            if let profileID, profile.id == profileID {
+                return true
+            }
+            guard let normalizedName, !normalizedName.isEmpty else {
+                return false
+            }
+            return profile.name.caseInsensitiveCompare(normalizedName) == .orderedSame
+        }) else {
+            clearActiveRecognitionProfile(reason: "missing.\(reason)")
+            lastFeedbackMessage = "没有找到当前识别动作"
+            AppDiagnostics.record(
+                "watch.activeProfile.missing",
+                [
+                    "profileID": profileID?.uuidString ?? "",
+                    "name": normalizedName ?? "",
+                    "reason": reason,
+                ]
+            )
+            return
+        }
+        applyActiveRecognitionProfile(profile, reason: reason)
+    }
+
+    func clearActiveRecognitionProfile(reason: String) {
+        activeRecognitionProfileID = nil
+        activeRecognitionProfileName = nil
+        recognitionRuntime.setActiveProfileIDs([])
+        Task { await runtimeActor.setActiveProfileIDs([]) }
+        AppDiagnostics.record("watch.activeProfile.clear", ["reason": reason])
+    }
+
+    private func refreshActiveRecognitionProfile(afterLoading profiles: [GestureProfile], reason: String) {
+        guard let activeRecognitionProfileID,
+              let profile = profiles.first(where: { $0.id == activeRecognitionProfileID }) else {
+            clearActiveRecognitionProfile(reason: reason)
+            return
+        }
+        applyActiveRecognitionProfile(profile, reason: reason)
+    }
+
+    private func applyActiveRecognitionProfile(_ profile: GestureProfile, reason: String) {
+        activeRecognitionProfileID = profile.id
+        activeRecognitionProfileName = profile.name
+        recognitionRuntime.setActiveProfileIDs([profile.id])
+        Task { await runtimeActor.setActiveProfileIDs([profile.id]) }
+        lastFeedbackMessage = nil
+        AppDiagnostics.record(
+            "watch.activeProfile.set",
+            [
+                "profileID": profile.id.uuidString,
+                "name": profile.name,
+                "reason": reason,
+            ]
+        )
     }
 
     func updateProfileLibraryState(
@@ -243,6 +314,17 @@ final class WatchMotionRecorder: ObservableObject {
                 event: event,
                 to: recognitionRuntime.profiles
             )
+            lastFeedbackSampleURL = try persistFeedbackSample(
+                role: "false-trigger",
+                profile: event.profile,
+                segment: event.segment,
+                metadata: [
+                    "feedback": "false-trigger",
+                    "triggeredProfileID": event.profile?.id.uuidString ?? "",
+                    "triggeredProfileName": event.profile?.name ?? "",
+                    "rejectReason": event.logEntry.rejectReason?.rawValue ?? "",
+                ]
+            )
             let archive = GestureProfileArchive(profiles: updatedProfiles)
             let store = try GestureProfileFileStore.appDocumentsStore()
             _ = try store.save(archive, preferredName: "feedback-updated-profiles")
@@ -254,6 +336,46 @@ final class WatchMotionRecorder: ObservableObject {
         } catch {
             lastFeedbackMessage = error.localizedDescription
             AppDiagnostics.record(error: error, event: "watch.feedback.falseTrigger.error")
+        }
+    }
+
+    func markRecentMotionAsMissed(profileID: UUID? = nil, name: String? = nil) {
+        let profile = recognitionRuntime.profiles.first { profile in
+            if let profileID, profile.id == profileID {
+                return true
+            }
+            if let name {
+                return profile.name.caseInsensitiveCompare(name) == .orderedSame
+            }
+            return profile.id == activeRecognitionProfileID
+        }
+        guard let profile else {
+            lastFeedbackMessage = "没有找到漏触对应动作"
+            return
+        }
+        guard let segment = lastSegment else {
+            lastFeedbackMessage = "没有可归档的最近动作片段"
+            return
+        }
+        do {
+            lastFeedbackSampleURL = try persistFeedbackSample(
+                role: "missed",
+                profile: profile,
+                segment: segment,
+                metadata: [
+                    "feedback": "missed",
+                    "targetProfileID": profile.id.uuidString,
+                    "targetProfileName": profile.name,
+                ]
+            )
+            lastFeedbackMessage = "已保存漏触候选样本"
+            AppDiagnostics.record(
+                "watch.feedback.missedArchived",
+                ["profileID": profile.id.uuidString, "profileName": profile.name]
+            )
+        } catch {
+            lastFeedbackMessage = error.localizedDescription
+            AppDiagnostics.record(error: error, event: "watch.feedback.missed.error")
         }
     }
 
@@ -325,6 +447,7 @@ final class WatchMotionRecorder: ObservableObject {
         standardNegativeTemplateCount = 0
         standardQuality = nil
         lastFeedbackMessage = nil
+        lastRecordingQualityReport = nil
     }
 
     @discardableResult
@@ -335,6 +458,19 @@ final class WatchMotionRecorder: ObservableObject {
 
         let trimmedLabel = normalizedLabel(label)
         try setStandardDraftIdentity(label: trimmedLabel, kind: kind)
+
+        let qualityReport = validator.qualityReport(
+            samples: samples,
+            draftKind: kind,
+            existingPositiveTemplates: standardTemplates,
+            existingNegativeTemplates: standardNegativeTemplates
+        )
+        lastRecordingQualityReport = qualityReport
+        guard qualityReport.canUseForTraining else {
+            throw WatchMotionRecorderError.recordingQualityRejected(
+                message: qualityReport.errors.first ?? qualityReport.warnings.first ?? "这次录制质量不足，请重录"
+            )
+        }
 
         let template = templateBuilder.makeTemplate(
             label: trimmedLabel,
@@ -391,6 +527,14 @@ final class WatchMotionRecorder: ObservableObject {
     ) throws -> GestureProfileArchive {
         guard !samples.isEmpty else {
             throw WatchMotionRecorderError.noSamples
+        }
+
+        let qualityReport = validator.qualityReport(samples: samples, draftKind: kind)
+        lastRecordingQualityReport = qualityReport
+        guard qualityReport.canUseForTraining else {
+            throw WatchMotionRecorderError.recordingQualityRejected(
+                message: qualityReport.errors.first ?? qualityReport.warnings.first ?? "这次录制质量不足，请重录"
+            )
         }
 
         let template = templateBuilder.makeTemplate(label: label, kind: kind, samples: samples)
@@ -510,6 +654,14 @@ final class WatchMotionRecorder: ObservableObject {
         guard sample.timestamp - lastRecordingAssessmentAt >= 0.25 else { return }
         lastRecordingAssessmentAt = sample.timestamp
         lastAssessment = validator.assess(samples)
+        if let standardKind {
+            lastRecordingQualityReport = validator.qualityReport(
+                samples: samples,
+                draftKind: standardKind,
+                existingPositiveTemplates: standardTemplates,
+                existingNegativeTemplates: standardNegativeTemplates
+            )
+        }
         estimatedSampleRate = lastAssessment?.estimatedSampleRate ?? 0
     }
 
@@ -774,6 +926,39 @@ final class WatchMotionRecorder: ObservableObject {
 
         let profilePart = sanitizeTraceFileName(profileName ?? "no-profile")
         return "\(timestampFormatter.string(from: date))-\(outcome)-\(profilePart)"
+    }
+
+    private func persistFeedbackSample(
+        role: String,
+        profile: GestureProfile?,
+        segment: GestureSegment,
+        metadata: [String: String]
+    ) throws -> URL {
+        let now = Date()
+        let profileName = profile?.name ?? "unknown-profile"
+        let root = try MotionSecureFileWriter.applicationSupportSubdirectory("FeedbackSamples")
+        let directory = root
+            .appendingPathComponent(sanitizeTraceFileName(profileName), isDirectory: true)
+            .appendingPathComponent(role, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let baseName = recognitionTraceBaseName(date: now, outcome: role, profileName: profileName)
+        let csvURL = directory.appendingPathComponent("\(baseName).csv")
+        let jsonURL = directory.appendingPathComponent("\(baseName).json")
+        try MotionSecureFileWriter.write(MotionSampleCSVCodec().encodeData(segment.samples), to: csvURL)
+
+        var payload: [String: Any] = metadata
+        payload["schemaVersion"] = 1
+        payload["role"] = role
+        payload["csvFileName"] = csvURL.lastPathComponent
+        payload["createdAt"] = ISO8601DateFormatter().string(from: now)
+        payload["profileID"] = profile?.id.uuidString ?? ""
+        payload["profileName"] = profileName
+        payload["segmentDuration"] = segment.duration
+        payload["sampleCount"] = segment.samples.count
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+        try MotionSecureFileWriter.write(data, to: jsonURL)
+        return csvURL
     }
 
     private func recognitionOutcome(
@@ -1154,6 +1339,7 @@ final class WatchMotionRecorder: ObservableObject {
 
 enum WatchMotionRecorderError: LocalizedError {
     case noSamples
+    case recordingQualityRejected(message: String)
     case insufficientStandardTemplates(current: Int, required: Int)
     case standardDraftMismatch(expected: String)
 
@@ -1161,6 +1347,8 @@ enum WatchMotionRecorderError: LocalizedError {
         switch self {
         case .noSamples:
             return "没有可保存的录制样本"
+        case let .recordingQualityRejected(message):
+            return message
         case let .insufficientStandardTemplates(current, required):
             return "标准模式至少需要 \(required) 个样本，当前只有 \(current) 个"
         case let .standardDraftMismatch(expected):
@@ -1249,7 +1437,7 @@ private actor MotionRuntimeActor {
             cooldownDuration: 0.22
         )
     )
-    private var recognitionRuntime = GestureRecognitionRuntime()
+    private var recognitionRuntime = GestureRecognitionRuntime(activeRecognitionSelection: .inactive)
     private var liveStartTimestamp: TimeInterval?
     private var recordingPreviousRawTimestamp: TimeInterval?
     private var recordingElapsedTimestamp: TimeInterval = 0
@@ -1295,6 +1483,20 @@ private actor MotionRuntimeActor {
             profiles.contains { $0.id == id }
         }
         AppDiagnostics.record("watch.runtimeActor.profiles.replace", ["count": profiles.count])
+    }
+
+    func setActiveProfileIDs(_ profileIDs: Set<UUID>) {
+        recognitionRuntime.setActiveProfileIDs(profileIDs)
+        rearmStatesByProfileID = rearmStatesByProfileID.filter { id, _ in
+            profileIDs.contains(id)
+        }
+        AppDiagnostics.record(
+            "watch.runtimeActor.activeProfiles.set",
+            [
+                "count": profileIDs.count,
+                "profileIDs": profileIDs.map(\.uuidString).sorted().joined(separator: ","),
+            ]
+        )
     }
 
     func updateProfileLibraryState(isReady: Bool, version: String, expectedProfileCount: Int) {
@@ -1379,6 +1581,11 @@ private actor MotionRuntimeActor {
 
         guard !recognitionRuntime.profiles.isEmpty else {
             recordRecognitionSuppressedIfNeeded(sample: liveSample, reason: "noProfiles")
+            return output
+        }
+
+        guard !recognitionRuntime.activeProfiles.isEmpty else {
+            recordRecognitionSuppressedIfNeeded(sample: liveSample, reason: "noActiveProfile")
             return output
         }
 
@@ -1607,6 +1814,7 @@ private actor MotionRuntimeActor {
                 "profileLibraryReady": isProfileLibraryReady,
                 "profileLibraryVersion": activeProfileLibraryVersion,
                 "loadedProfileCount": recognitionRuntime.profiles.count,
+                "activeProfileCount": recognitionRuntime.activeProfiles.count,
                 "runtime": "actor",
             ]
         )

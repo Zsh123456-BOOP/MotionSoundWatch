@@ -184,8 +184,8 @@ public struct MotionSampleActivityTrimmer: Sendable {
         featureExtractor: MotionFeatureExtractor = MotionFeatureExtractor(),
         tokenizer: MotionTokenizer = MotionTokenizer(),
         activePadding: Double = 0.25,
-        peakWindowBefore: Double = 0.45,
-        peakWindowAfter: Double = 0.95
+        peakWindowBefore: Double = 0.25,
+        peakWindowAfter: Double = 0.45
     ) {
         self.energyAnalyzer = energyAnalyzer
         self.featureExtractor = featureExtractor
@@ -195,7 +195,11 @@ public struct MotionSampleActivityTrimmer: Sendable {
         self.peakWindowAfter = peakWindowAfter
     }
 
-    public func trimForTemplate(_ samples: [MotionSample], requestedKind: GestureKind) -> [MotionSample] {
+    public func trimForTemplate(
+        _ samples: [MotionSample],
+        requestedKind: GestureKind,
+        strategy explicitStrategy: TrimStrategy? = nil
+    ) -> [MotionSample] {
         guard samples.count >= 8,
               let firstSample = samples.first,
               let lastSample = samples.last else {
@@ -203,6 +207,21 @@ public struct MotionSampleActivityTrimmer: Sendable {
         }
 
         let frames = energyAnalyzer.frames(for: samples)
+        let features = featureExtractor.extract(samples)
+        let strategy = explicitStrategy ?? trimStrategy(requestedKind: requestedKind, features: features)
+        switch strategy {
+        case .rotationAngleWindow:
+            return rotationAngleWindow(samples, features: features)
+        case .oscillationCycleWindow:
+            return oscillationCycleWindow(samples, features: features)
+        case .holdStableWindow:
+            return holdStableWindow(samples)
+        case .fullActiveWindow:
+            return fullActiveWindow(samples, frames: frames)
+        case .impulsePeakWindow:
+            break
+        }
+
         guard let peakFrame = frames.max(by: { $0.energy < $1.energy }),
               peakFrame.energy >= 0.18 else {
             return retimestamp(samples)
@@ -235,6 +254,124 @@ public struct MotionSampleActivityTrimmer: Sendable {
         }
 
         return activeSamples
+    }
+
+    public func trimStrategy(requestedKind: GestureKind, features: GestureSampleFeatures) -> TrimStrategy {
+        let classifiedKind = tokenizer.classify(features)
+        switch requestedKind {
+        case .burst:
+            return classifiedKind == .impulse ? .impulsePeakWindow : .fullActiveWindow
+        case .sequence:
+            if classifiedKind == .rotation || features.integratedRotationAngle >= .pi * 0.55 {
+                return .rotationAngleWindow
+            }
+            if classifiedKind == .oscillation || features.oscillationCount >= 1.5 {
+                return .oscillationCycleWindow
+            }
+            return .fullActiveWindow
+        case .posture:
+            return .holdStableWindow
+        case .combo:
+            return .fullActiveWindow
+        }
+    }
+
+    private func fullActiveWindow(_ samples: [MotionSample], frames: [MotionEnergyFrame]) -> [MotionSample] {
+        guard let firstSample = samples.first,
+              let lastSample = samples.last,
+              let peakEnergy = frames.map(\.energy).max(),
+              peakEnergy >= 0.04 else {
+            return retimestamp(samples)
+        }
+        let threshold = max(0.035, peakEnergy * 0.12)
+        let activeFrames = frames.filter { $0.energy >= threshold }
+        guard let firstActive = activeFrames.first,
+              let lastActive = activeFrames.last else {
+            return retimestamp(samples)
+        }
+        return clippedSamples(
+            samples,
+            start: max(firstSample.timestamp, firstActive.timestamp - activePadding),
+            end: min(lastSample.timestamp, lastActive.timestamp + activePadding)
+        )
+    }
+
+    private func rotationAngleWindow(_ samples: [MotionSample], features: GestureSampleFeatures) -> [MotionSample] {
+        guard samples.count >= 2,
+              let firstSample = samples.first,
+              let lastSample = samples.last else {
+            return retimestamp(samples)
+        }
+        let axis = normalized(features.dominantRotationAxis)
+        let projected = samples.map { dot($0.rotationRate, axis) }
+        let totalAngle = cumulativeAngle(projected, samples: samples).last ?? 0
+        guard totalAngle >= 0.15 else {
+            return retimestamp(samples)
+        }
+
+        let cumulative = cumulativeAngle(projected, samples: samples)
+        let startTarget = totalAngle * 0.06
+        let endTarget = totalAngle * 0.94
+        let startIndex = cumulative.firstIndex { $0 >= startTarget } ?? samples.startIndex
+        let endIndex = cumulative.firstIndex { $0 >= endTarget } ?? samples.index(before: samples.endIndex)
+        let start = max(firstSample.timestamp, samples[startIndex].timestamp - activePadding)
+        let end = min(lastSample.timestamp, samples[endIndex].timestamp + activePadding)
+        return clippedSamples(samples, start: start, end: end)
+    }
+
+    private func oscillationCycleWindow(_ samples: [MotionSample], features: GestureSampleFeatures) -> [MotionSample] {
+        guard samples.count >= 2,
+              let firstSample = samples.first,
+              let lastSample = samples.last else {
+            return retimestamp(samples)
+        }
+        let axis = normalized(features.dominantRotationAxis)
+        let projected = samples.map { dot($0.rotationRate, axis) }
+        let deadband = max(0.04, features.peakGyro * 0.08)
+        var crossingIndices: [Int] = []
+        var previousSign = 0
+        for (index, value) in projected.enumerated() {
+            let sign = sign(value, deadband: deadband)
+            guard sign != 0 else { continue }
+            if previousSign != 0, sign != previousSign {
+                crossingIndices.append(index)
+            }
+            previousSign = sign
+        }
+        guard let firstCrossing = crossingIndices.first,
+              let lastCrossing = crossingIndices.last else {
+            return fullActiveWindow(samples, frames: energyAnalyzer.frames(for: samples))
+        }
+        return clippedSamples(
+            samples,
+            start: max(firstSample.timestamp, samples[firstCrossing].timestamp - 0.35),
+            end: min(lastSample.timestamp, samples[lastCrossing].timestamp + 0.35)
+        )
+    }
+
+    private func holdStableWindow(_ samples: [MotionSample]) -> [MotionSample] {
+        guard samples.count >= 8,
+              let firstSample = samples.first,
+              let lastSample = samples.last else {
+            return retimestamp(samples)
+        }
+        let frames = energyAnalyzer.frames(for: samples)
+        let peakEnergy = frames.map(\.energy).max() ?? 0
+        let stableThreshold = max(0.08, peakEnergy * 0.18)
+        var currentStart: Int?
+        for (index, frame) in frames.enumerated() {
+            if frame.energy <= stableThreshold {
+                if currentStart == nil { currentStart = index }
+            } else {
+                currentStart = nil
+            }
+        }
+        guard let suffixStart = currentStart,
+              lastSample.timestamp - samples[suffixStart].timestamp >= 0.35 else {
+            return fullActiveWindow(samples, frames: frames)
+        }
+        let start = max(firstSample.timestamp, samples[suffixStart].timestamp - 0.20)
+        return clippedSamples(samples, start: start, end: lastSample.timestamp)
     }
 
     private func shouldFocusOnPeak(
@@ -278,6 +415,31 @@ public struct MotionSampleActivityTrimmer: Sendable {
     private func duration(_ samples: [MotionSample]) -> Double {
         guard let first = samples.first, let last = samples.last else { return 0 }
         return max(0, last.timestamp - first.timestamp)
+    }
+
+    private func normalized(_ vector: MotionVector3) -> MotionVector3 {
+        let magnitude = max(vector.magnitude, 0.0001)
+        return MotionVector3(x: vector.x / magnitude, y: vector.y / magnitude, z: vector.z / magnitude)
+    }
+
+    private func dot(_ lhs: MotionVector3, _ rhs: MotionVector3) -> Double {
+        lhs.x * rhs.x + lhs.y * rhs.y + lhs.z * rhs.z
+    }
+
+    private func cumulativeAngle(_ values: [Double], samples: [MotionSample]) -> [Double] {
+        guard values.count == samples.count, samples.count > 1 else { return Array(repeating: 0, count: samples.count) }
+        var output = Array(repeating: 0.0, count: samples.count)
+        for index in 1..<samples.count {
+            let dt = max(0, samples[index].timestamp - samples[index - 1].timestamp)
+            output[index] = output[index - 1] + abs((values[index] + values[index - 1]) * 0.5) * dt
+        }
+        return output
+    }
+
+    private func sign(_ value: Double, deadband: Double) -> Int {
+        if value > deadband { return 1 }
+        if value < -deadband { return -1 }
+        return 0
     }
 }
 

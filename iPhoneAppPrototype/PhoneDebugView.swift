@@ -30,6 +30,7 @@ struct PhoneDebugView: View {
     @State private var pendingRecordingAction: RecordingControlAction?
     @State private var captureCountBeforeStop: Int?
     @State private var savedProfiles: [PhoneGestureAsset] = []
+    @State private var activeProfileID: UUID?
     @State private var trimPlaybackTask: Task<Void, Never>?
     @State private var isPreviewPlaying = false
     @State private var editingAsset: PhoneGestureAsset?
@@ -266,12 +267,14 @@ struct PhoneDebugView: View {
                 if !savedProfiles.isEmpty {
                     VStack(spacing: 10) {
                         ForEach(savedProfiles) { asset in
-                            GestureAssetRow(asset: asset) {
+                            GestureAssetRow(asset: asset, isActive: asset.profile.id == activeProfileID) {
                                 openAssetForSound(asset)
                             } record: {
                                 prepareToRecord(asset)
                             } test: {
                                 startTest(asset)
+                            } setActive: {
+                                setActiveProfile(asset)
                             } resync: {
                                 resyncAsset(asset)
                             } delete: {
@@ -1314,6 +1317,7 @@ struct PhoneDebugView: View {
 
     private func startTest(_ asset: PhoneGestureAsset) {
         testingAsset = asset
+        setActiveProfile(asset, reason: "testModeStart")
         testStartedAt = Date()
         testBaselineWatchEventCount = receiver.receivedWatchEventCount
         currentStep = .test
@@ -1371,6 +1375,10 @@ struct PhoneDebugView: View {
                 name: asset.profile.name,
                 kind: asset.profile.kind
             )
+            if activeProfileID == asset.profile.id {
+                activeProfileID = nil
+                _ = receiver.sendSetActiveProfileCommand(profileID: nil, name: nil, reason: "profileDeleted")
+            }
             reloadSavedProfiles()
             syncWatchLibrarySnapshot(reason: "delete")
             if editingAsset?.id == asset.id {
@@ -1388,6 +1396,23 @@ struct PhoneDebugView: View {
             receiver.setLastMessage(error.localizedDescription)
             AppDiagnostics.record(error: error, event: "phone.profile.delete.error", ["profile": asset.profile.name])
         }
+    }
+
+    private func setActiveProfile(_ asset: PhoneGestureAsset, reason: String = "manual") {
+        activeProfileID = asset.profile.id
+        _ = receiver.sendSetActiveProfileCommand(
+            profileID: asset.profile.id,
+            name: asset.profile.name,
+            reason: reason
+        )
+        AppDiagnostics.record(
+            "phone.profile.activeSelected",
+            [
+                "profileID": asset.profile.id.uuidString,
+                "profile": asset.profile.name,
+                "reason": reason,
+            ]
+        )
     }
 
     private func applyAsset(_ asset: PhoneGestureAsset) {
@@ -2590,9 +2615,11 @@ private struct PhoneGestureAsset: Identifiable, Equatable {
 
 private struct GestureAssetRow: View {
     var asset: PhoneGestureAsset
+    var isActive: Bool
     var open: () -> Void
     var record: () -> Void
     var test: () -> Void
+    var setActive: () -> Void
     var resync: () -> Void
     var delete: () -> Void
 
@@ -2612,6 +2639,11 @@ private struct GestureAssetRow: View {
                             .font(.caption)
                             .foregroundStyle(PajiTheme.textMuted)
                             .lineLimit(1)
+                        if isActive {
+                            Label("当前识别动作", systemImage: "scope")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(PajiTheme.cyan)
+                        }
                     }
                     Spacer()
                     Image(systemName: "chevron.right")
@@ -2640,6 +2672,13 @@ private struct GestureAssetRow: View {
                 }
                 .accessibilityLabel("测试")
                 .buttonStyle(.bordered)
+                .controlSize(.small)
+                Button(action: setActive) {
+                    Image(systemName: "scope")
+                }
+                .accessibilityLabel("设为当前识别动作")
+                .buttonStyle(.bordered)
+                .tint(isActive ? PajiTheme.cyan : PajiTheme.textMuted)
                 .controlSize(.small)
                 Button(action: resync) {
                     Image(systemName: "arrow.triangle.2.circlepath")
