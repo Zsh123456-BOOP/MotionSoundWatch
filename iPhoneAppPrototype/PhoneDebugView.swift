@@ -105,11 +105,28 @@ struct PhoneDebugView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 16) {
-                    ProductHeader(
-                        title: connectionTitle,
-                        subtitle: connectionSubtitle,
-                        detail: nil
-                    )
+                    if currentStep == .library {
+                        PajiActionWorkbench(
+                            connectionTitle: connectionTitle,
+                            connectionSubtitle: connectionSubtitle,
+                            statusStyle: connectionStatusStyle,
+                            actionCount: savedProfiles.count,
+                            audioCount: localAudioFiles.count,
+                            eventCount: receiver.receivedWatchEventCount
+                        ) {
+                            resetForNewGesture()
+                            currentStep = .create
+                        } refreshAction: {
+                            refreshProductState(reason: "homeRefresh")
+                        }
+                    } else {
+                        ProductHeader(
+                            title: connectionTitle,
+                            subtitle: connectionSubtitle,
+                            detail: nil,
+                            statusStyle: connectionStatusStyle
+                        )
+                    }
                     if currentStep != .library && currentStep != .test {
                         StepProgressView(currentStep: currentStep)
                     }
@@ -117,29 +134,26 @@ struct PhoneDebugView: View {
                 }
                 .padding(16)
             }
-            .background(Color(.systemGroupedBackground))
-            .navigationTitle("MotionSound")
+            .background(PajiTheme.background.ignoresSafeArea())
+            .scrollContentBackground(.hidden)
+            .preferredColorScheme(.dark)
+            .navigationTitle(PajiStrings.t("brand.name"))
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         showingDiagnostics = true
                         AppDiagnostics.record("phone.diagnostics.opened")
                     } label: {
-                        Label("诊断", systemImage: "stethoscope")
+                        Label(PajiStrings.t("action.diagnostics"), systemImage: "stethoscope")
                     }
                 }
 
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
-                        receiver.activate()
-                        receiver.sendDiagnosticsConfiguration(reason: "toolbarRefresh")
-                        receiver.reloadReceivedFiles()
-                        reloadLocalAudioFiles()
-                        reloadSavedProfiles()
-                        syncWatchLibrarySnapshot(reason: "toolbarRefresh")
-                        loadPreferredCapture()
+                        refreshProductState(reason: "toolbarRefresh")
                     } label: {
-                        Label("刷新", systemImage: "arrow.clockwise")
+                        Label(PajiStrings.t("action.refresh"), systemImage: "arrow.clockwise")
                     }
                 }
             }
@@ -226,30 +240,29 @@ struct PhoneDebugView: View {
     }
 
     private var libraryStep: some View {
-        ProductSection("我的动作") {
-            VStack(alignment: .leading, spacing: 14) {
+        ProductSection(PajiStrings.t("library.title")) {
+            VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("\(savedProfiles.count) 个动作")
+                        Text(savedProfiles.isEmpty ? PajiStrings.t("library.ready.empty") : String(format: PajiStrings.t("library.ready.count"), savedProfiles.count))
                             .font(.title3.weight(.semibold))
-                        Text("保存后的动作会显示在这里。新动作会引导录满 5 次；每次都能裁剪真正的开始和结束。")
+                        Text(savedProfiles.isEmpty ? PajiStrings.t("library.helper.empty") : PajiStrings.t("library.helper.ready"))
                             .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(PajiTheme.textMuted)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer()
                 }
 
-                PrimaryActionButton(title: "新建动作", systemImage: "plus") {
-                    resetForNewGesture()
-                    currentStep = .create
-                }
-
                 if savedProfiles.isEmpty {
                     EmptyStateView(
-                        title: "还没有动作",
-                        subtitle: "先创建一个动作，录制完成并配置声音后会回到这里。"
+                        title: PajiStrings.t("library.empty.title"),
+                        subtitle: PajiStrings.t("library.empty.subtitle"),
+                        glyph: .recordGesture
                     )
-                } else {
+                }
+
+                if !savedProfiles.isEmpty {
                     VStack(spacing: 10) {
                         ForEach(savedProfiles) { asset in
                             GestureAssetRow(asset: asset) {
@@ -274,6 +287,8 @@ struct PhoneDebugView: View {
     private var createStep: some View {
         ProductSection("创建动作") {
             VStack(alignment: .leading, spacing: 14) {
+                PajiStepRail(currentIndex: 0, steps: wizardStepTitles)
+
                 TextField("动作名称", text: $recordingLabel)
                     .textFieldStyle(.roundedBorder)
 
@@ -283,9 +298,9 @@ struct PhoneDebugView: View {
                         .foregroundStyle(.red)
                 }
 
-                Text("创建后先录同一个动作 5 次。每次录完都可以看 3D 轨迹和时间轴，确认后再进入下一次。")
+                Text("先给动作取一个短名字。接下来会录满 5 次同一个动作，系统只保存你确认过的片段。")
                     .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(PajiTheme.textMuted)
                     .fixedSize(horizontal: false, vertical: true)
 
                 PrimaryActionButton(title: "下一步：录制动作", systemImage: "arrow.right") {
@@ -300,21 +315,26 @@ struct PhoneDebugView: View {
     private var recordStep: some View {
         ProductSection("录制动作") {
             VStack(alignment: .leading, spacing: 14) {
-                HStack {
+                PajiStepRail(currentIndex: 1, steps: wizardStepTitles)
+
+                HStack(alignment: .center, spacing: 12) {
+                    PajiStatusOrb(style: isRecording ? .blocked : (currentSampleCollectionPlan.acceptedCount > 0 ? .stable : .warning), glyph: .recordGesture, active: isRecording || countdownRemaining != nil)
+                        .frame(width: 66, height: 66)
                     VStack(alignment: .leading, spacing: 4) {
                         Text(normalizedGestureName)
                             .font(.title3.weight(.semibold))
                         Text(recordingSubtitle)
                             .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(PajiTheme.textMuted)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer()
                     RecordingStateBadge(isRecording: isRecording, countdown: countdownRemaining)
                 }
 
-                Text("在 iPhone 点击开始后，会倒数 3 秒并让 Watch 震动。动作完成后，只需要在 iPhone 点击结束。")
+                Text("每次只做一个完整动作。倒数结束后 Watch 会开始采样；动作完成后，在 iPhone 点结束并确认片段。")
                     .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(PajiTheme.textMuted)
                     .fixedSize(horizontal: false, vertical: true)
 
                 SampleCollectionStatusView(plan: currentSampleCollectionPlan)
@@ -339,7 +359,7 @@ struct PhoneDebugView: View {
                             ProgressView()
                             Text("正在等待 Watch 保存并同步这次录制，完成后自动进入裁剪。")
                                 .font(.footnote)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(PajiTheme.textMuted)
                         }
                     }
                 } else if isRecording {
@@ -354,7 +374,7 @@ struct PhoneDebugView: View {
                 }
 
                 if !receiver.isWatchReachable {
-                    Text("Watch 未处于即时连接时，命令会先排队；打开 Watch App 后会执行。")
+                    Text("Watch 不在前台时，录制命令会先排队。请打开手表上的啪叽 Act，避免错过这次采样。")
                         .font(.footnote)
                         .foregroundStyle(.orange)
                 }
@@ -362,7 +382,7 @@ struct PhoneDebugView: View {
                 if let status = receiver.lastRecordingStatus {
                     Text(recordingStatusText(status))
                         .font(.footnote)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(PajiTheme.textMuted)
                 }
 
                 StepNavigationBar(
@@ -706,28 +726,38 @@ struct PhoneDebugView: View {
 
     private var connectionTitle: String {
         if receiver.isWatchReachable {
-            return "Apple Watch 已连接"
+            return PajiStrings.t("status.watch.connected")
         }
         if receiver.isWatchAppInstalled {
-            return "Apple Watch 已配对"
+            return PajiStrings.t("status.watch.paired")
         }
         if receiver.activationStateDescription == "activated" {
-            return "未识别 Watch App"
+            return PajiStrings.t("status.watch.notInstalled")
         }
-        return "等待 Apple Watch"
+        return PajiStrings.t("status.watch.waiting")
     }
 
     private var connectionSubtitle: String {
         if receiver.isWatchReachable {
-            return "可以从 iPhone 发起录制。"
+            return PajiStrings.t("status.watch.connected.subtitle")
         }
         if receiver.isWatchAppInstalled {
-            return "请保持 Watch 上的 MotionSound 打开。"
+            return PajiStrings.t("status.watch.paired.subtitle")
         }
         if receiver.activationStateDescription == "activated" {
-            return "请确认手表端 App 已安装并打开。"
+            return PajiStrings.t("status.watch.notInstalled.subtitle")
         }
-        return "请先安装并打开 Watch App。"
+        return PajiStrings.t("status.watch.waiting.subtitle")
+    }
+
+    private var connectionStatusStyle: PajiStatusPill.Style {
+        if receiver.isWatchReachable || receiver.isWatchAppInstalled {
+            return .synced
+        }
+        if receiver.activationStateDescription == "activated" {
+            return .blocked
+        }
+        return .warning
     }
 
     private var automaticKindText: String {
@@ -750,6 +780,10 @@ struct PhoneDebugView: View {
             return GestureTestSummary()
         }
         return GestureTestSummary(events: currentTestEvents, targetProfile: testingAsset.profile)
+    }
+
+    private var wizardStepTitles: [String] {
+        SetupStep.wizardSteps.map(\.title)
     }
 
     private var recordingSubtitle: String {
@@ -791,6 +825,16 @@ struct PhoneDebugView: View {
             && nameConflict == nil
             && !syncBaseTemplates.isEmpty
             && currentSampleCollectionPlan.isReady
+    }
+
+    private func refreshProductState(reason: String) {
+        receiver.activate()
+        receiver.sendDiagnosticsConfiguration(reason: reason)
+        receiver.reloadReceivedFiles()
+        reloadLocalAudioFiles()
+        reloadSavedProfiles()
+        syncWatchLibrarySnapshot(reason: reason)
+        loadPreferredCapture()
     }
 
     private var captureDuration: Double {
@@ -1898,33 +1942,36 @@ private struct ProductHeader: View {
     var title: String
     var subtitle: String
     var detail: String? = nil
+    var statusStyle: PajiStatusPill.Style = .synced
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(title)
-                        .font(.title2.weight(.semibold))
+                    PajiLogoLockup(compact: true)
+                    PajiStatusPill(style: statusStyle, title: title)
                     Text(subtitle)
                         .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(PajiTheme.textMuted)
                 }
                 Spacer()
-                Image(systemName: "applewatch")
-                    .font(.title2)
-                    .foregroundStyle(Color.accentColor)
+                PajiGlyphView(.watch, size: 44)
             }
 
             if let detail, !detail.isEmpty {
                 Text(detail)
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(PajiTheme.textMuted)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(16)
-        .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .background(PajiTheme.panel.opacity(0.88))
+        .clipShape(RoundedRectangle(cornerRadius: PajiTheme.cardRadius, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: PajiTheme.cardRadius, style: .continuous)
+                .stroke(PajiTheme.cyan.opacity(0.18), lineWidth: 1)
+        )
     }
 }
 
@@ -1932,35 +1979,11 @@ private struct StepProgressView: View {
     var currentStep: SetupStep
 
     var body: some View {
-        HStack(spacing: 8) {
-            ForEach(SetupStep.wizardSteps) { step in
-                VStack(spacing: 6) {
-                    Image(systemName: step.systemImage)
-                        .font(.caption.weight(.semibold))
-                        .frame(width: 30, height: 30)
-                        .background(background(for: step))
-                        .foregroundStyle(foreground(for: step))
-                        .clipShape(Circle())
-                    Text(step.title)
-                        .font(.caption2)
-                        .foregroundStyle(step.rawValue == currentStep.rawValue ? .primary : .secondary)
-                }
-                if step != SetupStep.wizardSteps.last {
-                    Rectangle()
-                        .fill(Color.secondary.opacity(0.25))
-                        .frame(height: 1)
-                }
-            }
-        }
-        .padding(.horizontal, 6)
-    }
-
-    private func background(for step: SetupStep) -> Color {
-        step.rawValue == currentStep.rawValue ? .accentColor : Color(.tertiarySystemFill)
-    }
-
-    private func foreground(for step: SetupStep) -> Color {
-        step.rawValue == currentStep.rawValue ? .white : .secondary
+        PajiStepRail(
+            currentIndex: max(0, SetupStep.wizardSteps.firstIndex(of: currentStep) ?? 0),
+            steps: SetupStep.wizardSteps.map(\.title)
+        )
+        .padding(.horizontal, 2)
     }
 }
 
@@ -1977,11 +2000,16 @@ private struct ProductSection<Content: View>: View {
         VStack(alignment: .leading, spacing: 14) {
             Text(title)
                 .font(.headline)
+                .foregroundStyle(.white)
             content
         }
         .padding(16)
-        .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .background(PajiTheme.panel.opacity(0.88))
+        .clipShape(RoundedRectangle(cornerRadius: PajiTheme.cardRadius, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: PajiTheme.cardRadius, style: .continuous)
+                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+        )
     }
 }
 
@@ -1995,9 +2023,12 @@ private struct PrimaryActionButton: View {
         Button(action: action) {
             Label(title, systemImage: systemImage)
                 .frame(maxWidth: .infinity)
+                .font(.headline.weight(.semibold))
+                .padding(.vertical, 5)
         }
         .buttonStyle(.borderedProminent)
-        .tint(tint)
+        .tint(PajiTheme.cyan)
+        .foregroundStyle(PajiTheme.ink)
     }
 }
 
@@ -2065,19 +2096,30 @@ private struct CountdownView: View {
 private struct EmptyStateView: View {
     var title: String
     var subtitle: String
+    var glyph: PajiGlyph = .playBurst
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.headline)
-            Text(subtitle)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+        HStack(alignment: .center, spacing: 12) {
+            PajiStatusOrb(style: .warning, glyph: glyph, active: false)
+                .frame(width: 56, height: 56)
+            VStack(alignment: .leading, spacing: 5) {
+                Text(title)
+                    .font(.headline)
+                    .foregroundStyle(.white)
+                Text(subtitle)
+                    .font(.subheadline)
+                    .foregroundStyle(PajiTheme.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
-        .background(Color(.tertiarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .background(PajiTheme.panelElevated.opacity(0.78))
+        .clipShape(RoundedRectangle(cornerRadius: PajiTheme.cardRadius, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: PajiTheme.cardRadius, style: .continuous)
+                .stroke(PajiTheme.cyan.opacity(0.16), lineWidth: 1)
+        )
     }
 }
 
@@ -2315,25 +2357,34 @@ private struct SampleCollectionStatusView: View {
     var plan: GestureSampleCollectionPlan
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 Image(systemName: plan.isReady ? "checkmark.circle.fill" : "circle.dotted")
-                    .foregroundStyle(plan.isReady ? Color.green : Color.accentColor)
+                    .foregroundStyle(plan.isReady ? PajiTheme.lime : PajiTheme.cyan)
                 Text("\(plan.acceptedCount)/\(plan.requiredCount) 次录制")
                     .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
                 Spacer()
                 Text(plan.isReady ? "可保存" : "继续录制")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(plan.isReady ? Color.green : Color.accentColor)
+                    .foregroundStyle(plan.isReady ? PajiTheme.lime : PajiTheme.cyan)
             }
+            PajiSyncProgressBar(
+                progress: plan.requiredCount == 0 ? 0 : Double(plan.acceptedCount) / Double(plan.requiredCount),
+                isActive: !plan.isReady
+            )
             Text(plan.message)
                 .font(.footnote)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(PajiTheme.textMuted)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(12)
-        .background(Color(.tertiarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .background(PajiTheme.panelElevated.opacity(0.78))
+        .clipShape(RoundedRectangle(cornerRadius: PajiTheme.cardRadius, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: PajiTheme.cardRadius, style: .continuous)
+                .stroke(PajiTheme.border, lineWidth: 1)
+        )
     }
 }
 
@@ -2522,25 +2573,23 @@ private struct GestureAssetRow: View {
         VStack(alignment: .leading, spacing: 10) {
             Button(action: open) {
                 HStack(spacing: 12) {
-                    Image(systemName: "figure.wave")
-                        .frame(width: 34, height: 34)
-                        .background(Color.accentColor.opacity(0.13))
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    PajiStatusOrb(style: .stable, glyph: .recordGesture, active: false)
+                        .frame(width: 50, height: 50)
 
                     VStack(alignment: .leading, spacing: 4) {
                         Text(asset.profile.name)
                             .font(.headline)
-                            .foregroundStyle(.primary)
+                            .foregroundStyle(.white)
                             .lineLimit(1)
                         Text("\(asset.templateCount) 次录制 · \(asset.soundName)")
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(PajiTheme.textMuted)
                             .lineLimit(1)
                     }
                     Spacer()
                     Image(systemName: "chevron.right")
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(PajiTheme.textMuted)
                 }
             }
             .buttonStyle(.plain)
@@ -2548,30 +2597,44 @@ private struct GestureAssetRow: View {
             HStack(spacing: 8) {
                 Label(asset.soundName, systemImage: "waveform")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(PajiTheme.textMuted)
                     .lineLimit(1)
                 Spacer()
-                Button("补录", action: record)
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                Button("测试", action: test)
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                Button(action: record) {
+                    Label("补录", systemImage: "record.circle")
+                        .labelStyle(.iconOnly)
+                }
+                .accessibilityLabel("补录")
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                Button(action: test) {
+                    Label("测试", systemImage: "scope")
+                        .labelStyle(.iconOnly)
+                }
+                .accessibilityLabel("测试")
+                .buttonStyle(.bordered)
+                .controlSize(.small)
                 Button(action: resync) {
                     Image(systemName: "arrow.triangle.2.circlepath")
                 }
+                .accessibilityLabel("重新同步")
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 Button(role: .destructive, action: delete) {
                     Image(systemName: "trash")
                 }
+                .accessibilityLabel("删除")
                 .buttonStyle(.bordered)
                 .controlSize(.small)
             }
         }
         .padding(12)
-        .background(Color(.tertiarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .background(PajiTheme.panelElevated.opacity(0.78))
+        .clipShape(RoundedRectangle(cornerRadius: PajiTheme.cardRadius, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: PajiTheme.cardRadius, style: .continuous)
+                .stroke(PajiTheme.cyan.opacity(0.12), lineWidth: 1)
+        )
     }
 }
 

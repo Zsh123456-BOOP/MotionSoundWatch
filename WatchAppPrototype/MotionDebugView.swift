@@ -28,76 +28,96 @@ struct MotionDebugView: View {
     }
 
     var body: some View {
-        List {
-            Section {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("MotionSound")
-                        .font(.headline)
-                    Text(watchStatusTitle)
-                        .font(.title3.weight(.semibold))
-                    Text(watchStatusSubtitle)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .padding(.vertical, 4)
-            }
+        ScrollView {
+            VStack(spacing: 10) {
+                PajiWatchStatusCard(
+                    title: watchStatusTitle,
+                    subtitle: watchStatusSubtitle,
+                    glyph: watchStatusGlyph,
+                    style: watchStatusStyle,
+                    isActive: watchStatusIsActive,
+                    triggerCount: recorder.triggerCount
+                )
 
-            if recorder.triggerCount > 0 {
-                Section {
-                    HStack {
-                        Text("触发次数")
-                        Spacer()
-                        Text("\(recorder.triggerCount)")
-                            .font(.title3.weight(.semibold))
-                            .monospacedDigit()
-                    }
-                    if let profileName = recorder.lastTriggeredProfileName {
+                if recorder.triggerCount > 0 {
+                    WatchStatusPanel {
                         HStack {
-                            Text("最近触发")
+                            Label(PajiStrings.t("watch.panel.triggerStats"), systemImage: "waveform")
                             Spacer()
-                            Text(profileName)
-                                .multilineTextAlignment(.trailing)
+                            Text("\(recorder.triggerCount)")
+                                .font(.title3.weight(.semibold))
+                                .monospacedDigit()
+                        }
+                        .foregroundStyle(.white)
+
+                        if let profileName = recorder.lastTriggeredProfileName {
+                            HStack(alignment: .top) {
+                                Text(PajiStrings.t("watch.panel.lastTrigger"))
+                                    .foregroundStyle(PajiTheme.textMuted)
+                                Spacer()
+                                Text(profileName)
+                                    .multilineTextAlignment(.trailing)
+                            }
+                            .font(.footnote)
+                        }
+
+                        HStack(spacing: 8) {
+                            if let event = recorder.lastRecognitionEvent,
+                               event.triggered,
+                               event.profile?.sound != nil {
+                                Button {
+                                    _ = soundPlayer.play(sound: event.profile?.sound)
+                                } label: {
+                                    Label(PajiStrings.t("watch.action.testSound"), systemImage: "play.fill")
+                                }
+                            }
+                            Button {
+                                recorder.markLastTriggerAsFalse()
+                            } label: {
+                                Label(PajiStrings.t("watch.action.falseFeedback"), systemImage: "hand.raised.fill")
+                            }
+                        }
+                        .font(.caption.weight(.semibold))
+                    }
+                } else if recorder.loadedProfileCount > 0 {
+                    WatchStatusPanel {
+                        Label(PajiStrings.t("watch.panel.noTriggers"), systemImage: "dot.radiowaves.left.and.right")
+                            .foregroundStyle(.white)
+                        Text(PajiStrings.t("watch.panel.noTriggers.detail"))
+                            .font(.footnote)
+                            .foregroundStyle(PajiTheme.textMuted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                if recorder.isRecording || remoteCaptureState == "recording" {
+                    WatchStatusPanel {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                            Text(PajiStrings.t("watch.panel.recordingHint"))
+                                .font(.footnote)
+                                .foregroundStyle(PajiTheme.textMuted)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
-                    if let event = recorder.lastRecognitionEvent,
-                       event.triggered,
-                       event.profile?.sound != nil {
-                        Button("测试音效") {
-                            _ = soundPlayer.play(sound: event.profile?.sound)
-                        }
-                    }
-                    Button("误触反馈") {
-                        recorder.markLastTriggerAsFalse()
-                    }
                 }
-            } else if recorder.loadedProfileCount > 0 {
-                Section {
-                    Text("做动作后，这里会显示最近触发和次数。")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
 
-            if recorder.isRecording || remoteCaptureState == "recording" {
-                Section {
-                    ProgressView()
-                    Text("动作完成后，在 iPhone 上点击结束。")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                if let message = userFacingMessage {
+                    WatchStatusPanel {
+                        Label(PajiStrings.t("watch.panel.message"), systemImage: "info.circle")
+                            .foregroundStyle(.white)
+                        Text(message)
+                            .font(.footnote)
+                            .foregroundStyle(PajiTheme.textMuted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
-
-            if let message = userFacingMessage {
-                Section {
-                    Text(message)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            }
+            .padding(.horizontal, 4)
+            .padding(.vertical, 6)
         }
+        .background(PajiTheme.background.ignoresSafeArea())
+        .preferredColorScheme(.dark)
         .onAppear {
             AppDiagnostics.record("watch.debugView.onAppear")
             recorder.startLiveUpdates()
@@ -151,28 +171,58 @@ struct MotionDebugView: View {
 
     private var watchStatusTitle: String {
         if recorder.isRecording || remoteCaptureState == "recording" {
-            return "正在录制"
+            return PajiStrings.t("watch.status.recording")
         }
         if !recorder.isProfileLibraryReady {
-            return "等待同步"
+            return PajiStrings.t("watch.status.waitSync")
         }
         if recorder.loadedProfileCount > 0 {
-            return "正在监听"
+            return PajiStrings.t("watch.status.listening")
         }
-        return "等待设置"
+        return PajiStrings.t("watch.status.waitSetup")
     }
 
     private var watchStatusSubtitle: String {
         if recorder.isRecording || remoteCaptureState == "recording" {
-            return "保持动作自然，完成后在 iPhone 点击结束。"
+            return PajiStrings.t("watch.subtitle.recording")
         }
         if !recorder.isProfileLibraryReady {
-            return "请在 iPhone 打开 MotionSound，同步完整动作库。"
+            return PajiStrings.t("watch.subtitle.waitSync")
         }
         if recorder.loadedProfileCount > 0 {
-            return "抬手做动作，匹配后会立即触发音效。"
+            return PajiStrings.t("watch.subtitle.listening")
         }
-        return "请在 iPhone 上创建动作、录制、配音并同步。"
+        return PajiStrings.t("watch.subtitle.waitSetup")
+    }
+
+    private var watchStatusGlyph: PajiGlyph {
+        if recorder.isRecording || remoteCaptureState == "recording" {
+            return .recordGesture
+        }
+        if !recorder.isProfileLibraryReady {
+            return .sync
+        }
+        if recorder.loadedProfileCount > 0 {
+            return .waveform
+        }
+        return .playBurst
+    }
+
+    private var watchStatusStyle: PajiStatusPill.Style {
+        if recorder.isRecording || remoteCaptureState == "recording" {
+            return .warning
+        }
+        if !recorder.isProfileLibraryReady {
+            return .warning
+        }
+        if recorder.loadedProfileCount > 0 {
+            return .stable
+        }
+        return .blocked
+    }
+
+    private var watchStatusIsActive: Bool {
+        recorder.loadedProfileCount > 0 || recorder.isRecording || remoteCaptureState == "recording"
     }
 
     private var triggerAudioStatusText: String {
@@ -504,5 +554,27 @@ struct MotionDebugView: View {
         @unknown default:
             return "unknown"
         }
+    }
+}
+
+private struct WatchStatusPanel<Content: View>: View {
+    private var content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            content
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(PajiTheme.panel.opacity(0.76))
+        .clipShape(RoundedRectangle(cornerRadius: PajiTheme.cardRadius, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: PajiTheme.cardRadius, style: .continuous)
+                .stroke(PajiTheme.border, lineWidth: 1)
+        )
     }
 }
