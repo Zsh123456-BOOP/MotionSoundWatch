@@ -258,7 +258,8 @@ struct PhoneDebugView: View {
                     EmptyStateView(
                         title: PajiStrings.t("library.empty.title"),
                         subtitle: PajiStrings.t("library.empty.subtitle"),
-                        glyph: .recordGesture
+                        glyph: .recordGesture,
+                        artworkName: "PajiEmptyLibraryArt"
                     )
                 }
 
@@ -318,7 +319,11 @@ struct PhoneDebugView: View {
                 PajiStepRail(currentIndex: 1, steps: wizardStepTitles)
 
                 HStack(alignment: .center, spacing: 12) {
-                    PajiStatusOrb(style: isRecording ? .blocked : (currentSampleCollectionPlan.acceptedCount > 0 ? .stable : .warning), glyph: .recordGesture, active: isRecording || countdownRemaining != nil)
+                    PajiStatusOrb(
+                        style: isRecording || countdownRemaining != nil ? .stable : (currentSampleCollectionPlan.acceptedCount > 0 ? .stable : .warning),
+                        glyph: .recordGesture,
+                        active: isRecording || countdownRemaining != nil
+                    )
                         .frame(width: 66, height: 66)
                     VStack(alignment: .leading, spacing: 4) {
                         Text(normalizedGestureName)
@@ -405,7 +410,8 @@ struct PhoneDebugView: View {
                 if previewSamples.isEmpty {
                     EmptyStateView(
                         title: "还没有可裁剪的录制",
-                        subtitle: "先录一次动作，Watch 会把这次录制同步到 iPhone。"
+                        subtitle: "先录一次动作，Watch 会把这次录制同步到 iPhone。",
+                        glyph: .recordGesture
                     )
                     PrimaryActionButton(title: "返回录制", systemImage: "record.circle") {
                         currentStep = .record
@@ -506,11 +512,14 @@ struct PhoneDebugView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 8))
 
                 HStack(spacing: 12) {
-                    Image(systemName: selectedAudioFileName.isEmpty ? "music.note" : "waveform")
-                        .font(.title2)
-                        .frame(width: 44, height: 44)
-                        .background(Color.accentColor.opacity(0.12))
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    PajiGlyphView(.waveform, size: 44)
+                        .padding(6)
+                        .background(PajiTheme.panel.opacity(0.86))
+                        .clipShape(RoundedRectangle(cornerRadius: PajiTheme.cardRadius, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: PajiTheme.cardRadius, style: .continuous)
+                                .stroke(PajiTheme.cyan.opacity(selectedAudioFileName.isEmpty ? 0.14 : 0.28), lineWidth: 1)
+                        )
 
                     VStack(alignment: .leading, spacing: 4) {
                         Text(selectedAudioSummaryText)
@@ -685,7 +694,8 @@ struct PhoneDebugView: View {
                     if currentTestEvents.isEmpty {
                         EmptyStateView(
                             title: "等待 Watch 事件",
-                            subtitle: "保持 Watch App 打开并开始做动作。若没有任何事件，说明动作没有被切出或 Watch 没在监听。"
+                            subtitle: "保持 Watch App 打开并开始做动作。若没有任何事件，说明动作没有被切出或 Watch 没在监听。",
+                            glyph: .watch
                         )
                     } else {
                         VStack(alignment: .leading, spacing: 8) {
@@ -715,7 +725,7 @@ struct PhoneDebugView: View {
                         .buttonStyle(.borderedProminent)
                     }
                 } else {
-                    EmptyStateView(title: "未选择动作", subtitle: "返回动作列表选择一个动作开始测试。")
+                    EmptyStateView(title: "未选择动作", subtitle: "返回动作列表选择一个动作开始测试。", glyph: .test)
                     PrimaryActionButton(title: "返回动作列表", systemImage: "list.bullet") {
                         finishTestMode()
                     }
@@ -2097,11 +2107,28 @@ private struct EmptyStateView: View {
     var title: String
     var subtitle: String
     var glyph: PajiGlyph = .playBurst
+    var artworkName: String? = nil
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
-            PajiStatusOrb(style: .warning, glyph: glyph, active: false)
-                .frame(width: 56, height: 56)
+            if let artworkName {
+                Image(artworkName)
+                    .resizable()
+                    .renderingMode(.original)
+                    .scaledToFit()
+                    .frame(width: 86, height: 86)
+                    .accessibilityHidden(true)
+            } else {
+                PajiGlyphView(glyph, size: 48)
+                    .padding(8)
+                    .background(PajiTheme.panel.opacity(0.82))
+                    .clipShape(RoundedRectangle(cornerRadius: PajiTheme.cardRadius, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: PajiTheme.cardRadius, style: .continuous)
+                            .stroke(PajiTheme.cyan.opacity(0.16), lineWidth: 1)
+                    )
+                    .frame(width: 56, height: 56)
+            }
             VStack(alignment: .leading, spacing: 5) {
                 Text(title)
                     .font(.headline)
