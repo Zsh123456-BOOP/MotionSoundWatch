@@ -203,7 +203,7 @@ struct MotionDebugView: View {
             return .sync
         }
         if recorder.loadedProfileCount > 0 {
-            return .waveform
+            return .listening
         }
         return .playBurst
     }

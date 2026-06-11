@@ -237,23 +237,26 @@ struct PajiStatusOrb: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        TimelineView(.animation) { context in
-            let time = context.date.timeIntervalSinceReferenceDate
-            let pulse = reduceMotion || !active ? 0 : (sin(time * 2.6) + 1) / 2
+        GeometryReader { proxy in
+            let side = min(proxy.size.width, proxy.size.height)
+            TimelineView(.animation) { context in
+                let time = context.date.timeIntervalSinceReferenceDate
+                let pulse = reduceMotion || !active ? 0 : (sin(time * 2.6) + 1) / 2
 
-            ZStack {
-                Circle()
-                    .fill(PajiTheme.panelElevated.opacity(0.85))
-                Circle()
-                    .stroke(
-                        LinearGradient(colors: style.colors, startPoint: .topLeading, endPoint: .bottomTrailing),
-                        lineWidth: 2
-                    )
-                Circle()
-                    .stroke(LinearGradient(colors: style.colors, startPoint: .leading, endPoint: .trailing), lineWidth: 1)
-                    .scaleEffect(1.02 + pulse * 0.12)
-                    .opacity(0.18 + pulse * 0.18)
-                PajiGlyphView(glyph, size: 42)
+                ZStack {
+                    Circle()
+                        .fill(PajiTheme.panelElevated.opacity(0.85))
+                    Circle()
+                        .stroke(
+                            LinearGradient(colors: style.colors, startPoint: .topLeading, endPoint: .bottomTrailing),
+                            lineWidth: 2
+                        )
+                    Circle()
+                        .stroke(LinearGradient(colors: style.colors, startPoint: .leading, endPoint: .trailing), lineWidth: 1)
+                        .scaleEffect(1.02 + pulse * 0.12)
+                        .opacity(0.18 + pulse * 0.18)
+                    PajiGlyphView(glyph, size: side * 0.92)
+                }
             }
         }
         .accessibilityHidden(true)
@@ -395,7 +398,7 @@ struct PajiStatusPill: View {
             switch self {
             case .synced: return "checkmark.circle.fill"
             case .stable: return "waveform"
-            case .warning: return "scope"
+            case .warning: return "exclamationmark.triangle.fill"
             case .blocked: return "hand.raised.fill"
             }
         }
@@ -429,6 +432,7 @@ struct PajiStatusPill: View {
 enum PajiGlyph {
     case recordGesture
     case waveform
+    case listening
     case playBurst
     case successBurst
     case watch
@@ -437,6 +441,31 @@ enum PajiGlyph {
     case settings
     case log
     case test
+
+    var assetName: String? {
+        switch self {
+        case .recordGesture:
+            return "PajiIconRecordGesture"
+        case .waveform:
+            return "PajiIconWaveform"
+        case .listening:
+            return "PajiIconListening"
+        case .playBurst:
+            return "PajiIconPlayBurst"
+        case .successBurst:
+            return "PajiIconSuccessBurst"
+        case .watch, .sync:
+            return "PajiIconWatchSync"
+        case .settings:
+            return "PajiIconSettingsExport"
+        case .log:
+            return "PajiIconLibraryLog"
+        case .test:
+            return "PajiIconTestCalibration"
+        case .phone:
+            return nil
+        }
+    }
 }
 
 struct PajiGlyphView: View {
@@ -450,27 +479,13 @@ struct PajiGlyphView: View {
 
     var body: some View {
         ZStack {
-            switch glyph {
-            case .recordGesture:
-                RecordGestureGlyph()
-            case .waveform:
-                WaveformGlyph()
-            case .playBurst:
-                BurstBadgeGlyph(symbol: "play.fill")
-            case .successBurst:
-                BurstBadgeGlyph(symbol: "checkmark")
-            case .watch:
-                SystemGradientGlyph(systemName: "applewatch")
-            case .phone:
+            if let assetName = glyph.assetName {
+                Image(assetName)
+                    .resizable()
+                    .renderingMode(.original)
+                    .scaledToFit()
+            } else {
                 SystemGradientGlyph(systemName: "iphone")
-            case .sync:
-                SystemGradientGlyph(systemName: "arrow.triangle.2.circlepath")
-            case .settings:
-                SystemGradientGlyph(systemName: "gearshape")
-            case .log:
-                SystemGradientGlyph(systemName: "list.bullet.rectangle")
-            case .test:
-                SystemGradientGlyph(systemName: "scope")
             }
         }
         .frame(width: size, height: size)
