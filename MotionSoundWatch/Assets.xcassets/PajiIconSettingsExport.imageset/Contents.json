@@ -1,18 +1,18 @@
 {
   "images": [
     {
-      "filename": "PajiIconSettingsExport-1x.png",
       "idiom": "universal",
+      "filename": "PajiIconSettingsExport-1x.png",
       "scale": "1x"
     },
     {
-      "filename": "PajiIconSettingsExport-2x.png",
       "idiom": "universal",
+      "filename": "PajiIconSettingsExport-2x.png",
       "scale": "2x"
     },
     {
-      "filename": "PajiIconSettingsExport-3x.png",
       "idiom": "universal",
+      "filename": "PajiIconSettingsExport-3x.png",
       "scale": "3x"
     }
   ],

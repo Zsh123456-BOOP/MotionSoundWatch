@@ -1,18 +1,18 @@
 {
   "images": [
     {
-      "filename": "PajiIconListening-1x.png",
       "idiom": "universal",
+      "filename": "PajiIconListening-1x.png",
       "scale": "1x"
     },
     {
-      "filename": "PajiIconListening-2x.png",
       "idiom": "universal",
+      "filename": "PajiIconListening-2x.png",
       "scale": "2x"
     },
     {
-      "filename": "PajiIconListening-3x.png",
       "idiom": "universal",
+      "filename": "PajiIconListening-3x.png",
       "scale": "3x"
     }
   ],

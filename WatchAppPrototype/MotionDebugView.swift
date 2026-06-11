@@ -41,7 +41,7 @@ struct MotionDebugView: View {
 
                 if recorder.loadedProfileCount > 0 {
                     WatchStatusPanel {
-                        Label("当前识别动作", systemImage: "scope")
+                        Label(PajiStrings.t("library.row.active"), systemImage: "scope")
                             .foregroundStyle(.white)
                         Text(recorder.activeRecognitionProfileName ?? "未选择")
                             .font(.footnote.weight(.semibold))
@@ -245,12 +245,12 @@ struct MotionDebugView: View {
 
     private var triggerAudioStatusText: String {
         if recorder.lastTriggerAudioPlayed {
-            return "已请求播放"
+            return PajiStrings.t("watch.audio.requested")
         }
         if let error = soundPlayer.lastError, !error.isEmpty {
-            return "无声"
+            return PajiStrings.t("watch.audio.silent")
         }
-        return "未播放"
+        return PajiStrings.t("watch.audio.notPlayed")
     }
 
     private var outputVolumeText: String {
@@ -259,12 +259,12 @@ struct MotionDebugView: View {
 
     private var watchConnectionText: String {
         if fileSender.isPhoneReachable {
-            return "已连接"
+            return PajiStrings.t("watch.connection.connected")
         }
         if fileSender.activationStateDescription == "activated" {
-            return "等待手机"
+            return PajiStrings.t("watch.connection.waitPhone")
         }
-        return "等待连接"
+        return PajiStrings.t("watch.connection.waitConnection")
     }
 
     private var userFacingMessage: String? {

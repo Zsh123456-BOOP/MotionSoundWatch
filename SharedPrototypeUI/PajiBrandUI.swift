@@ -5,6 +5,10 @@ enum PajiStrings {
     static func t(_ key: String) -> String {
         NSLocalizedString(key, tableName: nil, bundle: .main, value: key, comment: "")
     }
+
+    static func format(_ key: String, _ arguments: CVarArg...) -> String {
+        String(format: t(key), locale: Locale.current, arguments: arguments)
+    }
 }
 
 enum PajiTheme {
@@ -72,7 +76,7 @@ struct PajiLogoLockup: View {
                 .stroke(PajiTheme.pink, style: StrokeStyle(lineWidth: compact ? 2.2 : 3.2, lineCap: .round, lineJoin: .round))
                 .frame(width: compact ? 36 : 58, height: compact ? 16 : 22)
         }
-        .accessibilityLabel("啪叽 Act")
+        .accessibilityLabel(PajiStrings.t("brand.name"))
     }
 }
 

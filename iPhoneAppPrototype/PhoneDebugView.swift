@@ -289,25 +289,25 @@ struct PhoneDebugView: View {
     }
 
     private var createStep: some View {
-        ProductSection("创建动作") {
+        ProductSection(PajiStrings.t("wizard.create.title")) {
             VStack(alignment: .leading, spacing: 14) {
                 PajiStepRail(currentIndex: 0, steps: wizardStepTitles)
 
-                TextField("动作名称", text: $recordingLabel)
+                TextField(PajiStrings.t("wizard.name.placeholder"), text: $recordingLabel)
                     .textFieldStyle(.roundedBorder)
 
                 if let nameConflict {
-                    Text("动作名已存在：\(nameConflict.profile.name)，请重新命名。")
+                    Text(PajiStrings.format("wizard.name.conflict", nameConflict.profile.name))
                         .font(.footnote)
                         .foregroundStyle(.red)
                 }
 
-                Text("先给动作取一个短名字。接下来会录满 5 次同一个动作，系统只保存你确认过的片段。")
+                Text(PajiStrings.t("wizard.create.helper"))
                     .font(.subheadline)
                     .foregroundStyle(PajiTheme.textMuted)
                     .fixedSize(horizontal: false, vertical: true)
 
-                PrimaryActionButton(title: "下一步：录制动作", systemImage: "arrow.right") {
+                PrimaryActionButton(title: PajiStrings.t("wizard.create.next"), systemImage: "arrow.right") {
                     currentStep = .record
                     AppDiagnostics.record("phone.wizard.step", ["step": currentStep.rawValue])
                 }
@@ -317,7 +317,7 @@ struct PhoneDebugView: View {
     }
 
     private var recordStep: some View {
-        ProductSection("录制动作") {
+        ProductSection(PajiStrings.t("wizard.record.title")) {
             VStack(alignment: .leading, spacing: 14) {
                 PajiStepRail(currentIndex: 1, steps: wizardStepTitles)
 
@@ -340,7 +340,7 @@ struct PhoneDebugView: View {
                     RecordingStateBadge(isRecording: isRecording, countdown: countdownRemaining)
                 }
 
-                Text("每次只做一个完整动作。倒数结束后 Watch 会开始采样；动作完成后，在 iPhone 点结束并确认片段。")
+                Text(PajiStrings.t("wizard.record.helper"))
                     .font(.subheadline)
                     .foregroundStyle(PajiTheme.textMuted)
                     .fixedSize(horizontal: false, vertical: true)
@@ -352,7 +352,7 @@ struct PhoneDebugView: View {
                     Button {
                         cancelCountdown()
                     } label: {
-                        Label("取消倒计时", systemImage: "xmark")
+                        Label(PajiStrings.t("record.countdown.cancel"), systemImage: "xmark")
                     }
                     .buttonStyle(.bordered)
                 } else if let pendingRecordingAction {
@@ -365,24 +365,24 @@ struct PhoneDebugView: View {
                     if pendingRecordingAction == .stopRecording {
                         HStack(spacing: 8) {
                             ProgressView()
-                            Text("正在等待 Watch 保存并同步这次录制，完成后自动进入裁剪。")
+                            Text(PajiStrings.t("record.waiting.stop"))
                                 .font(.footnote)
                                 .foregroundStyle(PajiTheme.textMuted)
                         }
                     }
                 } else if isRecording {
-                    PrimaryActionButton(title: "结束录制", systemImage: "stop.fill", tint: .red) {
+                    PrimaryActionButton(title: PajiStrings.t("record.stop"), systemImage: "stop.fill", tint: .red) {
                         stopRecording()
                     }
                 } else {
-                    PrimaryActionButton(title: "开始录制", systemImage: "record.circle") {
+                    PrimaryActionButton(title: PajiStrings.t("record.start"), systemImage: "record.circle") {
                         beginCountdownAndRecording()
                     }
                     .disabled(!canStartRecording)
                 }
 
                 if !receiver.isWatchReachable {
-                    Text("Watch 不在前台时，录制命令会先排队。请打开手表上的啪叽 Act，避免错过这次采样。")
+                    Text(PajiStrings.t("record.watch.queueWarning"))
                         .font(.footnote)
                         .foregroundStyle(.orange)
                 }
@@ -394,8 +394,8 @@ struct PhoneDebugView: View {
                 }
 
                 StepNavigationBar(
-                    backTitle: "返回",
-                    nextTitle: captureFiles.isEmpty ? "等待录制" : "下一步：裁剪",
+                    backTitle: PajiStrings.t("nav.back"),
+                    nextTitle: captureFiles.isEmpty ? PajiStrings.t("record.waiting.capture") : PajiStrings.t("record.next.trim"),
                     canGoNext: !captureFiles.isEmpty
                 ) {
                     currentStep = .create
@@ -408,15 +408,15 @@ struct PhoneDebugView: View {
     }
 
     private var trimStep: some View {
-        ProductSection("裁剪动作片段") {
+        ProductSection(PajiStrings.t("wizard.trim.title")) {
             VStack(alignment: .leading, spacing: 14) {
                 if previewSamples.isEmpty {
                     EmptyStateView(
-                        title: "还没有可裁剪的录制",
-                        subtitle: "先录一次动作，Watch 会把这次录制同步到 iPhone。",
+                        title: PajiStrings.t("trim.empty.title"),
+                        subtitle: PajiStrings.t("trim.empty.subtitle"),
                         glyph: .recordGesture
                     )
-                    PrimaryActionButton(title: "返回录制", systemImage: "record.circle") {
+                    PrimaryActionButton(title: PajiStrings.t("trim.back.record"), systemImage: "record.circle") {
                         currentStep = .record
                     }
                 } else {
@@ -458,7 +458,7 @@ struct PhoneDebugView: View {
                         Button {
                             toggleTrimPlayback()
                         } label: {
-                            Label(isPreviewPlaying ? "暂停播放" : "播放片段", systemImage: isPreviewPlaying ? "pause.fill" : "play.fill")
+                            Label(isPreviewPlaying ? PajiStrings.t("trim.pause") : PajiStrings.t("trim.play"), systemImage: isPreviewPlaying ? "pause.fill" : "play.fill")
                         }
                         .buttonStyle(.bordered)
 
@@ -466,7 +466,7 @@ struct PhoneDebugView: View {
                             stopTrimPlayback()
                             currentStep = .record
                         } label: {
-                            Label("重新录制", systemImage: "arrow.counterclockwise")
+                            Label(PajiStrings.t("trim.rerecord"), systemImage: "arrow.counterclockwise")
                         }
                         .buttonStyle(.bordered)
                     }
@@ -478,7 +478,7 @@ struct PhoneDebugView: View {
                     }
 
                     StepNavigationBar(
-                        backTitle: "返回录制",
+                        backTitle: PajiStrings.t("trim.back.record"),
                         nextTitle: trimNextTitle,
                         canGoNext: !trimmedSamples.isEmpty
                     ) {
@@ -494,14 +494,14 @@ struct PhoneDebugView: View {
     }
 
     private var soundStep: some View {
-        ProductSection(editingAsset == nil ? "配置声音" : "编辑动作") {
+        ProductSection(editingAsset == nil ? PajiStrings.t("wizard.sound.title") : PajiStrings.t("wizard.sound.editTitle")) {
             VStack(alignment: .leading, spacing: 14) {
                 VStack(alignment: .leading, spacing: 10) {
-                    TextField("动作名称", text: $recordingLabel)
+                    TextField(PajiStrings.t("wizard.name.placeholder"), text: $recordingLabel)
                         .textFieldStyle(.roundedBorder)
 
                     if let nameConflict {
-                        Text("动作名已存在：\(nameConflict.profile.name)，请重新命名。")
+                        Text(PajiStrings.format("wizard.name.conflict", nameConflict.profile.name))
                             .font(.footnote)
                             .foregroundStyle(.red)
                     }
@@ -528,7 +528,7 @@ struct PhoneDebugView: View {
                         Text(selectedAudioSummaryText)
                             .font(.headline)
                             .lineLimit(2)
-                        Text("先试听，再加入触发顺序；连续触发时会按顺序播放。")
+                        Text(PajiStrings.t("sound.sequence.helper"))
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
@@ -537,13 +537,13 @@ struct PhoneDebugView: View {
                 Button {
                     activeFileImport = .audio
                 } label: {
-                    Label("从文件选择音频", systemImage: "folder")
+                    Label(PajiStrings.t("sound.chooseFile"), systemImage: "folder")
                 }
                 .buttonStyle(.borderedProminent)
 
                 if !localAudioFiles.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("本机音效")
+                        Text(PajiStrings.t("sound.local.title"))
                             .font(.subheadline.weight(.semibold))
                         ForEach(localAudioFiles, id: \.path) { url in
                             HStack(spacing: 10) {
@@ -583,7 +583,7 @@ struct PhoneDebugView: View {
 
                 if !selectedAudioSequenceFileNames.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("连续触发顺序")
+                        Text(PajiStrings.t("sound.sequence.title"))
                             .font(.subheadline.weight(.semibold))
                         ForEach(Array(selectedAudioSequenceFileNames.enumerated()), id: \.offset) { index, name in
                             HStack(spacing: 10) {
@@ -612,25 +612,25 @@ struct PhoneDebugView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 10) {
-                    SliderValueRow(title: "音量", value: "\(Int(volume * 100))%")
+                    SliderValueRow(title: PajiStrings.t("sound.volume"), value: "\(Int(volume * 100))%")
                     Slider(value: $volume, in: 0.2...1)
-                    SliderValueRow(title: "声音起点", value: "\(Int(soundStartFraction * 100))%")
+                    SliderValueRow(title: PajiStrings.t("sound.startPoint"), value: "\(Int(soundStartFraction * 100))%")
                     Slider(value: $soundStartFraction, in: 0...1)
                 }
 
-                Picker("触发时机", selection: $triggerTiming) {
-                    Text("动作结束").tag("atEnd")
-                    Text("动作最明显时").tag("atPeak")
+                Picker(PajiStrings.t("sound.triggerTiming"), selection: $triggerTiming) {
+                    Text(PajiStrings.t("sound.trigger.atEnd")).tag("atEnd")
+                    Text(PajiStrings.t("sound.trigger.atPeak")).tag("atPeak")
                 }
                 .pickerStyle(.segmented)
 
                 VStack(alignment: .leading, spacing: 8) {
-                    SliderValueRow(title: "冷却时间", value: String(format: "%.1fs", cooldownSeconds))
+                    SliderValueRow(title: PajiStrings.t("sound.cooldown"), value: String(format: "%.1fs", cooldownSeconds))
                     Slider(value: $cooldownSeconds, in: 0.3...2.0, step: 0.1)
                 }
 
                 StepNavigationBar(
-                    backTitle: "返回裁剪",
+                    backTitle: PajiStrings.t("sound.back.trim"),
                     nextTitle: soundStepSaveTitle,
                     canGoNext: canSaveProfile
                 ) {
@@ -643,14 +643,14 @@ struct PhoneDebugView: View {
     }
 
     private var syncStep: some View {
-        ProductSection("保存并同步") {
+        ProductSection(PajiStrings.t("sync.title")) {
             VStack(alignment: .leading, spacing: 14) {
-                SummaryRow(label: "动作", value: normalizedGestureName)
-                SummaryRow(label: "录制", value: "\(syncBaseTemplates.count) 次")
-                SummaryRow(label: "音效", value: selectedAudioFileName.isEmpty ? "未绑定" : selectedAudioFileName)
-                SummaryRow(label: "播放", value: triggerTiming == "atPeak" ? "动作最明显时" : "动作完成后")
+                SummaryRow(label: PajiStrings.t("sync.summary.action"), value: normalizedGestureName)
+                SummaryRow(label: PajiStrings.t("sync.summary.recordings"), value: PajiStrings.format("recording.count", syncBaseTemplates.count))
+                SummaryRow(label: PajiStrings.t("sync.summary.sound"), value: selectedAudioFileName.isEmpty ? PajiStrings.t("sound.unbound") : selectedAudioFileName)
+                SummaryRow(label: PajiStrings.t("sync.summary.playback"), value: triggerTiming == "atPeak" ? PajiStrings.t("sound.trigger.atPeak") : PajiStrings.t("sound.trigger.atEnd"))
 
-                Text("保存后会把动作和已选择的音频发送到 Watch。Watch 端会本地识别和播放。")
+                Text(PajiStrings.t("sync.helper"))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -663,13 +663,13 @@ struct PhoneDebugView: View {
                 Button {
                     activeFileImport = .profile
                 } label: {
-                    Label("导入动作配置", systemImage: "square.and.arrow.down")
+                    Label(PajiStrings.t("sync.importProfile"), systemImage: "square.and.arrow.down")
                 }
                 .buttonStyle(.bordered)
 
                 StepNavigationBar(
-                    backTitle: "返回配音",
-                    nextTitle: "继续录新动作",
+                    backTitle: PajiStrings.t("sync.back.sound"),
+                    nextTitle: PajiStrings.t("sync.next.newAction"),
                     canGoNext: true
                 ) {
                     currentStep = .sound
@@ -681,13 +681,13 @@ struct PhoneDebugView: View {
     }
 
     private var testStep: some View {
-        ProductSection("测试动作") {
+        ProductSection(PajiStrings.t("test.title")) {
             VStack(alignment: .leading, spacing: 14) {
                 if let testingAsset {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(testingAsset.profile.name)
                             .font(.title3.weight(.semibold))
-                        Text("连续做 5 次这个动作。这里会统计 Watch 实际触发了几次，以及有没有播到别的动作。")
+                        Text(PajiStrings.t("test.helper"))
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
@@ -696,13 +696,13 @@ struct PhoneDebugView: View {
 
                     if currentTestEvents.isEmpty {
                         EmptyStateView(
-                            title: "等待 Watch 事件",
-                            subtitle: "保持 Watch App 打开并开始做动作。若没有任何事件，说明动作没有被切出或 Watch 没在监听。",
+                            title: PajiStrings.t("test.empty.title"),
+                            subtitle: PajiStrings.t("test.empty.subtitle"),
                             glyph: .watch
                         )
                     } else {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("最近结果")
+                            Text(PajiStrings.t("test.recent.title"))
                                 .font(.subheadline.weight(.semibold))
                             ForEach(currentTestEvents.prefix(8)) { event in
                                 TestEventRow(event: event, targetProfileID: testingAsset.profile.id)
@@ -716,20 +716,24 @@ struct PhoneDebugView: View {
                             receiver.sendDiagnosticsConfiguration(reason: "testModeRefresh")
                             syncWatchLibrarySnapshot(reason: "testModeRefresh")
                         } label: {
-                            Label("刷新监听", systemImage: "arrow.clockwise")
+                            Label(PajiStrings.t("test.refresh"), systemImage: "arrow.clockwise")
                         }
                         .buttonStyle(.bordered)
 
                         Button {
                             finishTestMode()
                         } label: {
-                            Label("结束测试", systemImage: "checkmark")
+                            Label(PajiStrings.t("test.finish"), systemImage: "checkmark")
                         }
                         .buttonStyle(.borderedProminent)
                     }
                 } else {
-                    EmptyStateView(title: "未选择动作", subtitle: "返回动作列表选择一个动作开始测试。", glyph: .test)
-                    PrimaryActionButton(title: "返回动作列表", systemImage: "list.bullet") {
+                    EmptyStateView(
+                        title: PajiStrings.t("test.noSelection.title"),
+                        subtitle: PajiStrings.t("test.noSelection.subtitle"),
+                        glyph: .test
+                    )
+                    PrimaryActionButton(title: PajiStrings.t("test.back.library"), systemImage: "list.bullet") {
                         finishTestMode()
                     }
                 }
@@ -802,35 +806,35 @@ struct PhoneDebugView: View {
     private var recordingSubtitle: String {
         let plan = currentSampleCollectionPlan
         if editingAsset != nil, isAppendingRecording {
-            return "补录第 \(plan.acceptedCount + 1) 次，目标 \(plan.requiredCount) 次"
+            return PajiStrings.format("recording.subtitle.append", plan.acceptedCount + 1, plan.requiredCount)
         }
-        return "第 \(plan.acceptedCount + 1) 次，目标 \(plan.requiredCount) 次"
+        return PajiStrings.format("recording.subtitle.new", plan.acceptedCount + 1, plan.requiredCount)
     }
 
     private var soundStepSummaryText: String {
         let plan = currentSampleCollectionPlan
         guard let editingAsset else {
-            return "已确认 \(plan.acceptedCount) 次录制，系统会生成\(automaticKindText)模型。"
+            return PajiStrings.format("sound.summary.new", plan.acceptedCount, automaticKindText)
         }
         if isAppendingRecording {
-            return "保存后会保留原有录制，并使用当前共 \(plan.acceptedCount) 次录制重新生成模型。"
+            return PajiStrings.format("sound.summary.append", plan.acceptedCount)
         }
-        return "当前动作已有 \(editingAsset.templateCount) 次录制；保存会同步名称、声音和触发设置。"
+        return PajiStrings.format("sound.summary.edit", editingAsset.templateCount)
     }
 
     private var soundStepSaveTitle: String {
         if editingAsset == nil {
-            return "保存并同步"
+            return PajiStrings.t("sync.saveAndSync")
         }
-        return isAppendingRecording ? "追加录制并同步" : "保存修改"
+        return isAppendingRecording ? PajiStrings.t("sync.appendAndSync") : PajiStrings.t("sync.saveChanges")
     }
 
     private var trimNextTitle: String {
         let plan = sampleCollectionPlan(including: trimmedSamples)
         if plan.needsMoreSamples {
-            return "保存本次，继续录第 \(plan.acceptedCount + 1) 次"
+            return PajiStrings.format("trim.next.continueRecording", plan.acceptedCount + 1)
         }
-        return "下一步：配置声音"
+        return PajiStrings.t("trim.next.sound")
     }
 
     private var canSaveProfile: Bool {
@@ -998,20 +1002,20 @@ struct PhoneDebugView: View {
     private func pendingRecordingTitle(_ action: RecordingControlAction) -> String {
         switch action {
         case .startRecording:
-            return "等待 Watch 开始"
+            return PajiStrings.t("record.pending.start")
         case .stopRecording:
-            return "等待 Watch 结束"
+            return PajiStrings.t("record.pending.stop")
         }
     }
 
     private func syncProfile() {
         guard !normalizedGestureName.isEmpty else {
-            receiver.setLastMessage("请先填写动作名称。")
+            receiver.setLastMessage(PajiStrings.t("wizard.name.missing"))
             AppDiagnostics.record("phone.profile.nameMissing")
             return
         }
         if let nameConflict {
-            receiver.setLastMessage("动作名已存在：\(nameConflict.profile.name)，请重新命名。")
+            receiver.setLastMessage(PajiStrings.format("wizard.name.conflict", nameConflict.profile.name))
             AppDiagnostics.record(
                 "phone.profile.nameConflict",
                 [
@@ -1206,9 +1210,9 @@ struct PhoneDebugView: View {
     private func profileSavedMessage(_ result: ProfileSyncResult, wasAppendingRecording: Bool) -> String {
         let templateCount = result.archive.profiles.first?.templates.count ?? 0
         if wasAppendingRecording {
-            return "已追加第 \(templateCount) 次录制，并同步到 Watch。"
+            return PajiStrings.format("sync.result.appended", templateCount)
         }
-        return "已保存动作，并以 iPhone 动作列表替换 Watch 动作库。"
+        return PajiStrings.t("sync.result.saved")
     }
 
     private func reloadSavedProfiles() {
@@ -1605,9 +1609,9 @@ struct PhoneDebugView: View {
 
     private var selectedAudioSummaryText: String {
         if selectedAudioSequenceFileNames.count > 1 {
-            return "\(selectedAudioSequenceFileNames.count) 段音效"
+            return PajiStrings.format("sound.sequence.count", selectedAudioSequenceFileNames.count)
         }
-        return selectedSoundNames.first ?? "还未选择音效"
+        return selectedSoundNames.first ?? PajiStrings.t("sound.notSelected")
     }
 
     private func previewAudio(_ url: URL) {
@@ -1628,7 +1632,7 @@ struct PhoneDebugView: View {
         if selectedAudioSequenceFileNames.count == 1 {
             selectedAudioFileName = selectedAudioSequenceFileNames[0]
         }
-        receiver.setLastMessage("已更新音效顺序：\(selectedAudioSequenceFileNames.count) 段")
+        receiver.setLastMessage(PajiStrings.format("sound.sequence.updated", selectedAudioSequenceFileNames.count))
         AppDiagnostics.record(
             "phone.audio.sequenceUpdated",
             [
@@ -1745,15 +1749,15 @@ struct PhoneDebugView: View {
 
     private func recordingStatusText(_ status: RecordingStatusEvent) -> String {
         if let error = status.errorMessage, !error.isEmpty {
-            return "Watch 执行失败：\(error)"
+            return PajiStrings.format("record.status.failed", error)
         }
         if status.state == "recording" {
-            return "Watch 正在录制 \(status.label.isEmpty ? normalizedGestureName : status.label)"
+            return PajiStrings.format("record.status.recording", status.label.isEmpty ? normalizedGestureName : status.label)
         }
         if status.csvQueued {
-            return "Watch 已结束，正在同步这次录制。"
+            return PajiStrings.t("record.status.syncing")
         }
-        return "Watch 已结束，正在保存这次录制。"
+        return PajiStrings.t("record.status.saving")
     }
 
     private func formatDuration(_ samples: [MotionSample]) -> String {
@@ -1780,19 +1784,19 @@ private enum SetupStep: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .library:
-            return "动作"
+            return PajiStrings.t("step.library")
         case .create:
-            return "动作"
+            return PajiStrings.t("step.create")
         case .record:
-            return "录制"
+            return PajiStrings.t("step.record")
         case .trim:
-            return "裁剪"
+            return PajiStrings.t("step.trim")
         case .sound:
-            return "声音"
+            return PajiStrings.t("step.sound")
         case .sync:
-            return "同步"
+            return PajiStrings.t("step.sync")
         case .test:
-            return "测试"
+            return PajiStrings.t("step.test")
         }
     }
 
@@ -1864,7 +1868,7 @@ private enum AudioImportError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidDuration:
-            return "这个音频文件无法读取有效时长，请换一个 MP3、WAV、M4A 或 AAC 文件。"
+            return PajiStrings.t("audio.error.invalidDuration")
         }
     }
 }
@@ -2103,7 +2107,7 @@ private struct RecordingStateBadge: View {
         if let countdown {
             return "\(countdown)"
         }
-        return isRecording ? "录制中" : "待开始"
+        return isRecording ? PajiStrings.t("record.badge.recording") : PajiStrings.t("record.badge.ready")
     }
 
     private var color: Color {
@@ -2119,7 +2123,7 @@ private struct CountdownView: View {
             Text("\(value)")
                 .font(.system(size: 72, weight: .bold, design: .rounded))
                 .monospacedDigit()
-            Text("准备做动作")
+            Text(PajiStrings.t("record.countdown.ready"))
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
@@ -2181,15 +2185,15 @@ private struct CapturePicker: View {
 
     var body: some View {
         if files.count > 1 {
-            Picker("选择录制", selection: $selectedURL) {
+            Picker(PajiStrings.t("trim.chooseRecording"), selection: $selectedURL) {
                 ForEach(Array(files.enumerated()), id: \.element.id) { index, file in
-                    Text("第 \(index + 1) 次录制")
+                    Text(PajiStrings.format("recording.ordinal", index + 1))
                         .tag(Optional(file.fileURL))
                 }
             }
             .pickerStyle(.menu)
         } else if files.first != nil {
-            SummaryRow(label: "录制", value: "第 1 次")
+            SummaryRow(label: PajiStrings.t("sync.summary.recordings"), value: PajiStrings.format("recording.ordinal", 1))
         }
     }
 }
@@ -2214,7 +2218,7 @@ private struct MotionSignalTimeline: View {
         return reduced.map { offset, sample in
             let time = sample.timestamp - first.timestamp
             let energy = sample.userAcceleration.magnitude + 0.25 * sample.rotationRate.magnitude
-            return SignalPoint(id: "\(offset)-energy", time: time, value: energy / maxEnergy, series: "动作强度")
+            return SignalPoint(id: "\(offset)-energy", time: time, value: energy / maxEnergy, series: PajiStrings.t("trim.signal.energy"))
         }
     }
 
@@ -2228,7 +2232,7 @@ private struct MotionSignalTimeline: View {
             HStack(spacing: 10) {
                 SignalLegend(color: .accentColor, label: "动作强度")
                 Spacer()
-                Text("拖动下面的开始和结束，保留真正的动作部分")
+                Text(PajiStrings.t("trim.timeline.helper"))
                     .foregroundStyle(.secondary)
             }
             .font(.caption)
@@ -2236,38 +2240,38 @@ private struct MotionSignalTimeline: View {
             Chart {
                 ForEach(points) { point in
                     LineMark(
-                        x: .value("时间", point.time),
-                        y: .value("归一化", point.value),
-                        series: .value("信号", point.series)
+                    x: .value(PajiStrings.t("trim.chart.time"), point.time),
+                    y: .value(PajiStrings.t("trim.chart.normalized"), point.value),
+                    series: .value(PajiStrings.t("trim.chart.signal"), point.series)
                     )
                     .lineStyle(StrokeStyle(lineWidth: 2.4))
                     .foregroundStyle(by: .value("信号", point.series))
                 }
 
                 RectangleMark(
-                    xStart: .value("开始", duration * min(trimStartFraction, trimEndFraction)),
-                    xEnd: .value("结束", duration * max(trimStartFraction, trimEndFraction)),
-                    yStart: .value("下限", -1.05),
-                    yEnd: .value("上限", 1.05)
+                    xStart: .value(PajiStrings.t("trim.start"), duration * min(trimStartFraction, trimEndFraction)),
+                    xEnd: .value(PajiStrings.t("trim.end"), duration * max(trimStartFraction, trimEndFraction)),
+                    yStart: .value(PajiStrings.t("trim.lower"), -1.05),
+                    yEnd: .value(PajiStrings.t("trim.upper"), 1.05)
                 )
                 .foregroundStyle(Color.orange.opacity(0.12))
 
-                RuleMark(x: .value("开始", duration * trimStartFraction))
+                RuleMark(x: .value(PajiStrings.t("trim.start"), duration * trimStartFraction))
                     .foregroundStyle(Color.orange)
                     .lineStyle(StrokeStyle(lineWidth: 2))
-                RuleMark(x: .value("结束", duration * trimEndFraction))
+                RuleMark(x: .value(PajiStrings.t("trim.end"), duration * trimEndFraction))
                     .foregroundStyle(Color.orange)
                     .lineStyle(StrokeStyle(lineWidth: 2))
-                RuleMark(x: .value("播放", duration * playbackFraction))
+                RuleMark(x: .value(PajiStrings.t("trim.playhead"), duration * playbackFraction))
                     .foregroundStyle(Color.red)
                     .lineStyle(StrokeStyle(lineWidth: 2, dash: [4, 3]))
             }
             .chartForegroundStyleScale([
-                "动作强度": Color.accentColor,
+                PajiStrings.t("trim.signal.energy"): Color.accentColor,
             ])
             .chartLegend(.hidden)
             .chartYScale(domain: -1.05...1.05)
-            .chartXAxisLabel("时间")
+            .chartXAxisLabel(PajiStrings.t("trim.chart.time"))
             .chartYAxis(.hidden)
         }
     }
@@ -2303,13 +2307,13 @@ private struct TrimControls: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            SliderValueRow(title: "开始", value: timeText(startFraction))
+            SliderValueRow(title: PajiStrings.t("trim.start"), value: timeText(startFraction))
             Slider(value: $startFraction, in: 0...max(0, endFraction - 0.02))
 
-            SliderValueRow(title: "结束", value: timeText(endFraction))
+            SliderValueRow(title: PajiStrings.t("trim.end"), value: timeText(endFraction))
             Slider(value: $endFraction, in: min(1, startFraction + 0.02)...1)
 
-            SliderValueRow(title: "播放位置", value: timeText(playbackFraction))
+            SliderValueRow(title: PajiStrings.t("trim.playhead"), value: timeText(playbackFraction))
             Slider(value: $playbackFraction, in: startFraction...endFraction)
         }
     }
@@ -2324,8 +2328,8 @@ private struct CaptureStats: View {
 
     var body: some View {
         HStack {
-            SummaryMetric(title: "已选时长", value: durationText)
-            SummaryMetric(title: "片段状态", value: qualityText)
+            SummaryMetric(title: PajiStrings.t("trim.stats.duration"), value: durationText)
+            SummaryMetric(title: PajiStrings.t("trim.stats.quality"), value: qualityText)
         }
     }
 
@@ -2335,15 +2339,15 @@ private struct CaptureStats: View {
     }
 
     private var qualityText: String {
-        guard let first = samples.first, let last = samples.last else { return "待选择" }
+        guard let first = samples.first, let last = samples.last else { return PajiStrings.t("trim.quality.pending") }
         let duration = max(0, last.timestamp - first.timestamp)
         if duration < 0.25 {
-            return "偏短"
+            return PajiStrings.t("trim.quality.short")
         }
         if duration > 8 {
-            return "偏长"
+            return PajiStrings.t("trim.quality.long")
         }
-        return "可用"
+        return PajiStrings.t("trim.quality.good")
     }
 }
 
@@ -2413,11 +2417,11 @@ private struct SampleCollectionStatusView: View {
             HStack(spacing: 8) {
                 Image(systemName: plan.isReady ? "checkmark.circle.fill" : "circle.dotted")
                     .foregroundStyle(plan.isReady ? PajiTheme.lime : PajiTheme.cyan)
-                Text("\(plan.acceptedCount)/\(plan.requiredCount) 次录制")
+                Text(PajiStrings.format("sample.progress", plan.acceptedCount, plan.requiredCount))
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.white)
                 Spacer()
-                Text(plan.isReady ? "可保存" : "继续录制")
+                Text(plan.isReady ? PajiStrings.t("sample.ready") : PajiStrings.t("sample.continue"))
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(plan.isReady ? PajiTheme.lime : PajiTheme.cyan)
             }
@@ -2481,9 +2485,9 @@ private struct TestModeSummaryView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                TestMetricView(title: "正确触发", value: "\(summary.correctTriggerCount)/5", color: .green)
-                TestMetricView(title: "播错动作", value: "\(summary.wrongTriggerCount)", color: summary.wrongTriggerCount > 0 ? .red : .secondary)
-                TestMetricView(title: "未通过", value: "\(summary.targetRejectedCount)", color: summary.targetRejectedCount > 0 ? .orange : .secondary)
+                TestMetricView(title: PajiStrings.t("test.metric.correct"), value: "\(summary.correctTriggerCount)/5", color: .green)
+                TestMetricView(title: PajiStrings.t("test.metric.wrong"), value: "\(summary.wrongTriggerCount)", color: summary.wrongTriggerCount > 0 ? .red : .secondary)
+                TestMetricView(title: PajiStrings.t("test.metric.rejected"), value: "\(summary.targetRejectedCount)", color: summary.targetRejectedCount > 0 ? .orange : .secondary)
             }
             Text(testHint)
                 .font(.footnote)
@@ -2497,18 +2501,18 @@ private struct TestModeSummaryView: View {
 
     private var testHint: String {
         if summary.totalEventCount == 0 {
-            return "还没有收到 Watch 识别事件。先做几次动作，结果会自动同步到这里。"
+            return PajiStrings.t("test.hint.noEvents")
         }
         if summary.wrongTriggerCount > 0 {
-            return "出现播错动作，需要继续补录或等下一轮融合识别收紧冲突。"
+            return PajiStrings.t("test.hint.wrong")
         }
         if summary.correctTriggerCount >= 5 {
-            return "5 次测试都正确触发，可以进入下一轮真实使用测试。"
+            return PajiStrings.t("test.hint.passed")
         }
         if summary.targetRejectedCount > 0 {
-            return "Watch 已看到相似动作但没有通过，后续应把这些片段作为补录样本或优化 variant。"
+            return PajiStrings.t("test.hint.rejected")
         }
-        return "如果你已经做满 5 次但触发不足，说明部分动作没有被切出，需要继续看 Watch trace。"
+        return PajiStrings.t("test.hint.missed")
     }
 }
 
@@ -2574,9 +2578,9 @@ private struct TestEventRow: View {
     }
 
     private var title: String {
-        if event.triggered, isTarget { return "正确触发：\(event.profileName)" }
-        if event.triggered { return "播错为：\(event.profileName)" }
-        return "未触发"
+        if event.triggered, isTarget { return PajiStrings.format("test.event.correct", event.profileName) }
+        if event.triggered { return PajiStrings.format("test.event.wrong", event.profileName) }
+        return PajiStrings.t("test.event.rejected")
     }
 
     private var detail: String {
@@ -2603,9 +2607,9 @@ private struct PhoneGestureAsset: Identifiable, Equatable {
     var templateCount: Int { profile.templates.count }
     var soundName: String {
         if let sequence = profile.soundSequence, sequence.count > 1 {
-            return "\(sequence.count) 段音效"
+            return PajiStrings.format("sound.sequence.count", sequence.count)
         }
-        return profile.sound?.fileName ?? "未绑定音效"
+        return profile.sound?.fileName ?? PajiStrings.t("sound.unbound")
     }
     var isLegacyUntitled: Bool {
         profile.name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2635,12 +2639,12 @@ private struct GestureAssetRow: View {
                             .font(.headline)
                             .foregroundStyle(.white)
                             .lineLimit(1)
-                        Text("\(asset.templateCount) 次录制 · \(asset.soundName)")
+                        Text(PajiStrings.format("library.row.detail", asset.templateCount, asset.soundName))
                             .font(.caption)
                             .foregroundStyle(PajiTheme.textMuted)
                             .lineLimit(1)
                         if isActive {
-                            Label("当前识别动作", systemImage: "scope")
+                            Label(PajiStrings.t("library.row.active"), systemImage: "scope")
                                 .font(.caption2.weight(.semibold))
                                 .foregroundStyle(PajiTheme.cyan)
                         }
@@ -2660,36 +2664,36 @@ private struct GestureAssetRow: View {
                     .lineLimit(1)
                 Spacer()
                 Button(action: record) {
-                    Label("补录", systemImage: "record.circle")
+                    Label(PajiStrings.t("library.action.addSample"), systemImage: "record.circle")
                         .labelStyle(.iconOnly)
                 }
-                .accessibilityLabel("补录")
+                .accessibilityLabel(PajiStrings.t("library.action.addSample"))
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 Button(action: test) {
-                    Label("测试", systemImage: "scope")
+                    Label(PajiStrings.t("library.action.test"), systemImage: "scope")
                         .labelStyle(.iconOnly)
                 }
-                .accessibilityLabel("测试")
+                .accessibilityLabel(PajiStrings.t("library.action.test"))
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 Button(action: setActive) {
                     Image(systemName: "scope")
                 }
-                .accessibilityLabel("设为当前识别动作")
+                .accessibilityLabel(PajiStrings.t("library.action.setActive"))
                 .buttonStyle(.bordered)
                 .tint(isActive ? PajiTheme.cyan : PajiTheme.textMuted)
                 .controlSize(.small)
                 Button(action: resync) {
                     Image(systemName: "arrow.triangle.2.circlepath")
                 }
-                .accessibilityLabel("重新同步")
+                .accessibilityLabel(PajiStrings.t("library.action.resync"))
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 Button(role: .destructive, action: delete) {
                     Image(systemName: "trash")
                 }
-                .accessibilityLabel("删除")
+                .accessibilityLabel(PajiStrings.t("library.action.delete"))
                 .buttonStyle(.bordered)
                 .controlSize(.small)
             }
