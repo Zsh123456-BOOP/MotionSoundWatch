@@ -1,5 +1,80 @@
 import Foundation
 
+/// 零相位低通滤波器：对 userAcceleration / rotationRate 做前向+后向一阶低通，
+/// 抵消相位延迟。用于在特征提取与 DTW 匹配前统一去除 50Hz 原始信号的高频抖动。
+///
+/// 关键约束：必须在"模板侧"与"候选侧"以完全相同的方式应用，否则距离不可比。
+/// 因此本滤波器集中在 MotionTemplateMatcher 与批量特征提取入口调用，
+/// 原始 CSV / 样本保持不变（便于诊断与离线复算）。
+public struct MotionLowPassFilter: Sendable, Equatable {
+    /// 截止频率（Hz）。默认 9Hz：保留绝大多数人手动作能量（<6Hz），
+    /// 同时压制传感器噪声与轻微震颤。设为 <=0 时退化为恒等（不滤波）。
+    public var cutoffHz: Double
+    /// 低于该样本数不滤波（短促 burst 没有足够样本支撑滤波，直接透传）。
+    public var minimumSampleCount: Int
+
+    public init(cutoffHz: Double = 9.0, minimumSampleCount: Int = 6) {
+        self.cutoffHz = cutoffHz
+        self.minimumSampleCount = minimumSampleCount
+    }
+
+    public static let identity = MotionLowPassFilter(cutoffHz: 0)
+
+    public func filtered(_ samples: [MotionSample]) -> [MotionSample] {
+        guard cutoffHz > 0, samples.count >= max(4, minimumSampleCount) else {
+            return samples
+        }
+        let dt = estimatedDt(samples)
+        guard dt > 0, dt.isFinite else { return samples }
+
+        let rc = 1.0 / (2 * Double.pi * cutoffHz)
+        let alpha = max(0.0, min(1.0, dt / (rc + dt)))
+        // alpha 接近 1 表示几乎不滤波；接近 0 表示强平滑。
+        guard alpha < 0.999 else { return samples }
+
+        let accX = filterChannel(samples.map(\.userAcceleration.x), alpha: alpha)
+        let accY = filterChannel(samples.map(\.userAcceleration.y), alpha: alpha)
+        let accZ = filterChannel(samples.map(\.userAcceleration.z), alpha: alpha)
+        let gyrX = filterChannel(samples.map(\.rotationRate.x), alpha: alpha)
+        let gyrY = filterChannel(samples.map(\.rotationRate.y), alpha: alpha)
+        let gyrZ = filterChannel(samples.map(\.rotationRate.z), alpha: alpha)
+
+        return samples.enumerated().map { index, sample in
+            MotionSample(
+                timestamp: sample.timestamp,
+                userAcceleration: MotionVector3(x: accX[index], y: accY[index], z: accZ[index]),
+                rotationRate: MotionVector3(x: gyrX[index], y: gyrY[index], z: gyrZ[index]),
+                gravity: sample.gravity,
+                attitude: sample.attitude
+            )
+        }
+    }
+
+    private func filterChannel(_ values: [Double], alpha: Double) -> [Double] {
+        guard values.count >= 2 else { return values }
+        // 前向一阶低通。
+        var forward = values
+        for i in 1..<forward.count {
+            forward[i] = forward[i - 1] + alpha * (values[i] - forward[i - 1])
+        }
+        // 后向再滤一次，抵消相位延迟（零相位）。
+        var backward = forward
+        for i in stride(from: backward.count - 2, through: 0, by: -1) {
+            backward[i] = backward[i + 1] + alpha * (forward[i] - backward[i + 1])
+        }
+        return backward
+    }
+
+    private func estimatedDt(_ samples: [MotionSample]) -> Double {
+        guard let first = samples.first, let last = samples.last, samples.count > 1 else {
+            return 0
+        }
+        let span = last.timestamp - first.timestamp
+        guard span > 0 else { return 0 }
+        return span / Double(samples.count - 1)
+    }
+}
+
 public struct MotionRingBuffer: Equatable, Sendable {
     public var maxDuration: Double
     private var storage: [MotionSample]
@@ -168,6 +243,61 @@ public struct MotionEnergyAnalyzer: Sendable {
         }
 
         return output
+    }
+}
+
+/// 录制完成后自动检测动作的活动区间（起止），用于把裁剪滑块默认定位到真实动作段，
+/// 而不是固定 5%-95%。基于能量包络，并按动作类型给不同的前后留白。
+public struct MotionActiveWindowDetector: Sendable {
+    public var energyAnalyzer: MotionEnergyAnalyzer
+    public var lowPassFilter: MotionLowPassFilter
+
+    public init(
+        energyAnalyzer: MotionEnergyAnalyzer = MotionEnergyAnalyzer(),
+        lowPassFilter: MotionLowPassFilter = MotionLowPassFilter()
+    ) {
+        self.energyAnalyzer = energyAnalyzer
+        self.lowPassFilter = lowPassFilter
+    }
+
+    /// 返回活动区间在整段录制内的 [start, end] 比例（0...1）。
+    /// 检测失败（信号太弱/太短）时回退到保守的 [0.05, 0.95]。
+    public func activeWindowFractions(_ rawSamples: [MotionSample]) -> (start: Double, end: Double) {
+        let fallback = (start: 0.05, end: 0.95)
+        guard rawSamples.count >= 8,
+              let first = rawSamples.first,
+              let last = rawSamples.last else {
+            return fallback
+        }
+        let total = last.timestamp - first.timestamp
+        guard total > 0 else { return fallback }
+
+        let samples = lowPassFilter.filtered(rawSamples)
+        let frames = energyAnalyzer.frames(for: samples)
+        guard let peak = frames.map(\.energy).max(), peak > 0.05 else {
+            return fallback
+        }
+
+        // 活动阈值：峰值的 12%，但有下限，避免把低频漂移算成动作。
+        let threshold = max(0.05, peak * 0.12)
+        guard let firstActive = frames.first(where: { $0.energy >= threshold }),
+              let lastActive = frames.last(where: { $0.energy >= threshold }) else {
+            return fallback
+        }
+
+        // 前后留白：动作起止往往比能量越阈早/晚一点。
+        let padding = 0.12
+        let startTime = max(first.timestamp, firstActive.timestamp - padding)
+        let endTime = min(last.timestamp, lastActive.timestamp + padding)
+        let startFraction = (startTime - first.timestamp) / total
+        let endFraction = (endTime - first.timestamp) / total
+
+        // 边界保护：保证 start < end 且区间不至于退化。
+        guard endFraction - startFraction >= 0.05 else { return fallback }
+        return (
+            start: max(0, min(0.9, startFraction)),
+            end: min(1, max(startFraction + 0.05, endFraction))
+        )
     }
 }
 

@@ -1363,6 +1363,93 @@ import Foundation
     #expect(switchedEvaluation.candidateReports.map(\.profileID) == [inactiveProfile.id])
 }
 
+@Test func lowPassFilterSuppressesHighFrequencyNoiseButKeepsShape() {
+    // 在干净 burst 上叠加高频噪声，滤波后应更接近原始干净信号。
+    let clean = syntheticBurst(duration: 0.8, amplitude: 1.0)
+    var rngState: UInt64 = 0x9E3779B97F4A7C15
+    func noise() -> Double {
+        // 确定性伪随机（不依赖 Math.random），范围约 [-0.15, 0.15]。
+        rngState = rngState &* 6364136223846793005 &+ 1442695040888963407
+        return (Double(rngState >> 40) / Double(1 << 24) - 0.5) * 0.30
+    }
+    let noisy = clean.map { sample in
+        MotionSample(
+            timestamp: sample.timestamp,
+            userAcceleration: MotionVector3(
+                x: sample.userAcceleration.x + noise(),
+                y: sample.userAcceleration.y + noise(),
+                z: sample.userAcceleration.z + noise()
+            ),
+            rotationRate: sample.rotationRate
+        )
+    }
+    let filter = MotionLowPassFilter(cutoffHz: 8)
+    let filtered = filter.filtered(noisy)
+
+    func meanAbsErr(_ a: [MotionSample], _ b: [MotionSample]) -> Double {
+        zip(a, b).map { abs($0.userAcceleration.x - $1.userAcceleration.x) }
+            .reduce(0, +) / Double(a.count)
+    }
+    let rawErr = meanAbsErr(noisy, clean)
+    let filteredErr = meanAbsErr(filtered, clean)
+    #expect(filteredErr < rawErr)
+    #expect(filtered.count == noisy.count)
+    // 滤波保持时间戳不变。
+    #expect(filtered.first?.timestamp == noisy.first?.timestamp)
+    #expect(filtered.last?.timestamp == noisy.last?.timestamp)
+}
+
+@Test func lowPassFilterIsIdentityForTinyOrDisabledInput() {
+    let tiny = Array(syntheticBurst(duration: 0.8, amplitude: 1.0).prefix(3))
+    #expect(MotionLowPassFilter().filtered(tiny) == tiny)
+    let full = syntheticBurst(duration: 0.8, amplitude: 1.0)
+    #expect(MotionLowPassFilter.identity.filtered(full) == full)
+}
+
+@Test func activeWindowDetectorLocatesGestureRegionInsidePadding() {
+    // 构造：前后各 0.5s 静止 + 中间 0.8s burst。
+    let idleBefore = (0..<25).map { i in
+        MotionSample(
+            timestamp: Double(i) * 0.02,
+            userAcceleration: MotionVector3(x: 0.01, y: 0, z: 0),
+            rotationRate: MotionVector3(x: 0, y: 0, z: 0)
+        )
+    }
+    let burst = syntheticBurst(duration: 0.8, amplitude: 1.2).map { s in
+        MotionSample(
+            timestamp: s.timestamp + 0.5,
+            userAcceleration: s.userAcceleration,
+            rotationRate: s.rotationRate
+        )
+    }
+    let idleAfter = (0..<25).map { i in
+        MotionSample(
+            timestamp: 1.3 + Double(i) * 0.02,
+            userAcceleration: MotionVector3(x: 0.01, y: 0, z: 0),
+            rotationRate: MotionVector3(x: 0, y: 0, z: 0)
+        )
+    }
+    let samples = idleBefore + burst + idleAfter
+    let window = MotionActiveWindowDetector().activeWindowFractions(samples)
+    // 活动段应被定位在中部（不是默认 0.05/0.95）。
+    #expect(window.start > 0.15)
+    #expect(window.end < 0.85)
+    #expect(window.end > window.start)
+}
+
+@Test func activeWindowDetectorFallsBackForFlatSignal() {
+    let flat = (0..<40).map { i in
+        MotionSample(
+            timestamp: Double(i) * 0.02,
+            userAcceleration: MotionVector3(x: 0.005, y: 0, z: 0),
+            rotationRate: MotionVector3(x: 0, y: 0, z: 0)
+        )
+    }
+    let window = MotionActiveWindowDetector().activeWindowFractions(flat)
+    #expect(window.start == 0.05)
+    #expect(window.end == 0.95)
+}
+
 @Test func runtimeDefaultsToInactiveSelection() {
     // 不显式传 selection 时，runtime 必须默认 .inactive（未选动作不识别）。
     let templateBuilder = MotionTemplateBuilder()

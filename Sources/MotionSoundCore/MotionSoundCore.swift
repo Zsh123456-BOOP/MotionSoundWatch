@@ -632,10 +632,17 @@ public struct CalibrationReport: Codable, Equatable, Sendable {
 public struct MotionTemplateMatcher: Sendable {
     public var targetSampleCount: Int
     public var sakoeChibaRadius: Int
+    /// 匹配前对模板与候选统一应用的低通滤波（两侧一致，保证距离可比）。
+    public var lowPassFilter: MotionLowPassFilter
 
-    public init(targetSampleCount: Int = 48, sakoeChibaRadius: Int = 8) {
+    public init(
+        targetSampleCount: Int = 48,
+        sakoeChibaRadius: Int = 8,
+        lowPassFilter: MotionLowPassFilter = MotionLowPassFilter()
+    ) {
         self.targetSampleCount = targetSampleCount
         self.sakoeChibaRadius = sakoeChibaRadius
+        self.lowPassFilter = lowPassFilter
     }
 
     public func bestMatch(
@@ -674,8 +681,8 @@ public struct MotionTemplateMatcher: Sendable {
     }
 
     public func distance(_ lhs: [MotionSample], _ rhs: [MotionSample]) -> Double {
-        let leftFrames = normalize(resample(lhs, targetCount: targetSampleCount))
-        let rightFrames = normalize(resample(rhs, targetCount: targetSampleCount))
+        let leftFrames = normalize(resample(lowPassFilter.filtered(lhs), targetCount: targetSampleCount))
+        let rightFrames = normalize(resample(lowPassFilter.filtered(rhs), targetCount: targetSampleCount))
         return dynamicTimeWarping(leftFrames, rightFrames, radius: sakoeChibaRadius)
     }
 

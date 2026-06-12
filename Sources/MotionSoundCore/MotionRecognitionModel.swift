@@ -518,12 +518,20 @@ public struct CandidateRecognitionReport: Codable, Equatable, Sendable {
 
 public struct MotionFeatureExtractor: Sendable {
     public var energyAnalyzer: MotionEnergyAnalyzer
+    /// 语义特征提取前的低通滤波。零交叉计数、旋转轴稳定度对高频噪声极敏感，
+    /// 去噪后 oscillation / rotation 的判别更稳定，减少日常抖动被误判为周期动作。
+    public var lowPassFilter: MotionLowPassFilter
 
-    public init(energyAnalyzer: MotionEnergyAnalyzer = MotionEnergyAnalyzer()) {
+    public init(
+        energyAnalyzer: MotionEnergyAnalyzer = MotionEnergyAnalyzer(),
+        lowPassFilter: MotionLowPassFilter = MotionLowPassFilter()
+    ) {
         self.energyAnalyzer = energyAnalyzer
+        self.lowPassFilter = lowPassFilter
     }
 
-    public func extract(_ samples: [MotionSample]) -> GestureSampleFeatures {
+    public func extract(_ rawSamples: [MotionSample]) -> GestureSampleFeatures {
+        let samples = lowPassFilter.filtered(rawSamples)
         let frames = energyAnalyzer.frames(for: samples)
         guard samples.count >= 2, !frames.isEmpty else {
             return GestureSampleFeatures(

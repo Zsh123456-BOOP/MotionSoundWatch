@@ -38,6 +38,8 @@ struct PhoneDebugView: View {
     @State private var testingAsset: PhoneGestureAsset?
     @State private var testStartedAt: Date?
     @State private var testBaselineWatchEventCount = 0
+    /// 低质量样本被拦截后，再次点击"下一步"才允许强行采纳（二次确认）。
+    @State private var lowQualityOverrideArmed = false
 
     private var captureFiles: [ReceivedSyncedFile] {
         let csvFiles = receiver.receivedFiles
@@ -1164,8 +1166,60 @@ struct PhoneDebugView: View {
         )
     }
 
+    /// 当前裁剪片段的质量评估。draftKind 用样本自身探测的类型，避免把
+    /// sequence/posture 误判成 burst 而错误地触发"类型不一致"告警。
+    private var trimmedSampleQualityReport: RecordingQualityReport? {
+        guard trimmedSamples.count >= 2 else { return nil }
+        let detectedKind = detectedGestureKind(for: trimmedSamples)
+        return MotionRecordingValidator().qualityReport(
+            samples: trimmedSamples,
+            draftKind: detectedKind,
+            existingPositiveTemplates: acceptedRecordingTemplates(),
+            existingNegativeTemplates: []
+        )
+    }
+
+    private func detectedGestureKind(for samples: [MotionSample]) -> GestureKind {
+        if let editingAsset { return editingAsset.profile.kind }
+        let features = MotionFeatureExtractor().extract(samples)
+        switch MotionTokenizer().classify(features) {
+        case .rotation, .oscillation:
+            return .sequence
+        case .hold:
+            return .posture
+        case .impulse, .sweep:
+            return .burst
+        case .pause, .free:
+            return features.duration <= 1.6 ? .burst : .sequence
+        }
+    }
+
     private func acceptTrimmedSampleAndContinueOrConfigureSound() {
         guard !trimmedSamples.isEmpty else { return }
+
+        // 质量门：异常样本默认拦截，二次确认后才允许强行采纳。
+        if let report = trimmedSampleQualityReport,
+           !report.canUseForTraining,
+           !lowQualityOverrideArmed {
+            lowQualityOverrideArmed = true
+            let reason = report.errors.first ?? report.warnings.first ?? "这次录制质量不足，建议重录。"
+            previewMessage = "⚠️ \(reason) 如果确认动作正确，再次点击下一步可强行采纳。"
+            receiver.setLastMessage(reason)
+            AppDiagnostics.record(
+                "phone.recording.qualityBlocked",
+                [
+                    "label": normalizedGestureName,
+                    "energyScore": String(format: "%.3f", report.energyScore),
+                    "clippingRisk": String(format: "%.3f", report.clippingRisk),
+                    "sampleRate": String(format: "%.1f", report.sampleRate),
+                    "detectedKind": report.detectedKind.rawValue,
+                    "reason": reason,
+                ]
+            )
+            return
+        }
+        lowQualityOverrideArmed = false
+
         acceptCurrentTrimmedRecording()
         let plan = currentSampleCollectionPlan
         receiver.setLastMessage(plan.message)
@@ -1207,6 +1261,7 @@ struct PhoneDebugView: View {
         trimStartFraction = 0.05
         trimEndFraction = 0.95
         playbackFraction = 0
+        lowQualityOverrideArmed = false
         currentStep = .record
     }
 
@@ -1756,11 +1811,22 @@ struct PhoneDebugView: View {
         do {
             let samples = try MotionSampleCSVCodec().decodeData(Data(contentsOf: file.fileURL))
             previewSamples = samples
-            trimStartFraction = min(trimStartFraction, 0.95)
-            trimEndFraction = max(trimEndFraction, 0.05)
+            lowQualityOverrideArmed = false
+            // 自动把裁剪滑块定位到检测到的真实动作段，用户多数情况下无需手动调整。
+            let window = MotionActiveWindowDetector().activeWindowFractions(samples)
+            trimStartFraction = window.start
+            trimEndFraction = window.end
             playbackFraction = 0
-            previewMessage = "已载入动作片段，时长 \(formatDuration(samples))。"
-            AppDiagnostics.record("phone.capture.preview.loaded", ["file": file.fileURL.lastPathComponent, "samples": samples.count])
+            previewMessage = "已载入动作片段，时长 \(formatDuration(samples))。已自动定位动作区间，可微调。"
+            AppDiagnostics.record(
+                "phone.capture.preview.loaded",
+                [
+                    "file": file.fileURL.lastPathComponent,
+                    "samples": samples.count,
+                    "autoTrimStart": String(format: "%.3f", window.start),
+                    "autoTrimEnd": String(format: "%.3f", window.end),
+                ]
+            )
         } catch {
             previewSamples = []
             previewMessage = error.localizedDescription
