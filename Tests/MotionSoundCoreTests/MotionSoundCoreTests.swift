@@ -1513,6 +1513,91 @@ import Foundation
     #expect(plan.consistencyScore != nil)
 }
 
+// MARK: - 边界与复杂动作覆盖
+
+@Test func lowPassFilterHandlesEmptyAndDegenerateInput() {
+    #expect(MotionLowPassFilter().filtered([]).isEmpty)
+    // 全部时间戳相同（dt=0）→ 原样返回，不崩溃。
+    let sameTs = (0..<10).map { _ in
+        MotionSample(timestamp: 0, userAcceleration: MotionVector3(x: 1, y: 0, z: 0), rotationRate: MotionVector3(x: 0, y: 0, z: 0))
+    }
+    #expect(MotionLowPassFilter().filtered(sameTs).count == sameTs.count)
+}
+
+@Test func consistencyHandlesEmptyAndSingleTemplate() {
+    let fusion = MotionTemplateFusion()
+    #expect(fusion.consistency(of: []).score == 0)
+    #expect(fusion.consistency(of: []).outlierIndices.isEmpty)
+    let one = [MotionTemplateBuilder().makeTemplate(label: "x", kind: .burst, samples: syntheticBurst(duration: 0.7, amplitude: 1.0))]
+    let single = fusion.consistency(of: one)
+    #expect(single.score == 1)
+    #expect(single.outlierIndices.isEmpty)
+    #expect(fusion.fusedPrototype(from: [])  == nil)
+}
+
+@Test func activeWindowDetectorHandlesTooFewSamples() {
+    let few = (0..<3).map { i in
+        MotionSample(timestamp: Double(i) * 0.02, userAcceleration: MotionVector3(x: 1, y: 0, z: 0), rotationRate: MotionVector3(x: 0, y: 0, z: 0))
+    }
+    let window = MotionActiveWindowDetector().activeWindowFractions(few)
+    #expect(window.start == 0.05 && window.end == 0.95)
+}
+
+@Test func clearingActiveSelectionSupersedesPriorSelection() {
+    // 删除当前动作 → 发送"清空"状态，revision 更高，应覆盖旧选择。
+    let id = UUID()
+    let selected = ActiveProfileSyncState(revision: 5, profileID: id, profileName: "punch", origin: "phone")
+    let cleared = ActiveProfileSyncState(revision: 6, profileID: nil, profileName: nil, origin: "phone")
+    #expect(cleared.supersedes(selected))
+    #expect(cleared.profileID == nil)
+}
+
+@Test func negativeVetoDoesNotBlockCleanGestureFarFromNegatives() {
+    let builder = MotionTemplateBuilder()
+    let positives = (0..<3).map { i in
+        builder.makeTemplate(label: "punch", kind: .burst, samples: syntheticBurst(duration: 0.70, amplitude: 1.0, phase: Double(i) * 0.02))
+    }
+    // 负样本是完全不同方向/类型的动作，离候选很远。
+    let negatives = [builder.makeTemplate(label: "neg", kind: .sequence, samples: syntheticRotation(duration: 1.4, angle: .pi * 2))]
+    let profile = GestureProfileBuilder().makeProfile(name: "punch", kind: .burst, templates: positives, negativeTemplates: negatives)
+    let candidate = syntheticBurst(duration: 0.71, amplitude: 1.0)
+    let segment = GestureSegment(
+        kind: .burst, samples: candidate, startTimestamp: 40, endTimestamp: 40.71,
+        peakTimestamp: 40.32, peakEnergy: 1.0, features: MotionEnergyAnalyzer().features(for: candidate)
+    )
+    var runtime = GestureRecognitionRuntime(profiles: [profile])
+    runtime.setActiveProfileIDs([profile.id])
+    let evaluation = runtime.evaluate(segment: segment, now: 40.8)
+    // 干净的目标动作（远离负样本）应正常触发。
+    #expect(evaluation.candidate?.shouldTrigger == true)
+}
+
+@Test func postureGestureRecognizedWithLowPassFilterPipeline() {
+    // 复杂动作：posture/hold。验证滤波后整条管线仍能识别。
+    let builder = MotionTemplateBuilder()
+    let templates = (0..<3).map { i in
+        builder.makeTemplate(label: "hold", kind: .posture, samples: syntheticHoldTransition(duration: 1.2, transitionDuration: 0.5 + Double(i) * 0.01))
+    }
+    let profile = GestureProfileBuilder().makeProfile(name: "hold", kind: .posture, templates: templates)
+    let candidate = syntheticHoldTransition(duration: 1.22, transitionDuration: 0.5)
+    let segment = GestureSegment(
+        kind: .posture, samples: candidate, startTimestamp: 5, endTimestamp: 6.22,
+        peakTimestamp: 5.4, peakEnergy: 0.5, features: MotionEnergyAnalyzer().features(for: candidate)
+    )
+    var runtime = GestureRecognitionRuntime(profiles: [profile])
+    runtime.setActiveProfileIDs([profile.id])
+    let evaluation = runtime.evaluate(segment: segment, now: 6.3)
+    // 至少应产出该 profile 的候选（不强求触发，但不能被滤波破坏到无候选）。
+    #expect(evaluation.candidateReports.contains { $0.profileID == profile.id })
+}
+
+@Test func confirmationGateZeroMarginAlwaysTriggers() {
+    // 边界：confidentMargin = 0 → 任何越过阈值的候选都立即触发（等价于关闭二次确认）。
+    var gate = GestureConfirmationGate(confidentMargin: 0, windowSeconds: 1.0)
+    let id = UUID()
+    #expect(gate.register(profileID: id, score: 0.80, threshold: 0.80, at: 0.0) == .trigger)
+}
+
 @Test func makeEventBuildsConsistentEventWithoutRuntimeInstance() {
     // A3：无状态事件构建器应与实例 record() 行为一致（用于消除 Watch 第二个 runtime）。
     let builder = MotionTemplateBuilder()
