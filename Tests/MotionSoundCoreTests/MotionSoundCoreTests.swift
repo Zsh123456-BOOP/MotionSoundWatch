@@ -284,7 +284,7 @@ import Foundation
         peakEnergy: 0.2,
         features: MotionEnergyAnalyzer().features(for: weakSamples)
     )
-    var runtime = GestureRecognitionRuntime(profiles: [profile])
+    var runtime = GestureRecognitionRuntime(profiles: [profile], activeRecognitionSelection: .allProfiles)
 
     let event = runtime.recognize(segment: segment, now: 31)
 
@@ -319,7 +319,7 @@ import Foundation
     let strictBurstGate = MotionBurstGate(
         configuration: BurstGateConfiguration(minimumPeakAcceleration: 99)
     )
-    var runtime = GestureRecognitionRuntime(profiles: [profile], burstGate: strictBurstGate)
+    var runtime = GestureRecognitionRuntime(profiles: [profile], burstGate: strictBurstGate, activeRecognitionSelection: .allProfiles)
 
     let event = runtime.recognize(segment: segment, now: 42)
 
@@ -412,7 +412,7 @@ import Foundation
         peakEnergy: 0.2,
         features: MotionEnergyAnalyzer().features(for: samples)
     )
-    var runtime = GestureRecognitionRuntime(profiles: [profile])
+    var runtime = GestureRecognitionRuntime(profiles: [profile], activeRecognitionSelection: .allProfiles)
 
     let event = runtime.recognize(segment: segment, now: 72)
 
@@ -750,7 +750,7 @@ import Foundation
         peakEnergy: 0.8,
         features: MotionEnergyAnalyzer().features(for: samples)
     )
-    var runtime = GestureRecognitionRuntime(profiles: [profile])
+    var runtime = GestureRecognitionRuntime(profiles: [profile], activeRecognitionSelection: .allProfiles)
 
     let event = runtime.recognize(segment: segment, now: 13.1)
 
@@ -791,7 +791,8 @@ import Foundation
     })
     var runtime = GestureRecognitionRuntime(
         profiles: [profile],
-        continuousEvaluationInterval: 0.08
+        continuousEvaluationInterval: 0.08,
+        activeRecognitionSelection: .allProfiles
     )
     var triggered: ContinuousRecognitionEvaluation?
 
@@ -820,7 +821,8 @@ import Foundation
     let stream = syntheticRotation(duration: 2.0, angle: .pi * 1.05)
     var runtime = GestureRecognitionRuntime(
         profiles: [profile],
-        continuousEvaluationInterval: 0.02
+        continuousEvaluationInterval: 0.02,
+        activeRecognitionSelection: .allProfiles
     )
     var emitted: ContinuousRecognitionEvaluation?
 
@@ -851,7 +853,7 @@ import Foundation
         peakEnergy: 0.9,
         features: MotionEnergyAnalyzer().features(for: samples)
     )
-    var runtime = GestureRecognitionRuntime(profiles: [profile])
+    var runtime = GestureRecognitionRuntime(profiles: [profile], activeRecognitionSelection: .allProfiles)
 
     let event = runtime.recognize(segment: segment, now: 22.4)
 
@@ -884,7 +886,8 @@ import Foundation
     let stream = syntheticRotation(duration: 1.42, angle: .pi * 2.03)
     var runtime = GestureRecognitionRuntime(
         profiles: [turnProfile, nearTurnProfile],
-        continuousEvaluationInterval: 0.18
+        continuousEvaluationInterval: 0.18,
+        activeRecognitionSelection: .allProfiles
     )
     var emitted: ContinuousRecognitionEvaluation?
 
@@ -927,7 +930,7 @@ import Foundation
         peakEnergy: 0.8,
         features: MotionEnergyAnalyzer().features(for: samples)
     )
-    var runtime = GestureRecognitionRuntime(profiles: [profile])
+    var runtime = GestureRecognitionRuntime(profiles: [profile], activeRecognitionSelection: .allProfiles)
 
     let event = runtime.recognize(segment: segment, now: 51.6)
 
@@ -965,7 +968,7 @@ import Foundation
         peakEnergy: 0.8,
         features: MotionEnergyAnalyzer().features(for: samples)
     )
-    var runtime = GestureRecognitionRuntime(profiles: [profile])
+    var runtime = GestureRecognitionRuntime(profiles: [profile], activeRecognitionSelection: .allProfiles)
 
     let event = runtime.recognize(segment: segment, now: 51.6)
 
@@ -1007,7 +1010,7 @@ import Foundation
         peakEnergy: 1.0,
         features: MotionEnergyAnalyzer().features(for: suffix)
     )
-    var runtime = GestureRecognitionRuntime(profiles: [profile], continuousEvaluationInterval: 99)
+    var runtime = GestureRecognitionRuntime(profiles: [profile], continuousEvaluationInterval: 99, activeRecognitionSelection: .allProfiles)
 
     for sample in samples {
         _ = runtime.evaluateContinuous(sample: sample, now: sample.timestamp)
@@ -1036,7 +1039,7 @@ import Foundation
         peakEnergy: 0.2,
         features: MotionEnergyAnalyzer().features(for: samples)
     )
-    var runtime = GestureRecognitionRuntime(profiles: [profile])
+    var runtime = GestureRecognitionRuntime(profiles: [profile], activeRecognitionSelection: .allProfiles)
 
     let event = runtime.recognize(segment: segment, now: 21.1)
 
@@ -1063,7 +1066,7 @@ import Foundation
         peakEnergy: 0.8,
         features: MotionEnergyAnalyzer().features(for: samples)
     )
-    var runtime = GestureRecognitionRuntime(profiles: [profile])
+    var runtime = GestureRecognitionRuntime(profiles: [profile], activeRecognitionSelection: .allProfiles)
 
     let event = runtime.recognize(segment: segment, now: 31.3)
 
@@ -1094,7 +1097,7 @@ import Foundation
         peakEnergy: 0.8,
         features: MotionEnergyAnalyzer().features(for: samples)
     )
-    var runtime = GestureRecognitionRuntime(profiles: [xProfile, nearXProfile])
+    var runtime = GestureRecognitionRuntime(profiles: [xProfile, nearXProfile], activeRecognitionSelection: .allProfiles)
 
     let event = runtime.recognize(segment: segment, now: 41.3)
 
@@ -1133,7 +1136,7 @@ import Foundation
         peakEnergy: 3.5,
         features: MotionEnergyAnalyzer().features(for: samples)
     )
-    var runtime = GestureRecognitionRuntime(profiles: [punchProfile, eyePoseProfile])
+    var runtime = GestureRecognitionRuntime(profiles: [punchProfile, eyePoseProfile], activeRecognitionSelection: .allProfiles)
 
     let event = runtime.recognize(segment: segment, now: 70.9)
 
@@ -1300,7 +1303,7 @@ import Foundation
         peakEnergy: 1.2,
         features: MotionEnergyAnalyzer().features(for: syntheticBurst(duration: 0.71, amplitude: 1.02))
     )
-    var runtime = GestureRecognitionRuntime(profiles: [profile])
+    var runtime = GestureRecognitionRuntime(profiles: [profile], activeRecognitionSelection: .allProfiles)
 
     let event = runtime.recognize(
         segment: segment,
@@ -1358,6 +1361,85 @@ import Foundation
     let switchedEvaluation = runtime.evaluate(segment: segment, now: 21.0)
     #expect(switchedEvaluation.candidate?.profile.id == inactiveProfile.id)
     #expect(switchedEvaluation.candidateReports.map(\.profileID) == [inactiveProfile.id])
+}
+
+@Test func runtimeDefaultsToInactiveSelection() {
+    // 不显式传 selection 时，runtime 必须默认 .inactive（未选动作不识别）。
+    let templateBuilder = MotionTemplateBuilder()
+    let profile = GestureProfileBuilder().makeProfile(
+        name: "punch",
+        kind: .burst,
+        templates: [templateBuilder.makeTemplate(label: "punch", kind: .burst, samples: syntheticBurst(duration: 0.7, amplitude: 1.0))]
+    )
+    let samples = syntheticBurst(duration: 0.71, amplitude: 1.02)
+    let segment = GestureSegment(
+        kind: .burst,
+        samples: samples,
+        startTimestamp: 5,
+        endTimestamp: 5.71,
+        peakTimestamp: 5.32,
+        peakEnergy: 1.2,
+        features: MotionEnergyAnalyzer().features(for: samples)
+    )
+    let runtime = GestureRecognitionRuntime(profiles: [profile])
+    let evaluation = runtime.evaluate(segment: segment, now: 5.8)
+    #expect(evaluation.candidate == nil)
+    #expect(evaluation.rejectReason == .noActiveProfile)
+    #expect(runtime.activeProfileIDs.isEmpty)
+}
+
+@Test func activeProfileSyncStateSupersedesByRevisionThenTimestamp() {
+    let id = UUID()
+    let base = Date(timeIntervalSince1970: 1_000)
+    let r1 = ActiveProfileSyncState(revision: 1, profileID: id, profileName: "A", updatedAt: base, origin: "phone")
+    let r2 = ActiveProfileSyncState(revision: 2, profileID: id, profileName: "A", updatedAt: base, origin: "watch")
+    // 高 revision 覆盖低 revision。
+    #expect(r2.supersedes(r1))
+    #expect(!r1.supersedes(r2))
+    // nil current 一律可覆盖。
+    #expect(r1.supersedes(nil))
+    // 同 revision 时按 updatedAt 决胜。
+    let r2Later = ActiveProfileSyncState(revision: 2, profileID: id, profileName: "A", updatedAt: base.addingTimeInterval(5), origin: "phone")
+    #expect(r2Later.supersedes(r2))
+    #expect(!r2.supersedes(r2Later))
+    // 严格大于：完全相同的状态不覆盖（幂等）。
+    #expect(!r2.supersedes(r2))
+}
+
+@Test func activeProfileSyncStateRoundTripsThroughCodec() throws {
+    let state = ActiveProfileSyncState(
+        revision: 7,
+        profileID: UUID(),
+        profileName: "出拳",
+        updatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+        origin: "phone"
+    )
+    let data = try MotionSoundSyncCodec.encode(state)
+    let decoded = try MotionSoundSyncCodec.decode(ActiveProfileSyncState.self, from: data)
+    #expect(decoded == state)
+
+    let clearState = ActiveProfileSyncState(revision: 8, profileID: nil, profileName: nil, origin: "watch")
+    let clearData = try MotionSoundSyncCodec.encode(clearState)
+    let clearDecoded = try MotionSoundSyncCodec.decode(ActiveProfileSyncState.self, from: clearData)
+    #expect(clearDecoded.profileID == nil)
+    #expect(clearDecoded.revision == 8)
+}
+
+@Test func activeProfileSyncAckRoundTripsThroughCodec() throws {
+    let ack = ActiveProfileSyncAck(
+        revision: 3,
+        profileID: UUID(),
+        profileName: "turn",
+        applied: false,
+        pending: true,
+        reason: "libraryNotReady",
+        sentAt: Date(timeIntervalSince1970: 1_700_000_000)
+    )
+    let data = try MotionSoundSyncCodec.encode(ack)
+    let decoded = try MotionSoundSyncCodec.decode(ActiveProfileSyncAck.self, from: data)
+    #expect(decoded == ack)
+    #expect(decoded.pending)
+    #expect(!decoded.applied)
 }
 
 @Test func routedRecognitionRejectsLowScoreEvenWhenTrajectoryDistancePasses() {
@@ -1419,7 +1501,7 @@ import Foundation
         peakEnergy: 1.0,
         features: MotionEnergyAnalyzer().features(for: samples)
     )
-    var runtime = GestureRecognitionRuntime(profiles: [profile])
+    var runtime = GestureRecognitionRuntime(profiles: [profile], activeRecognitionSelection: .allProfiles)
     let candidate = runtime.bestCandidate(for: segment, now: 4)
 
     let event = runtime.record(segment: segment, candidate: candidate, now: 4, audioPlayed: true)
@@ -1548,7 +1630,7 @@ import Foundation
         peakEnergy: 1.2,
         features: MotionEnergyAnalyzer().features(for: samples)
     )
-    var runtime = GestureRecognitionRuntime(profiles: [profile])
+    var runtime = GestureRecognitionRuntime(profiles: [profile], activeRecognitionSelection: .allProfiles)
 
     let event = runtime.recognize(segment: segment, now: samples.last?.timestamp ?? 0)
 
@@ -1587,7 +1669,7 @@ import Foundation
         peakEnergy: 1.0,
         features: MotionEnergyAnalyzer().features(for: samples)
     )
-    var runtime = GestureRecognitionRuntime(profiles: [eyePoseProfile, punchProfile])
+    var runtime = GestureRecognitionRuntime(profiles: [eyePoseProfile, punchProfile], activeRecognitionSelection: .allProfiles)
 
     let event = runtime.recognize(segment: segment, now: 1.1)
 
@@ -1643,7 +1725,7 @@ import Foundation
         peakEnergy: 0.91,
         features: MotionEnergyAnalyzer().features(for: candidateSamples)
     )
-    var runtime = GestureRecognitionRuntime(profiles: [profile])
+    var runtime = GestureRecognitionRuntime(profiles: [profile], activeRecognitionSelection: .allProfiles)
 
     let event = runtime.recognize(segment: segment, now: 0.8)
 
@@ -1725,7 +1807,7 @@ import Foundation
         peakEnergy: 2.2,
         features: MotionEnergyAnalyzer().features(for: samples)
     )
-    var runtime = GestureRecognitionRuntime(profiles: [legacyProfile])
+    var runtime = GestureRecognitionRuntime(profiles: [legacyProfile], activeRecognitionSelection: .allProfiles)
 
     let event = runtime.recognize(segment: segment, now: 32.2, audioPlayed: true)
 
@@ -1756,7 +1838,7 @@ import Foundation
         peakEnergy: 1.1,
         features: MotionEnergyAnalyzer().features(for: syntheticSequence(duration: 1.0, amplitude: 1.0))
     )
-    var runtime = GestureRecognitionRuntime(profiles: [profile])
+    var runtime = GestureRecognitionRuntime(profiles: [profile], activeRecognitionSelection: .allProfiles)
 
     let first = runtime.recognize(segment: segment, now: 21.0)
     let second = runtime.recognize(segment: segment, now: 21.5)
@@ -1786,7 +1868,7 @@ import Foundation
         peakEnergy: 1.2,
         features: MotionEnergyAnalyzer().features(for: segmentSamples)
     )
-    var runtime = GestureRecognitionRuntime(profiles: [profile])
+    var runtime = GestureRecognitionRuntime(profiles: [profile], activeRecognitionSelection: .allProfiles)
     let event = runtime.recognize(segment: segment, now: 11)
 
     let updatedProfiles = GestureFeedbackEngine().applyFalseTrigger(event: event, to: [profile])

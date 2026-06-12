@@ -83,8 +83,9 @@ public struct GestureRecognitionRuntime: Sendable {
         self.burstGate = burstGate
         self.router = router
         self.continuousEvaluationInterval = continuousEvaluationInterval
-        self.activeRecognitionSelection = activeRecognitionSelection
-            ?? ActiveRecognitionSelection(mode: .allProfiles, activeProfileIDs: Set(profiles.map(\.id)))
+        // 默认 .inactive：未显式选择动作时不识别任何动作。
+        // 全库匹配（.allProfiles）必须显式 opt-in，避免新调用点意外回退到全库匹配。
+        self.activeRecognitionSelection = activeRecognitionSelection ?? .inactive
         self.lastTriggerTimes = [:]
         self.logs = []
         self.continuousBuffer = MotionRingBuffer(maxDuration: 10)

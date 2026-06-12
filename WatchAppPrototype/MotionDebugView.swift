@@ -17,6 +17,7 @@ struct MotionDebugView: View {
     @State private var remoteCaptureState = "idle"
     @State private var remoteRecordingTimeoutTask: Task<Void, Never>?
     @State private var runtimeStartTask: Task<Void, Never>?
+    @State private var showingProfilePicker = false
 
     private let remoteRecordingLimitSeconds: UInt64 = 20
 
@@ -40,14 +41,25 @@ struct MotionDebugView: View {
                 )
 
                 if recorder.loadedProfileCount > 0 {
-                    WatchStatusPanel {
-                        Label(PajiStrings.t("library.row.active"), systemImage: "scope")
-                            .foregroundStyle(.white)
-                        Text(recorder.activeRecognitionProfileName ?? "未选择")
-                            .font(.footnote.weight(.semibold))
-                            .foregroundStyle(recorder.activeRecognitionProfileName == nil ? PajiTheme.pink : PajiTheme.cyan)
-                            .fixedSize(horizontal: false, vertical: true)
+                    Button {
+                        showingProfilePicker = true
+                    } label: {
+                        WatchStatusPanel {
+                            HStack {
+                                Label(PajiStrings.t("library.row.active"), systemImage: "scope")
+                                    .foregroundStyle(.white)
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .font(.caption2)
+                                    .foregroundStyle(PajiTheme.textMuted)
+                            }
+                            Text(activeProfileDisplayName)
+                                .font(.footnote.weight(.semibold))
+                                .foregroundStyle(activeProfileDisplayColor)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
+                    .buttonStyle(.plain)
                 }
 
                 if recorder.triggerCount > 0 {
@@ -129,6 +141,15 @@ struct MotionDebugView: View {
         }
         .background(PajiTheme.background.ignoresSafeArea())
         .preferredColorScheme(.dark)
+        .sheet(isPresented: $showingProfilePicker) {
+            WatchProfilePickerView(
+                profiles: recorder.availableProfileSummaries,
+                activeProfileID: recorder.activeRecognitionProfileID
+            ) { profileID in
+                showingProfilePicker = false
+                recorder.selectActiveProfileLocally(profileID: profileID, reason: "watchPicker")
+            }
+        }
         .onAppear {
             AppDiagnostics.record("watch.debugView.onAppear")
             recorder.startLiveUpdates()
@@ -137,6 +158,12 @@ struct MotionDebugView: View {
             syncProfileLibraryState(reason: "viewAppear")
             recorder.recognitionEventSink = { event in
                 _ = fileSender.sendRecognitionEvent(event)
+            }
+            recorder.activeProfileAckSink = { [weak fileSender] ack in
+                _ = fileSender?.sendActiveProfileAck(ack)
+            }
+            recorder.activeProfileStateSink = { [weak fileSender] state in
+                _ = fileSender?.sendActiveProfileState(state)
             }
             fileSender.reloadReceivedSoundFiles()
             preloadReceivedSounds()
@@ -171,20 +198,29 @@ struct MotionDebugView: View {
             handleRemoteRecordingCommand(command)
         }
         .onReceive(fileSender.$lastActiveProfileCommand.compactMap { $0 }) { command in
-            recorder.setActiveRecognitionProfile(
-                profileID: command.profileID,
-                name: command.name,
-                reason: command.reason ?? "phoneCommand"
-            )
+            recorder.applyRemoteActiveSelection(command)
         }
         .onDisappear {
             AppDiagnostics.record("watch.debugView.onDisappear")
             runtimeStartTask?.cancel()
             runtimeStartTask = nil
             recorder.recognitionEventSink = nil
+            recorder.activeProfileAckSink = nil
+            recorder.activeProfileStateSink = nil
             recorder.stopLiveUpdates()
             runtimeSession.stop(reason: "viewDisappear")
         }
+    }
+
+    /// 只有"库就绪 + 已选中动作"才是真正会触发的监听状态。
+    private var isActivelyListening: Bool {
+        recorder.isProfileLibraryReady
+            && recorder.loadedProfileCount > 0
+            && recorder.activeRecognitionProfileID != nil
+    }
+
+    private var hasPendingSelection: Bool {
+        recorder.pendingActiveProfileName != nil
     }
 
     private var watchStatusTitle: String {
@@ -194,8 +230,14 @@ struct MotionDebugView: View {
         if !recorder.isProfileLibraryReady {
             return PajiStrings.t("watch.status.waitSync")
         }
-        if recorder.loadedProfileCount > 0 {
+        if isActivelyListening {
             return PajiStrings.t("watch.status.listening")
+        }
+        if hasPendingSelection {
+            return PajiStrings.t("watch.status.pendingSelection")
+        }
+        if recorder.loadedProfileCount > 0 {
+            return PajiStrings.t("watch.status.noActiveProfile")
         }
         return PajiStrings.t("watch.status.waitSetup")
     }
@@ -207,8 +249,14 @@ struct MotionDebugView: View {
         if !recorder.isProfileLibraryReady {
             return PajiStrings.t("watch.subtitle.waitSync")
         }
-        if recorder.loadedProfileCount > 0 {
+        if isActivelyListening {
             return PajiStrings.t("watch.subtitle.listening")
+        }
+        if hasPendingSelection {
+            return PajiStrings.t("watch.subtitle.pendingSelection")
+        }
+        if recorder.loadedProfileCount > 0 {
+            return PajiStrings.t("watch.subtitle.noActiveProfile")
         }
         return PajiStrings.t("watch.subtitle.waitSetup")
     }
@@ -217,10 +265,10 @@ struct MotionDebugView: View {
         if recorder.isRecording || remoteCaptureState == "recording" {
             return .recordGesture
         }
-        if !recorder.isProfileLibraryReady {
+        if !recorder.isProfileLibraryReady || hasPendingSelection {
             return .sync
         }
-        if recorder.loadedProfileCount > 0 {
+        if isActivelyListening {
             return .listening
         }
         return .playBurst
@@ -230,17 +278,37 @@ struct MotionDebugView: View {
         if recorder.isRecording || remoteCaptureState == "recording" {
             return .warning
         }
-        if !recorder.isProfileLibraryReady {
+        if !recorder.isProfileLibraryReady || hasPendingSelection {
             return .warning
         }
-        if recorder.loadedProfileCount > 0 {
+        if isActivelyListening {
             return .stable
+        }
+        if recorder.loadedProfileCount > 0 {
+            return .warning
         }
         return .blocked
     }
 
+    private var activeProfileDisplayName: String {
+        if let name = recorder.activeRecognitionProfileName {
+            return name
+        }
+        if let pending = recorder.pendingActiveProfileName {
+            return PajiStrings.format("watch.active.pendingName", pending)
+        }
+        return PajiStrings.t("watch.active.none")
+    }
+
+    private var activeProfileDisplayColor: Color {
+        if recorder.activeRecognitionProfileName != nil {
+            return PajiTheme.cyan
+        }
+        return PajiTheme.pink
+    }
+
     private var watchStatusIsActive: Bool {
-        recorder.loadedProfileCount > 0 || recorder.isRecording || remoteCaptureState == "recording"
+        isActivelyListening || recorder.isRecording || remoteCaptureState == "recording"
     }
 
     private var triggerAudioStatusText: String {
@@ -572,6 +640,67 @@ struct MotionDebugView: View {
         @unknown default:
             return "unknown"
         }
+    }
+}
+
+/// Watch 端动作选择列表：选中某个动作后只识别该动作；也可以关闭识别。
+private struct WatchProfilePickerView: View {
+    var profiles: [WatchGestureProfileSummary]
+    var activeProfileID: UUID?
+    var onSelect: (UUID?) -> Void
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 8) {
+                Text(PajiStrings.t("watch.picker.title"))
+                    .font(.headline)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                ForEach(profiles) { profile in
+                    Button {
+                        onSelect(profile.id)
+                    } label: {
+                        HStack {
+                            Text(profile.name)
+                                .font(.footnote.weight(.semibold))
+                                .lineLimit(2)
+                            Spacer()
+                            if profile.id == activeProfileID {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundStyle(PajiTheme.cyan)
+                            }
+                        }
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(PajiTheme.panel.opacity(0.76))
+                        .clipShape(RoundedRectangle(cornerRadius: PajiTheme.cardRadius, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                Button {
+                    onSelect(nil)
+                } label: {
+                    HStack {
+                        Image(systemName: "moon.zzz.fill")
+                        Text(PajiStrings.t("watch.picker.none"))
+                            .font(.footnote.weight(.semibold))
+                        Spacer()
+                        if activeProfileID == nil {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(PajiTheme.pink)
+                        }
+                    }
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(PajiTheme.panel.opacity(0.5))
+                    .clipShape(RoundedRectangle(cornerRadius: PajiTheme.cardRadius, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 4)
+        }
+        .background(PajiTheme.background.ignoresSafeArea())
     }
 }
 

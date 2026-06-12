@@ -30,7 +30,6 @@ struct PhoneDebugView: View {
     @State private var pendingRecordingAction: RecordingControlAction?
     @State private var captureCountBeforeStop: Int?
     @State private var savedProfiles: [PhoneGestureAsset] = []
-    @State private var activeProfileID: UUID?
     @State private var trimPlaybackTask: Task<Void, Never>?
     @State private var isPreviewPlaying = false
     @State private var editingAsset: PhoneGestureAsset?
@@ -267,7 +266,11 @@ struct PhoneDebugView: View {
                 if !savedProfiles.isEmpty {
                     VStack(spacing: 10) {
                         ForEach(savedProfiles) { asset in
-                            GestureAssetRow(asset: asset, isActive: asset.profile.id == activeProfileID) {
+                            GestureAssetRow(
+                                asset: asset,
+                                isActive: asset.profile.id == activeProfileID,
+                                activationStatus: activationStatus(for: asset)
+                            ) {
                                 openAssetForSound(asset)
                             } record: {
                                 prepareToRecord(asset)
@@ -1380,7 +1383,7 @@ struct PhoneDebugView: View {
                 kind: asset.profile.kind
             )
             if activeProfileID == asset.profile.id {
-                activeProfileID = nil
+                // 删除当前启用动作时显式下发"清空"命令，两端收敛到未选择状态。
                 _ = receiver.sendSetActiveProfileCommand(profileID: nil, name: nil, reason: "profileDeleted")
             }
             reloadSavedProfiles()
@@ -1402,8 +1405,26 @@ struct PhoneDebugView: View {
         }
     }
 
+    /// 当前启用动作 ID 以 receiver 的持久化期望状态为准（跨重启恢复）。
+    private var activeProfileID: UUID? {
+        receiver.activeProfileSelection?.profileID
+    }
+
+    /// 某个动作相对 Watch 的同步状态，用于行内角标。
+    private func activationStatus(for asset: PhoneGestureAsset) -> GestureActivationStatus {
+        guard receiver.activeProfileSelection?.profileID == asset.profile.id else {
+            return .inactive
+        }
+        if let ack = receiver.lastActiveProfileAck,
+           ack.revision == receiver.activeProfileSelection?.revision {
+            if ack.applied { return .activeApplied }
+            if ack.pending { return .activePending }
+            return .activeFailed
+        }
+        return .activeSyncing
+    }
+
     private func setActiveProfile(_ asset: PhoneGestureAsset, reason: String = "manual") {
-        activeProfileID = asset.profile.id
         _ = receiver.sendSetActiveProfileCommand(
             profileID: asset.profile.id,
             name: asset.profile.name,
@@ -2617,9 +2638,49 @@ private struct PhoneGestureAsset: Identifiable, Equatable {
     }
 }
 
+private enum GestureActivationStatus {
+    case inactive
+    case activeApplied
+    case activeSyncing
+    case activePending
+    case activeFailed
+
+    var isActive: Bool { self != .inactive }
+
+    var label: String {
+        switch self {
+        case .inactive: return ""
+        case .activeApplied: return PajiStrings.t("library.row.active")
+        case .activeSyncing: return PajiStrings.t("library.row.activeSyncing")
+        case .activePending: return PajiStrings.t("library.row.activePending")
+        case .activeFailed: return PajiStrings.t("library.row.activeFailed")
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .inactive: return ""
+        case .activeApplied: return "scope"
+        case .activeSyncing: return "arrow.triangle.2.circlepath"
+        case .activePending: return "clock"
+        case .activeFailed: return "exclamationmark.triangle"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .inactive: return PajiTheme.textMuted
+        case .activeApplied: return PajiTheme.cyan
+        case .activeSyncing, .activePending: return PajiTheme.lime
+        case .activeFailed: return PajiTheme.pink
+        }
+    }
+}
+
 private struct GestureAssetRow: View {
     var asset: PhoneGestureAsset
     var isActive: Bool
+    var activationStatus: GestureActivationStatus
     var open: () -> Void
     var record: () -> Void
     var test: () -> Void
@@ -2643,10 +2704,10 @@ private struct GestureAssetRow: View {
                             .font(.caption)
                             .foregroundStyle(PajiTheme.textMuted)
                             .lineLimit(1)
-                        if isActive {
-                            Label(PajiStrings.t("library.row.active"), systemImage: "scope")
+                        if activationStatus.isActive {
+                            Label(activationStatus.label, systemImage: activationStatus.systemImage)
                                 .font(.caption2.weight(.semibold))
-                                .foregroundStyle(PajiTheme.cyan)
+                                .foregroundStyle(activationStatus.tint)
                         }
                     }
                     Spacer()

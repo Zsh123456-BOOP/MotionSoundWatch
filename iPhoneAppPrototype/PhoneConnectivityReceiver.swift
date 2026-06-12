@@ -103,17 +103,49 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
     @Published private(set) var lastQueuedProfileLibraryAt: Date?
     @Published private(set) var lastProfileSyncAck: ProfileSyncAck?
     @Published private(set) var lastProfileSyncMissingAudio: [String] = []
+    /// 手机端记录的"当前启用动作"期望状态（持久化，revision 单调递增）。
+    @Published private(set) var activeProfileSelection: ActiveProfileSyncState?
+    /// Watch 对激活命令的最新回执；UI 以它为准显示"已生效 / 同步中"。
+    @Published private(set) var lastActiveProfileAck: ActiveProfileSyncAck?
 
     private let fileManager: FileManager
     private let soundPlayer: PhoneSoundPlayer
+    /// 常驻 applicationContext 的合并负载：诊断配置、prepareRuntime 与
+    /// 当前启用动作共用同一个 context，避免互相覆盖。
+    private var applicationContextPayload: [String: Any] = [:]
 
     init(fileManager: FileManager = .default, soundPlayer: PhoneSoundPlayer = PhoneSoundPlayer()) {
         self.fileManager = fileManager
         self.soundPlayer = soundPlayer
         super.init()
-        AppDiagnostics.record("phone.connectivity.init", ["supported": isSupported])
+        activeProfileSelection = PhoneActiveProfileSelectionStore.load()
+        if let selection = activeProfileSelection,
+           let payload = try? MotionSoundSyncCodec.encode(selection).base64EncodedString() {
+            applicationContextPayload["activeProfileState"] = payload
+        }
+        AppDiagnostics.record(
+            "phone.connectivity.init",
+            [
+                "supported": isSupported,
+                "restoredActiveProfile": activeProfileSelection?.profileName ?? "",
+                "restoredActiveRevision": activeProfileSelection?.revision ?? -1,
+            ]
+        )
         reloadReceivedFiles()
         reloadWatchEventCount()
+    }
+
+    /// 合并并推送 applicationContext（系统语义为"最新状态覆盖"，适合常驻状态）。
+    private func mergeApplicationContext(_ fields: [String: Any]) {
+        for (key, value) in fields {
+            applicationContextPayload[key] = value
+        }
+        guard let session, session.activationState == .activated else { return }
+        do {
+            try session.updateApplicationContext(applicationContextPayload)
+        } catch {
+            AppDiagnostics.record(error: error, event: "phone.applicationContext.update.error")
+        }
     }
 
     private var session: WCSession? {
@@ -260,15 +292,9 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
             return true
         }
 
-        do {
-            try session.updateApplicationContext(message)
-            AppDiagnostics.record("phone.diagnostics.configureWatch.contextUpdated", ["reason": reason, "clear": clearWatchLogs])
-            return true
-        } catch {
-            session.transferUserInfo(message)
-            AppDiagnostics.record(error: error, event: "phone.diagnostics.configureWatch.context.error", ["reason": reason])
-            return true
-        }
+        mergeApplicationContext(message)
+        AppDiagnostics.record("phone.diagnostics.configureWatch.contextUpdated", ["reason": reason, "clear": clearWatchLogs])
+        return true
     }
 
     @discardableResult
@@ -303,14 +329,9 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
             return true
         }
 
-        do {
-            try session.updateApplicationContext(message)
-            AppDiagnostics.record("phone.prepareRuntime.contextUpdated", ["reason": reason, "reachable": false])
-            return true
-        } catch {
-            AppDiagnostics.record(error: error, event: "phone.prepareRuntime.context.error", ["reason": reason])
-            return false
-        }
+        mergeApplicationContext(message)
+        AppDiagnostics.record("phone.prepareRuntime.contextUpdated", ["reason": reason, "reachable": false])
+        return true
     }
 
     @discardableResult
@@ -931,56 +952,174 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
 
     @discardableResult
     func sendSetActiveProfileCommand(profileID: UUID?, name: String?, reason: String = "manual") -> Bool {
+        let state = ActiveProfileSyncState(
+            revision: (activeProfileSelection?.revision ?? 0) + 1,
+            profileID: profileID,
+            profileName: name?.trimmingCharacters(in: .whitespacesAndNewlines),
+            origin: "phone"
+        )
+        return adoptAndSendActiveProfileState(state, reason: reason)
+    }
+
+    /// 采纳一个新的激活状态：持久化、常驻 applicationContext、并尽快送达 Watch。
+    @discardableResult
+    private func adoptAndSendActiveProfileState(_ state: ActiveProfileSyncState, reason: String) -> Bool {
+        activeProfileSelection = state
+        PhoneActiveProfileSelectionStore.save(state)
+        // 新的期望状态生效后，旧 ack 立即过期（UI 回到"同步中"）。
+        if let ack = lastActiveProfileAck, ack.revision < state.revision {
+            lastActiveProfileAck = nil
+        }
+
         guard let session else {
             lastMessage = "当前设备不支持 WatchConnectivity"
-            AppDiagnostics.record("phone.profile.activeCommand.unsupported", ["profile": name ?? ""])
+            AppDiagnostics.record("phone.profile.activeCommand.unsupported", ["profile": state.profileName ?? ""])
+            return false
+        }
+
+        let payload: String
+        do {
+            payload = try MotionSoundSyncCodec.encode(state).base64EncodedString()
+        } catch {
+            AppDiagnostics.record(error: error, event: "phone.profile.activeCommand.encode.error")
             return false
         }
 
         var message: [String: Any] = [
             "command": "setActiveProfile",
+            "payload": payload,
+            "revision": state.revision,
             "reason": reason,
             "sentAt": Date().timeIntervalSince1970,
             "source": "MotionSoundPhone",
         ]
-        if let profileID {
+        // 兼容旧 Watch 版本的字段。
+        if let profileID = state.profileID {
             message["profileID"] = profileID.uuidString
         }
-        if let name {
+        if let name = state.profileName {
             message["name"] = name
         }
 
+        // 常驻 applicationContext：即使消息丢失，Watch 重连后也能收敛到最新选择。
+        mergeApplicationContext(["activeProfileState": payload])
+
+        let displayName = state.profileName ?? state.profileID?.uuidString ?? "未选择"
         if session.isReachable {
             session.sendMessage(message) { [weak self] reply in
                 let status = reply["status"] as? String
-                self?.lastMessage = status == "accepted"
-                    ? "Watch 已切换当前识别动作：\(name ?? profileID?.uuidString ?? "未选择")"
-                    : "Watch 回执异常"
+                Task { @MainActor in
+                    self?.lastMessage = status == "accepted"
+                        ? "Watch 已收到切换命令：\(displayName)"
+                        : "Watch 回执异常"
+                }
                 AppDiagnostics.record(
                     "phone.profile.activeCommand.reply",
                     [
                         "status": status ?? "",
-                        "profileID": profileID?.uuidString ?? "",
-                        "profile": name ?? "",
+                        "revision": state.revision,
+                        "profile": state.profileName ?? "",
                     ]
                 )
-            } errorHandler: { [weak self] error in
+            } errorHandler: { error in
                 session.transferUserInfo(message)
-                self?.lastMessage = "Watch 当前不可达，已排队切换当前识别动作"
                 AppDiagnostics.record(
                     "phone.profile.activeCommand.sendMessage.error",
-                    ["profile": name ?? "", "error": error.localizedDescription]
+                    ["profile": state.profileName ?? "", "error": error.localizedDescription]
                 )
             }
-            lastMessage = "已发送当前识别动作：\(name ?? profileID?.uuidString ?? "未选择")"
-            AppDiagnostics.record("phone.profile.activeCommand.sent", ["profile": name ?? "", "reachable": true])
+            lastMessage = "已发送当前识别动作：\(displayName)"
+            AppDiagnostics.record(
+                "phone.profile.activeCommand.sent",
+                ["profile": state.profileName ?? "", "revision": state.revision, "reachable": true]
+            )
             return true
         }
 
         session.transferUserInfo(message)
-        lastMessage = "Watch 当前不可达，已排队切换当前识别动作"
-        AppDiagnostics.record("phone.profile.activeCommand.queued", ["profile": name ?? "", "reachable": false])
+        lastMessage = "Watch 当前不可达，已排队切换当前识别动作：\(displayName)"
+        AppDiagnostics.record(
+            "phone.profile.activeCommand.queued",
+            ["profile": state.profileName ?? "", "revision": state.revision, "reachable": false]
+        )
         return true
+    }
+
+    private func receiveActiveProfileAck(payload: String?) {
+        guard let payload,
+              let data = Data(base64Encoded: payload),
+              let ack = try? MotionSoundSyncCodec.decode(ActiveProfileSyncAck.self, from: data) else {
+            AppDiagnostics.record("phone.profile.activeAck.invalid")
+            return
+        }
+        // 忽略过期回执（针对旧 revision 的 ack）。
+        if let current = activeProfileSelection, ack.revision < current.revision {
+            AppDiagnostics.record(
+                "phone.profile.activeAck.stale",
+                ["ackRevision": ack.revision, "currentRevision": current.revision]
+            )
+            return
+        }
+        lastActiveProfileAck = ack
+        if ack.applied {
+            lastMessage = ack.profileID == nil && (ack.profileName?.isEmpty ?? true)
+                ? "Watch 已关闭识别"
+                : "Watch 已生效当前识别动作：\(ack.profileName ?? "")"
+        } else if ack.pending {
+            lastMessage = "Watch 正在等待动作同步：\(ack.profileName ?? "")"
+        } else {
+            lastMessage = "Watch 未能切换当前识别动作：\(ack.reason ?? "")"
+        }
+        AppDiagnostics.record(
+            "phone.profile.activeAck.received",
+            [
+                "revision": ack.revision,
+                "applied": ack.applied,
+                "pending": ack.pending,
+                "profile": ack.profileName ?? "",
+                "reason": ack.reason ?? "",
+            ]
+        )
+    }
+
+    /// Watch 端本地切换动作后推送的状态：revision 更新则采纳为手机端期望状态。
+    private func receiveActiveProfileStateFromWatch(payload: String?) {
+        guard let payload,
+              let data = Data(base64Encoded: payload),
+              let state = try? MotionSoundSyncCodec.decode(ActiveProfileSyncState.self, from: data) else {
+            AppDiagnostics.record("phone.profile.activeState.invalid")
+            return
+        }
+        guard state.supersedes(activeProfileSelection) else {
+            AppDiagnostics.record(
+                "phone.profile.activeState.stale",
+                ["incoming": state.revision, "current": activeProfileSelection?.revision ?? -1]
+            )
+            return
+        }
+        activeProfileSelection = state
+        PhoneActiveProfileSelectionStore.save(state)
+        // Watch 主动切换即已生效，本地直接补一条 applied 回执供 UI 显示。
+        lastActiveProfileAck = ActiveProfileSyncAck(
+            revision: state.revision,
+            profileID: state.profileID,
+            profileName: state.profileName,
+            applied: true
+        )
+        if let encoded = try? MotionSoundSyncCodec.encode(state).base64EncodedString() {
+            mergeApplicationContext(["activeProfileState": encoded])
+        }
+        lastMessage = state.profileID == nil
+            ? "Watch 已关闭识别"
+            : "Watch 已切换当前识别动作：\(state.profileName ?? "")"
+        AppDiagnostics.record(
+            "phone.profile.activeState.adopted",
+            [
+                "revision": state.revision,
+                "profile": state.profileName ?? "",
+                "origin": state.origin,
+            ]
+        )
     }
 
     @discardableResult
@@ -1670,6 +1809,14 @@ extension PhoneConnectivityReceiver: WCSessionDelegate {
                 receiveProfileSyncAck(payload: payload, fallbackAck: profileSyncAck)
                 return
             }
+            if command == "activeProfileAck" {
+                receiveActiveProfileAck(payload: payload)
+                return
+            }
+            if command == "activeProfileState" {
+                receiveActiveProfileStateFromWatch(payload: payload)
+                return
+            }
             if command == "watchRecognitionEvent" {
                 if let watchEventFileName {
                     noteWatchEventSaved(fileName: watchEventFileName)
@@ -1722,6 +1869,14 @@ extension PhoneConnectivityReceiver: WCSessionDelegate {
                 receiveProfileSyncAck(payload: payload, fallbackAck: profileSyncAck)
                 return
             }
+            if command == "activeProfileAck" {
+                receiveActiveProfileAck(payload: payload)
+                return
+            }
+            if command == "activeProfileState" {
+                receiveActiveProfileStateFromWatch(payload: payload)
+                return
+            }
             if command == "watchRecognitionEvent" {
                 if let watchEventFileName {
                     noteWatchEventSaved(fileName: watchEventFileName)
@@ -1764,5 +1919,23 @@ extension PhoneConnectivityReceiver: WCSessionDelegate {
                 isWatchAppInstalled: isWatchAppInstalled
             )
         }
+    }
+}
+
+/// 手机端"当前启用动作"期望状态的本地持久化（UserDefaults），跨重启恢复。
+enum PhoneActiveProfileSelectionStore {
+    private static let key = "MotionSound.phone.activeProfileSelection.v1"
+
+    static func load(defaults: UserDefaults = .standard) -> ActiveProfileSyncState? {
+        guard let data = defaults.data(forKey: key) else { return nil }
+        return try? MotionSoundSyncCodec.decode(ActiveProfileSyncState.self, from: data)
+    }
+
+    static func save(_ state: ActiveProfileSyncState?, defaults: UserDefaults = .standard) {
+        guard let state, let data = try? MotionSoundSyncCodec.encode(state) else {
+            defaults.removeObject(forKey: key)
+            return
+        }
+        defaults.set(data, forKey: key)
     }
 }

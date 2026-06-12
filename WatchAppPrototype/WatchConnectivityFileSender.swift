@@ -6,6 +6,10 @@ struct ActiveProfileSelectionCommand: Equatable {
     var profileID: UUID?
     var name: String?
     var reason: String?
+    /// 来自 ActiveProfileSyncState 的单调版本号；旧版手机不携带时为 nil。
+    var revision: Int?
+    var updatedAt: Date?
+    var origin: String?
 }
 
 @MainActor
@@ -37,8 +41,30 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
 
     override init() {
         super.init()
-        AppDiagnostics.record("watch.connectivity.init", ["supported": isSupported])
+        // 恢复上次同步完成的动作库状态：Watch 重启后即使 iPhone 不在旁边，
+        // 本地已存的动作库也应立即可用，而不是等待重新同步。
+        if let persisted = WatchProfileLibraryStateStore.load() {
+            profileLibraryVersion = persisted.version
+            profileLibraryProfileCount = persisted.profileCount
+            isProfileLibraryReady = persisted.isReady
+        }
+        AppDiagnostics.record(
+            "watch.connectivity.init",
+            [
+                "supported": isSupported,
+                "restoredLibraryReady": isProfileLibraryReady,
+                "restoredLibraryVersion": profileLibraryVersion ?? "",
+            ]
+        )
         reloadReceivedSoundFiles()
+    }
+
+    private func persistLibraryState() {
+        WatchProfileLibraryStateStore.save(
+            version: profileLibraryVersion,
+            profileCount: profileLibraryProfileCount,
+            isReady: isProfileLibraryReady
+        )
     }
 
     func activate() {
@@ -324,9 +350,11 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
                 profileLibraryProfileCount = resolvedProfileCount
                 missingProfileAudioFileNames = missingAudioFiles(for: pendingProfileManifest)
                 isProfileLibraryReady = missingProfileAudioFileNames.isEmpty
+                persistLibraryState()
             } else if profileLibraryVersion == nil {
                 profileLibraryVersion = resolvedLibraryVersion
                 profileLibraryProfileCount = archive.profiles.count
+                persistLibraryState()
             }
             profileLibraryChangeCount += 1
             lastTransferMessage = replaceLibrary
@@ -386,6 +414,7 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
         profileLibraryProfileCount = manifest.profileCount
         missingProfileAudioFileNames = missingAudioFiles(for: manifest)
         isProfileLibraryReady = false
+        persistLibraryState()
         profileLibraryStateChangeCount += 1
         lastTransferMessage = "正在同步 Watch 动作库..."
         AppDiagnostics.record(
@@ -410,10 +439,12 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
         missingProfileAudioFileNames = missingAudioFiles(for: manifest)
         guard missingProfileAudioFileNames.isEmpty else {
             isProfileLibraryReady = false
+            persistLibraryState()
             sendProfileSyncAck(applied: false, reason: "missingAudio", profileCount: profileLibraryProfileCount)
             return
         }
         isProfileLibraryReady = true
+        persistLibraryState()
         profileLibraryStateChangeCount += 1
         lastTransferMessage = "Watch 动作库已同步：\(profileLibraryProfileCount) 个动作"
         sendProfileSyncAck(applied: true, reason: reason, profileCount: profileLibraryProfileCount)
@@ -560,12 +591,36 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
         )
     }
 
-    private func receiveActiveProfileCommand(profileID: String?, name: String?, reason: String?) {
-        let command = ActiveProfileSelectionCommand(
-            profileID: profileID.flatMap(UUID.init(uuidString:)),
-            name: name?.trimmingCharacters(in: .whitespacesAndNewlines),
-            reason: reason
-        )
+    private func receiveActiveProfileCommand(
+        profileID: String?,
+        name: String?,
+        reason: String?,
+        payload: String? = nil
+    ) {
+        let command: ActiveProfileSelectionCommand
+        if let payload {
+            guard let data = Data(base64Encoded: payload),
+                  let state = try? MotionSoundSyncCodec.decode(ActiveProfileSyncState.self, from: data) else {
+                // payload 损坏时直接忽略，绝不能退化成"清空当前动作"。
+                AppDiagnostics.record("watch.connectivity.activeProfile.invalidPayload", ["reason": reason ?? ""])
+                return
+            }
+            command = ActiveProfileSelectionCommand(
+                profileID: state.profileID,
+                name: state.profileName?.trimmingCharacters(in: .whitespacesAndNewlines),
+                reason: reason,
+                revision: state.revision,
+                updatedAt: state.updatedAt,
+                origin: state.origin
+            )
+        } else {
+            // 兼容不带 payload 的旧格式命令。
+            command = ActiveProfileSelectionCommand(
+                profileID: profileID.flatMap(UUID.init(uuidString:)),
+                name: name?.trimmingCharacters(in: .whitespacesAndNewlines),
+                reason: reason
+            )
+        }
         lastActiveProfileCommand = command
         lastTransferMessage = command.profileID == nil && (command.name ?? "").isEmpty
             ? "已清空当前识别动作"
@@ -575,9 +630,92 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
             [
                 "profileID": command.profileID?.uuidString ?? "",
                 "name": command.name ?? "",
+                "revision": command.revision ?? -1,
                 "reason": reason ?? "",
             ]
         )
+    }
+
+    /// 把激活命令的执行结果回报给 iPhone（applied / pending / 失败原因）。
+    @discardableResult
+    func sendActiveProfileAck(_ ack: ActiveProfileSyncAck) -> Bool {
+        guard let session else {
+            AppDiagnostics.record("watch.activeProfile.ack.unsupported")
+            return false
+        }
+        do {
+            let payload = try MotionSoundSyncCodec.encode(ack).base64EncodedString()
+            let message: [String: Any] = [
+                "command": "activeProfileAck",
+                "payload": payload,
+                "revision": ack.revision,
+                "profileID": ack.profileID?.uuidString ?? "",
+                "applied": ack.applied,
+                "pending": ack.pending,
+                "reason": ack.reason ?? "",
+                "sentAt": Date().timeIntervalSince1970,
+                "source": "MotionSoundWatch",
+            ]
+            if session.isReachable {
+                session.sendMessage(message, replyHandler: nil) { _ in
+                    session.transferUserInfo(message)
+                }
+            } else {
+                session.transferUserInfo(message)
+            }
+            AppDiagnostics.record(
+                "watch.activeProfile.ack.sent",
+                [
+                    "revision": ack.revision,
+                    "applied": ack.applied,
+                    "pending": ack.pending,
+                    "reason": ack.reason ?? "",
+                ]
+            )
+            return true
+        } catch {
+            AppDiagnostics.record(error: error, event: "watch.activeProfile.ack.encode.error")
+            return false
+        }
+    }
+
+    /// Watch 端本地切换当前动作后，把最新状态推给 iPhone。
+    @discardableResult
+    func sendActiveProfileState(_ state: ActiveProfileSyncState) -> Bool {
+        guard let session else {
+            AppDiagnostics.record("watch.activeProfile.state.unsupported")
+            return false
+        }
+        do {
+            let payload = try MotionSoundSyncCodec.encode(state).base64EncodedString()
+            let message: [String: Any] = [
+                "command": "activeProfileState",
+                "payload": payload,
+                "revision": state.revision,
+                "profileID": state.profileID?.uuidString ?? "",
+                "name": state.profileName ?? "",
+                "sentAt": Date().timeIntervalSince1970,
+                "source": "MotionSoundWatch",
+            ]
+            if session.isReachable {
+                session.sendMessage(message, replyHandler: nil) { _ in
+                    session.transferUserInfo(message)
+                }
+            } else {
+                session.transferUserInfo(message)
+            }
+            AppDiagnostics.record(
+                "watch.activeProfile.state.sent",
+                [
+                    "revision": state.revision,
+                    "profileID": state.profileID?.uuidString ?? "",
+                ]
+            )
+            return true
+        } catch {
+            AppDiagnostics.record(error: error, event: "watch.activeProfile.state.encode.error")
+            return false
+        }
     }
 
     private func receiveDeleteProfile(profileID: String?, name: String?, kind: String?) {
@@ -880,7 +1018,7 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
                 return
             }
             if command == "setActiveProfile" {
-                receiveActiveProfileCommand(profileID: profileID, name: name, reason: reason)
+                receiveActiveProfileCommand(profileID: profileID, name: name, reason: reason, payload: payload)
                 return
             }
             guard command == "recordingControl" else { return }
@@ -982,7 +1120,7 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
                 "receivedAt": Date().timeIntervalSince1970,
             ])
             Task { @MainActor in
-                receiveActiveProfileCommand(profileID: profileID, name: name, reason: reason)
+                receiveActiveProfileCommand(profileID: profileID, name: name, reason: reason, payload: payload)
             }
             return
         }
@@ -1052,7 +1190,7 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
                 return
             }
             if command == "setActiveProfile" {
-                receiveActiveProfileCommand(profileID: profileID, name: name, reason: reason)
+                receiveActiveProfileCommand(profileID: profileID, name: name, reason: reason, payload: payload)
                 return
             }
             guard command == "recordingControl" else { return }
@@ -1075,7 +1213,18 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
         let profileLibraryVersion = applicationContext["profileLibraryVersion"] as? String
         let profileCount = applicationContext["profileCount"] as? Int
         let payload = applicationContext["payload"] as? String
+        // 手机端把"当前启用动作"作为独立 key 常驻在 applicationContext 中，
+        // 即使 Watch 离线，重新连接后也能收敛到最新选择。
+        let activeProfilePayload = applicationContext["activeProfileState"] as? String
         Task { @MainActor in
+            if let activeProfilePayload {
+                receiveActiveProfileCommand(
+                    profileID: nil,
+                    name: nil,
+                    reason: "applicationContext",
+                    payload: activeProfilePayload
+                )
+            }
             if command == "configureDiagnostics" {
                 receiveConfigureDiagnostics(runID: testRunID, buildCommit: buildCommit, clearLogs: clearLogs, reason: reason)
                 return
@@ -1135,5 +1284,37 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
             .joined(separator: "-")
             .trimmingCharacters(in: CharacterSet(charactersIn: "-_"))
         return compact.isEmpty ? fallback : compact
+    }
+}
+
+/// 动作库就绪状态的本地持久化：Watch 重启后本地库立即可用，无需等待 iPhone 重新同步。
+enum WatchProfileLibraryStateStore {
+    private static let versionKey = "MotionSound.profileLibrary.version.v1"
+    private static let countKey = "MotionSound.profileLibrary.count.v1"
+    private static let readyKey = "MotionSound.profileLibrary.ready.v1"
+
+    struct PersistedState {
+        var version: String?
+        var profileCount: Int
+        var isReady: Bool
+    }
+
+    static func load(defaults: UserDefaults = .standard) -> PersistedState? {
+        guard defaults.object(forKey: readyKey) != nil else { return nil }
+        return PersistedState(
+            version: defaults.string(forKey: versionKey),
+            profileCount: defaults.integer(forKey: countKey),
+            isReady: defaults.bool(forKey: readyKey)
+        )
+    }
+
+    static func save(version: String?, profileCount: Int, isReady: Bool, defaults: UserDefaults = .standard) {
+        if let version {
+            defaults.set(version, forKey: versionKey)
+        } else {
+            defaults.removeObject(forKey: versionKey)
+        }
+        defaults.set(profileCount, forKey: countKey)
+        defaults.set(isReady, forKey: readyKey)
     }
 }

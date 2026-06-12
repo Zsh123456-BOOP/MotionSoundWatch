@@ -39,7 +39,15 @@ final class WatchMotionRecorder: ObservableObject {
     @Published private(set) var standardNegativeTemplateCount = 0
     @Published private(set) var standardRequiredTemplateCount = 5
     @Published private(set) var standardQuality: GestureQuality?
+    /// 本地动作库摘要，供 Watch 端动作选择 UI 使用。
+    @Published private(set) var availableProfileSummaries: [WatchGestureProfileSummary] = []
+    /// 非 nil 表示有一个挂起的激活选择（目标动作尚未同步到本地库）。
+    @Published private(set) var pendingActiveProfileName: String?
     var recognitionEventSink: (([String: Any]) -> Void)?
+    /// 激活命令执行结果回执（applied / pending），由界面层接到 fileSender。
+    var activeProfileAckSink: ((ActiveProfileSyncAck) -> Void)?
+    /// Watch 本地切换动作后向 iPhone 推送的最新状态。
+    var activeProfileStateSink: ((ActiveProfileSyncState) -> Void)?
 
     private let motionManager = CMMotionManager()
     private let motionQueue = OperationQueue()
@@ -60,12 +68,21 @@ final class WatchMotionRecorder: ObservableObject {
     private var motionCallbackCount = 0
     private var motionStartDiagnosticTask: Task<Void, Never>?
     private var lastRecordingAssessmentAt: TimeInterval = -.infinity
+    /// 期望的激活选择（持久化，跨重启恢复；目标动作未同步到库时挂起等待）。
+    private var desiredActiveSelection: ActiveProfileSyncState?
 
     init(soundPlayer: WatchSoundPlayer? = nil) {
         self.soundPlayer = soundPlayer
         motionQueue.name = "watch.motion.sound.core-motion"
         motionQueue.qualityOfService = .userInitiated
-        AppDiagnostics.record("watch.motionRecorder.init")
+        desiredActiveSelection = WatchActiveProfileSelectionStore.load()
+        AppDiagnostics.record(
+            "watch.motionRecorder.init",
+            [
+                "restoredSelectionRevision": desiredActiveSelection?.revision ?? -1,
+                "restoredSelectionProfile": desiredActiveSelection?.profileName ?? "",
+            ]
+        )
     }
 
     func startLiveUpdates(sampleRate: Double = 50) {
@@ -159,13 +176,16 @@ final class WatchMotionRecorder: ObservableObject {
             let profiles = deduplicateProfiles(try store.list().flatMap(\.archive.profiles))
             recognitionRuntime.replaceProfiles(profiles)
             Task { await runtimeActor.replaceProfiles(profiles) }
-            refreshActiveRecognitionProfile(afterLoading: profiles, reason: "reloadSavedProfiles")
+            availableProfileSummaries = profiles.map {
+                WatchGestureProfileSummary(id: $0.id, name: $0.name, kind: $0.kind)
+            }
+            resolveDesiredSelection(reason: "reloadSavedProfiles")
             triggerCountsByProfileID = triggerCountsByProfileID.filter { id, _ in
                 profiles.contains { $0.id == id }
             }
             soundPlayer?.preload(profileSounds: profiles)
             loadedProfileCount = profiles.count
-            if isProfileLibraryReady {
+            if isProfileLibraryReady, pendingActiveProfileName == nil {
                 lastFeedbackMessage = nil
             }
             AppDiagnostics.record(
@@ -176,62 +196,147 @@ final class WatchMotionRecorder: ObservableObject {
                     "profileLibraryVersion": activeProfileLibraryVersion,
                     "activeProfileID": activeRecognitionProfileID?.uuidString ?? "",
                     "activeProfileName": activeRecognitionProfileName ?? "",
+                    "pendingSelection": pendingActiveProfileName ?? "",
                 ]
             )
         } catch {
             loadedProfileCount = 0
-            clearActiveRecognitionProfile(reason: "reloadSavedProfiles.error")
+            availableProfileSummaries = []
+            // 加载失败只停用识别，不抹掉用户的期望选择；下次加载成功后自动恢复。
+            deactivateRecognition(reason: "reloadSavedProfiles.error")
             lastFeedbackMessage = error.localizedDescription
             Task { await runtimeActor.replaceProfiles([]) }
             AppDiagnostics.record(error: error, event: "watch.profiles.reload.error")
         }
     }
 
-    func setActiveRecognitionProfile(profileID: UUID?, name: String?, reason: String) {
-        let normalizedName = name?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard profileID != nil || normalizedName?.isEmpty == false else {
-            clearActiveRecognitionProfile(reason: reason)
-            return
+    /// 处理来自 iPhone 的激活命令（sendMessage / userInfo / applicationContext）。
+    func applyRemoteActiveSelection(_ command: ActiveProfileSelectionCommand) {
+        let state = ActiveProfileSyncState(
+            revision: command.revision ?? nextLocalSelectionRevision(),
+            profileID: command.profileID,
+            profileName: command.name?.trimmingCharacters(in: .whitespacesAndNewlines),
+            updatedAt: command.updatedAt ?? Date(),
+            origin: command.origin ?? "phone"
+        )
+        adoptDesiredSelection(state, reason: command.reason ?? "phoneCommand", notifyPhone: false)
+    }
+
+    /// Watch 端本地切换当前动作（profileID 为 nil 表示关闭识别）。
+    func selectActiveProfileLocally(profileID: UUID?, reason: String) {
+        let profile = profileID.flatMap { id in
+            recognitionRuntime.profiles.first { $0.id == id }
         }
-        guard let profile = recognitionRuntime.profiles.first(where: { profile in
-            if let profileID, profile.id == profileID {
-                return true
-            }
-            guard let normalizedName, !normalizedName.isEmpty else {
-                return false
-            }
-            return profile.name.caseInsensitiveCompare(normalizedName) == .orderedSame
-        }) else {
-            clearActiveRecognitionProfile(reason: "missing.\(reason)")
-            lastFeedbackMessage = "没有找到当前识别动作"
+        let state = ActiveProfileSyncState(
+            revision: nextLocalSelectionRevision(),
+            profileID: profile?.id ?? profileID,
+            profileName: profile?.name,
+            origin: "watch"
+        )
+        adoptDesiredSelection(state, reason: reason, notifyPhone: true)
+    }
+
+    private func nextLocalSelectionRevision() -> Int {
+        (desiredActiveSelection?.revision ?? 0) + 1
+    }
+
+    private func adoptDesiredSelection(_ state: ActiveProfileSyncState, reason: String, notifyPhone: Bool) {
+        guard state.supersedes(desiredActiveSelection) else {
+            // 乱序送达的旧命令：忽略，但重发一次当前状态的回执，让 iPhone 收敛。
             AppDiagnostics.record(
-                "watch.activeProfile.missing",
+                "watch.activeProfile.staleCommandIgnored",
                 [
-                    "profileID": profileID?.uuidString ?? "",
-                    "name": normalizedName ?? "",
+                    "incomingRevision": state.revision,
+                    "currentRevision": desiredActiveSelection?.revision ?? -1,
                     "reason": reason,
                 ]
             )
+            sendSelectionAck(
+                applied: activeRecognitionProfileID != nil || isDesiredSelectionEmpty,
+                pending: pendingActiveProfileName != nil,
+                reason: "staleCommandIgnored"
+            )
             return
         }
-        applyActiveRecognitionProfile(profile, reason: reason)
+        desiredActiveSelection = state
+        WatchActiveProfileSelectionStore.save(state)
+        if notifyPhone {
+            activeProfileStateSink?(state)
+        }
+        resolveDesiredSelection(reason: reason)
     }
 
-    func clearActiveRecognitionProfile(reason: String) {
+    /// 尝试把期望选择落到识别运行时上：
+    /// 找到目标动作 → 激活；目标是"未选择" → 关闭识别；
+    /// 找不到目标动作 → 挂起等待（库同步完成后由 reloadSavedProfiles 重放）。
+    private func resolveDesiredSelection(reason: String) {
+        guard let desired = desiredActiveSelection else {
+            pendingActiveProfileName = nil
+            deactivateRecognition(reason: "noSelection.\(reason)")
+            return
+        }
+
+        guard !isDesiredSelectionEmpty else {
+            pendingActiveProfileName = nil
+            deactivateRecognition(reason: "clearedSelection.\(reason)")
+            sendSelectionAck(applied: true, pending: false, reason: reason)
+            return
+        }
+
+        if let profile = findProfile(id: desired.profileID, name: desired.profileName) {
+            applyActiveRecognitionProfile(profile, reason: reason)
+            pendingActiveProfileName = nil
+            sendSelectionAck(applied: true, pending: false, reason: reason)
+            return
+        }
+
+        // 目标动作不在本地库：可能库尚未同步完、动作文件还在传输、或动作已被删除。
+        // 保守处理：保留期望选择并挂起，识别保持关闭；
+        // "动作被删除"的场景由 iPhone 端显式发送清空命令来收敛。
+        pendingActiveProfileName = desired.profileName ?? desired.profileID?.uuidString
+        deactivateRecognition(reason: "pending.\(reason)")
+        lastFeedbackMessage = "等待动作同步：\(pendingActiveProfileName ?? "")"
+        sendSelectionAck(
+            applied: false,
+            pending: true,
+            reason: isProfileLibraryReady ? "profileNotInLibrary" : "libraryNotReady"
+        )
+        AppDiagnostics.record(
+            "watch.activeProfile.pending",
+            [
+                "profileID": desired.profileID?.uuidString ?? "",
+                "name": desired.profileName ?? "",
+                "revision": desired.revision,
+                "profileLibraryReady": isProfileLibraryReady,
+                "loadedProfileCount": loadedProfileCount,
+                "reason": reason,
+            ]
+        )
+    }
+
+    private var isDesiredSelectionEmpty: Bool {
+        guard let desired = desiredActiveSelection else { return true }
+        return desired.profileID == nil && (desired.profileName?.isEmpty ?? true)
+    }
+
+    private func findProfile(id: UUID?, name: String?) -> GestureProfile? {
+        if let id, let profile = recognitionRuntime.profiles.first(where: { $0.id == id }) {
+            return profile
+        }
+        guard let name = name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else {
+            return nil
+        }
+        return recognitionRuntime.profiles.first {
+            $0.name.caseInsensitiveCompare(name) == .orderedSame
+        }
+    }
+
+    private func deactivateRecognition(reason: String) {
         activeRecognitionProfileID = nil
         activeRecognitionProfileName = nil
         recognitionRuntime.setActiveProfileIDs([])
         Task { await runtimeActor.setActiveProfileIDs([]) }
-        AppDiagnostics.record("watch.activeProfile.clear", ["reason": reason])
-    }
-
-    private func refreshActiveRecognitionProfile(afterLoading profiles: [GestureProfile], reason: String) {
-        guard let activeRecognitionProfileID,
-              let profile = profiles.first(where: { $0.id == activeRecognitionProfileID }) else {
-            clearActiveRecognitionProfile(reason: reason)
-            return
-        }
-        applyActiveRecognitionProfile(profile, reason: reason)
+        AppDiagnostics.record("watch.activeProfile.deactivated", ["reason": reason])
     }
 
     private func applyActiveRecognitionProfile(_ profile: GestureProfile, reason: String) {
@@ -248,6 +353,19 @@ final class WatchMotionRecorder: ObservableObject {
                 "reason": reason,
             ]
         )
+    }
+
+    private func sendSelectionAck(applied: Bool, pending: Bool, reason: String?) {
+        guard let desired = desiredActiveSelection else { return }
+        let ack = ActiveProfileSyncAck(
+            revision: desired.revision,
+            profileID: desired.profileID,
+            profileName: desired.profileName,
+            applied: applied,
+            pending: pending,
+            reason: reason
+        )
+        activeProfileAckSink?(ack)
     }
 
     func updateProfileLibraryState(
@@ -1827,5 +1945,30 @@ private extension JSONEncoder {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
         return encoder
+    }
+}
+
+/// Watch 端动作选择 UI 使用的轻量摘要。
+struct WatchGestureProfileSummary: Identifiable, Equatable {
+    let id: UUID
+    let name: String
+    let kind: GestureKind
+}
+
+/// 激活选择的本地持久化（UserDefaults），用于跨 App 重启恢复。
+enum WatchActiveProfileSelectionStore {
+    private static let key = "MotionSound.activeProfileSelection.v1"
+
+    static func load(defaults: UserDefaults = .standard) -> ActiveProfileSyncState? {
+        guard let data = defaults.data(forKey: key) else { return nil }
+        return try? MotionSoundSyncCodec.decode(ActiveProfileSyncState.self, from: data)
+    }
+
+    static func save(_ state: ActiveProfileSyncState?, defaults: UserDefaults = .standard) {
+        guard let state, let data = try? MotionSoundSyncCodec.encode(state) else {
+            defaults.removeObject(forKey: key)
+            return
+        }
+        defaults.set(data, forKey: key)
     }
 }

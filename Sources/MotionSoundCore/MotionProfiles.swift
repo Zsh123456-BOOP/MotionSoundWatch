@@ -495,6 +495,86 @@ public struct ProfileSyncAck: Codable, Equatable, Sendable {
     }
 }
 
+/// WatchConnectivity 消息里 Codable payload 的统一编解码（ISO8601 日期）。
+public enum MotionSoundSyncCodec {
+    public static func encode<T: Encodable>(_ value: T) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        return try encoder.encode(value)
+    }
+
+    public static func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(type, from: data)
+    }
+}
+
+/// 当前启用动作的同步状态。revision 单调递增，双端 last-writer-wins：
+/// 收到 revision 更小（或相等但 updatedAt 更早）的状态一律忽略，防止
+/// userInfo / applicationContext 乱序重放旧选择。
+public struct ActiveProfileSyncState: Codable, Equatable, Sendable {
+    public var revision: Int
+    public var profileID: UUID?
+    public var profileName: String?
+    public var updatedAt: Date
+    /// 发起方："phone" / "watch"
+    public var origin: String
+
+    public init(
+        revision: Int,
+        profileID: UUID?,
+        profileName: String?,
+        updatedAt: Date = Date(),
+        origin: String
+    ) {
+        self.revision = revision
+        self.profileID = profileID
+        self.profileName = profileName
+        self.updatedAt = updatedAt
+        self.origin = origin
+    }
+
+    /// state 是否应覆盖 current（revision 优先，updatedAt 兜底）。
+    public func supersedes(_ current: ActiveProfileSyncState?) -> Bool {
+        guard let current else { return true }
+        if revision != current.revision {
+            return revision > current.revision
+        }
+        return updatedAt > current.updatedAt
+    }
+}
+
+/// Watch 对激活命令的回执。pending=true 表示命令已收到、
+/// 但目标动作尚未出现在已同步的动作库中（挂起等待库加载后重放）。
+public struct ActiveProfileSyncAck: Codable, Equatable, Sendable {
+    public var revision: Int
+    public var profileID: UUID?
+    public var profileName: String?
+    public var applied: Bool
+    public var pending: Bool
+    public var reason: String?
+    public var sentAt: Date
+
+    public init(
+        revision: Int,
+        profileID: UUID?,
+        profileName: String?,
+        applied: Bool,
+        pending: Bool = false,
+        reason: String? = nil,
+        sentAt: Date = Date()
+    ) {
+        self.revision = revision
+        self.profileID = profileID
+        self.profileName = profileName
+        self.applied = applied
+        self.pending = pending
+        self.reason = reason
+        self.sentAt = sentAt
+    }
+}
+
 public enum GestureProfileLibraryVersion {
     public static func make(profiles: [GestureProfile]) -> String {
         let payload = canonicalPayload(for: profiles)

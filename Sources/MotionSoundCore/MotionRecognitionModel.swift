@@ -127,6 +127,12 @@ public struct ActiveRecognitionSelection: Codable, Equatable, Sendable {
     public static var inactive: ActiveRecognitionSelection {
         ActiveRecognitionSelection(mode: .activeProfiles, activeProfileIDs: [])
     }
+
+    /// 显式 opt-in 的全库匹配模式，仅供测试、CLI 与离线评估使用。
+    /// 产品运行时必须使用 activeProfiles 模式（用户必须先选择当前动作）。
+    public static var allProfiles: ActiveRecognitionSelection {
+        ActiveRecognitionSelection(mode: .allProfiles, activeProfileIDs: [])
+    }
 }
 
 public enum PlayTiming: String, Codable, Equatable, Sendable {

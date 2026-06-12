@@ -188,3 +188,15 @@
 "sync.result.appended" = "已追加第 %d 次录制，并同步到 Watch。";
 "sync.result.saved" = "已保存动作，并以 iPhone 动作列表替换 Watch 动作库。";
 "audio.error.invalidDuration" = "这个音频文件无法读取有效时长，请换一个 MP3、WAV、M4A 或 AAC 文件。";
+
+"watch.status.noActiveProfile" = "未选择动作";
+"watch.subtitle.noActiveProfile" = "先选择要识别的动作，否则不会触发音效。";
+"watch.status.pendingSelection" = "等待动作同步";
+"watch.subtitle.pendingSelection" = "所选动作还没同步到手表，请保持 iPhone 在附近。";
+"watch.active.none" = "未选择（不识别）";
+"watch.active.pendingName" = "等待同步：%@";
+"watch.picker.title" = "选择识别动作";
+"watch.picker.none" = "关闭识别";
+"library.row.activeSyncing" = "当前动作（同步中…）";
+"library.row.activePending" = "当前动作（待手表同步）";
+"library.row.activeFailed" = "当前动作（切换失败）";

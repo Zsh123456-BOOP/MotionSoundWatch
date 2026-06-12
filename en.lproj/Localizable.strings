@@ -188,3 +188,15 @@
 "sync.result.appended" = "Added recording %d and synced to Watch.";
 "sync.result.saved" = "Saved the action and replaced the Watch library with the iPhone action list.";
 "audio.error.invalidDuration" = "This audio file does not have a readable duration. Choose an MP3, WAV, M4A, or AAC file.";
+
+"watch.status.noActiveProfile" = "No action selected";
+"watch.subtitle.noActiveProfile" = "Pick the action to recognize first. No sounds trigger until then.";
+"watch.status.pendingSelection" = "Waiting for sync";
+"watch.subtitle.pendingSelection" = "The selected action has not synced to the watch yet. Keep your iPhone nearby.";
+"watch.active.none" = "None (not recognizing)";
+"watch.active.pendingName" = "Waiting for sync: %@";
+"watch.picker.title" = "Choose action";
+"watch.picker.none" = "Recognition off";
+"library.row.activeSyncing" = "Current action (syncing…)";
+"library.row.activePending" = "Current action (waiting on watch)";
+"library.row.activeFailed" = "Current action (switch failed)";
