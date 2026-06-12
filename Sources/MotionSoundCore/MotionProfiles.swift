@@ -194,6 +194,193 @@ public struct GestureQualityEvaluator: Sendable {
     }
 }
 
+/// 多样本一致性分析与异常样本检测。
+/// 用于训练阶段：对同一动作的 3~5 次录制，评估彼此一致性、给出融合原型、
+/// 并自动标记明显偏离的离群样本（"自动筛除异常样本"）。
+public struct MotionTemplateConsistency: Equatable, Sendable {
+    /// 0...1，越高越一致（基于成对 DTW 距离）。
+    public var score: Double
+    /// 成对距离中位数。
+    public var medianDistance: Double
+    /// 成对距离最大值。
+    public var maxDistance: Double
+    /// 被判定为离群的模板下标（相对传入数组）。
+    public var outlierIndices: [Int]
+
+    public init(score: Double, medianDistance: Double, maxDistance: Double, outlierIndices: [Int]) {
+        self.score = score
+        self.medianDistance = medianDistance
+        self.maxDistance = maxDistance
+        self.outlierIndices = outlierIndices
+    }
+}
+
+public struct MotionTemplateFusion: Sendable {
+    public var matcher: MotionTemplateMatcher
+    /// 离群判定阈值：某样本到其余样本的平均距离超过 (中位数 * factor + floor) 即视为离群。
+    public var outlierFactor: Double
+    public var outlierFloor: Double
+
+    public init(
+        matcher: MotionTemplateMatcher = MotionTemplateMatcher(),
+        outlierFactor: Double = 1.8,
+        outlierFloor: Double = 0.12
+    ) {
+        self.matcher = matcher
+        self.outlierFactor = outlierFactor
+        self.outlierFloor = outlierFloor
+    }
+
+    /// 计算一致性与离群样本。少于 3 个样本时不做离群判定（样本太少不可靠）。
+    public func consistency(of templates: [MotionTemplate]) -> MotionTemplateConsistency {
+        guard templates.count >= 2 else {
+            return MotionTemplateConsistency(score: templates.isEmpty ? 0 : 1, medianDistance: 0, maxDistance: 0, outlierIndices: [])
+        }
+
+        // 成对距离矩阵。
+        var pairwise: [Double] = []
+        var distanceMatrix = Array(repeating: Array(repeating: Double.infinity, count: templates.count), count: templates.count)
+        for i in templates.indices {
+            for j in templates.indices where j > i {
+                let d = matcher.distance(templates[i].samples, templates[j].samples)
+                pairwise.append(d)
+                distanceMatrix[i][j] = d
+                distanceMatrix[j][i] = d
+            }
+        }
+
+        // 每个样本到"最近邻"的距离：离群样本没有近邻，对单个离群更鲁棒
+        // （不会像平均距离那样被离群自身污染参考值）。
+        let nearestNeighbor: [Double] = templates.indices.map { i in
+            templates.indices
+                .filter { $0 != i }
+                .map { distanceMatrix[i][$0] }
+                .min() ?? 0
+        }
+
+        let median = MotionTemplateFusion.median(pairwise)
+        let maxDistance = pairwise.max() ?? 0
+        // 一致性分数：距离越小越高。0.30 处约为 0.5 分。
+        let score = max(0, min(1, 1 - median / 0.30 * 0.5))
+
+        var outliers: [Int] = []
+        if templates.count >= 3 {
+            let nnMedian = MotionTemplateFusion.median(nearestNeighbor)
+            let threshold = nnMedian * outlierFactor + outlierFloor
+            for i in templates.indices where nearestNeighbor[i] > threshold {
+                outliers.append(i)
+            }
+            // 安全阀：最多剔除不超过总数的 1/3，避免把整组判为离群。
+            let maxRemovable = max(0, templates.count / 3)
+            if outliers.count > maxRemovable {
+                // 只保留偏离最严重的那些。
+                outliers = outliers
+                    .sorted { nearestNeighbor[$0] > nearestNeighbor[$1] }
+                    .prefix(maxRemovable)
+                    .sorted()
+            }
+        }
+
+        return MotionTemplateConsistency(
+            score: score,
+            medianDistance: median,
+            maxDistance: maxDistance,
+            outlierIndices: outliers
+        )
+    }
+
+    /// 时间对齐平均得到的融合原型（所有样本重采样到统一长度后逐帧平均）。
+    /// 返回 nil 表示样本不足。融合原型可用于可视化、签名表征或未来的单原型匹配。
+    public func fusedPrototype(
+        from templates: [MotionTemplate],
+        targetCount: Int = 48,
+        label: String? = nil
+    ) -> MotionTemplate? {
+        let usable = templates.filter { $0.samples.count >= 2 }
+        guard !usable.isEmpty else { return nil }
+        guard usable.count > 1 else { return usable.first }
+
+        let resampled = usable.map { resampleUniform($0.samples, count: targetCount) }
+        let duration = usable.map(\.rawDuration).reduce(0, +) / Double(usable.count)
+
+        var fused: [MotionSample] = []
+        fused.reserveCapacity(targetCount)
+        for frame in 0..<targetCount {
+            var acc = MotionVector3(x: 0, y: 0, z: 0)
+            var gyr = MotionVector3(x: 0, y: 0, z: 0)
+            for series in resampled {
+                acc = MotionVector3(x: acc.x + series[frame].userAcceleration.x,
+                                    y: acc.y + series[frame].userAcceleration.y,
+                                    z: acc.z + series[frame].userAcceleration.z)
+                gyr = MotionVector3(x: gyr.x + series[frame].rotationRate.x,
+                                    y: gyr.y + series[frame].rotationRate.y,
+                                    z: gyr.z + series[frame].rotationRate.z)
+            }
+            let n = Double(resampled.count)
+            let t = duration * Double(frame) / Double(targetCount - 1)
+            fused.append(MotionSample(
+                timestamp: t,
+                userAcceleration: MotionVector3(x: acc.x / n, y: acc.y / n, z: acc.z / n),
+                rotationRate: MotionVector3(x: gyr.x / n, y: gyr.y / n, z: gyr.z / n)
+            ))
+        }
+
+        let features = MotionEnergyAnalyzer().features(for: fused)
+        let avgQuality = usable.map(\.qualityScore).reduce(0, +) / Double(usable.count)
+        return MotionTemplate(
+            label: label ?? usable.first?.label ?? "fused",
+            kind: usable.first?.kind ?? .burst,
+            samples: fused,
+            features: features,
+            qualityScore: avgQuality
+        )
+    }
+
+    private func resampleUniform(_ samples: [MotionSample], count: Int) -> [MotionSample] {
+        guard samples.count > 1, count > 1,
+              let first = samples.first, let last = samples.last else {
+            return samples
+        }
+        let start = first.timestamp
+        let span = max(last.timestamp - start, .leastNonzeroMagnitude)
+        var output: [MotionSample] = []
+        output.reserveCapacity(count)
+        var src = 0
+        for i in 0..<count {
+            let t = start + span * Double(i) / Double(count - 1)
+            while src < samples.count - 2, samples[src + 1].timestamp < t { src += 1 }
+            let l = samples[src]
+            let r = samples[min(src + 1, samples.count - 1)]
+            let seg = max(r.timestamp - l.timestamp, .leastNonzeroMagnitude)
+            let a = max(0, min(1, (t - l.timestamp) / seg))
+            output.append(MotionSample(
+                timestamp: t,
+                userAcceleration: MotionVector3(
+                    x: l.userAcceleration.x + (r.userAcceleration.x - l.userAcceleration.x) * a,
+                    y: l.userAcceleration.y + (r.userAcceleration.y - l.userAcceleration.y) * a,
+                    z: l.userAcceleration.z + (r.userAcceleration.z - l.userAcceleration.z) * a
+                ),
+                rotationRate: MotionVector3(
+                    x: l.rotationRate.x + (r.rotationRate.x - l.rotationRate.x) * a,
+                    y: l.rotationRate.y + (r.rotationRate.y - l.rotationRate.y) * a,
+                    z: l.rotationRate.z + (r.rotationRate.z - l.rotationRate.z) * a
+                )
+            ))
+        }
+        return output
+    }
+
+    private static func median(_ values: [Double]) -> Double {
+        guard !values.isEmpty else { return 0 }
+        let sorted = values.sorted()
+        let mid = sorted.count / 2
+        if sorted.count % 2 == 0 {
+            return (sorted[mid - 1] + sorted[mid]) / 2
+        }
+        return sorted[mid]
+    }
+}
+
 public struct GestureSampleCollectionPlan: Equatable, Sendable {
     public var acceptedCount: Int
     public var requiredCount: Int
@@ -203,6 +390,10 @@ public struct GestureSampleCollectionPlan: Equatable, Sendable {
     public var qualityScore: Double
     public var message: String
     public var warnings: [String]
+    /// 多样本一致性分数（0...1）。样本不足 2 个时为 nil。
+    public var consistencyScore: Double?
+    /// 被判定为离群的样本下标（相对已采纳样本顺序），建议用户删除重录。
+    public var outlierIndices: [Int]
 
     public init(
         acceptedCount: Int,
@@ -212,7 +403,9 @@ public struct GestureSampleCollectionPlan: Equatable, Sendable {
         hasHighDeviation: Bool,
         qualityScore: Double,
         message: String,
-        warnings: [String] = []
+        warnings: [String] = [],
+        consistencyScore: Double? = nil,
+        outlierIndices: [Int] = []
     ) {
         self.acceptedCount = acceptedCount
         self.requiredCount = requiredCount
@@ -222,6 +415,8 @@ public struct GestureSampleCollectionPlan: Equatable, Sendable {
         self.qualityScore = qualityScore
         self.message = message
         self.warnings = warnings
+        self.consistencyScore = consistencyScore
+        self.outlierIndices = outlierIndices
     }
 }
 
@@ -233,13 +428,16 @@ public struct GestureSampleCollectionPolicy: Sendable {
     public var evaluator: GestureQualityEvaluator
     public var matcher: MotionTemplateMatcher
 
+    public var fusion: MotionTemplateFusion
+
     public init(
         minimumTemplateCount: Int = 5,
         highDeviationTemplateCount: Int = 5,
         highDistanceThreshold: Double = 0.26,
         highDurationRatioThreshold: Double = 2.4,
         evaluator: GestureQualityEvaluator = GestureQualityEvaluator(),
-        matcher: MotionTemplateMatcher = MotionTemplateMatcher()
+        matcher: MotionTemplateMatcher = MotionTemplateMatcher(),
+        fusion: MotionTemplateFusion = MotionTemplateFusion()
     ) {
         self.minimumTemplateCount = minimumTemplateCount
         self.highDeviationTemplateCount = highDeviationTemplateCount
@@ -247,6 +445,7 @@ public struct GestureSampleCollectionPolicy: Sendable {
         self.highDurationRatioThreshold = highDurationRatioThreshold
         self.evaluator = evaluator
         self.matcher = matcher
+        self.fusion = fusion
     }
 
     public func plan(
@@ -263,6 +462,8 @@ public struct GestureSampleCollectionPolicy: Sendable {
         let required = max(minimumTemplateCount, highDeviation ? highDeviationTemplateCount : minimumTemplateCount)
         let ready = count >= required
 
+        let consistency = templates.count >= 2 ? fusion.consistency(of: templates) : nil
+
         let message: String
         if count == 0 {
             message = "先录第 1 次动作。系统会学习 5 次录制里的自然差异。"
@@ -272,7 +473,11 @@ public struct GestureSampleCollectionPolicy: Sendable {
             message = "已确认 \(count) 次录制，可以配置声音并保存。"
         }
 
-        let warnings = report.warnings
+        var warnings = report.warnings
+        if let consistency, !consistency.outlierIndices.isEmpty {
+            let positions = consistency.outlierIndices.map { String($0 + 1) }.joined(separator: "、")
+            warnings.append("第 \(positions) 次录制和其余几次差异较大，建议删除重录。")
+        }
 
         return GestureSampleCollectionPlan(
             acceptedCount: count,
@@ -282,7 +487,9 @@ public struct GestureSampleCollectionPolicy: Sendable {
             hasHighDeviation: highDeviation,
             qualityScore: report.score,
             message: message,
-            warnings: warnings
+            warnings: warnings,
+            consistencyScore: consistency?.score,
+            outlierIndices: consistency?.outlierIndices ?? []
         )
     }
 

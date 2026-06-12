@@ -200,3 +200,4 @@
 "library.row.activeSyncing" = "Current action (syncing…)";
 "library.row.activePending" = "Current action (waiting on watch)";
 "library.row.activeFailed" = "Current action (switch failed)";
+"sample.consistency" = "Gesture consistency %d%%";

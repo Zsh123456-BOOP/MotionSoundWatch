@@ -2520,6 +2520,23 @@ private struct SampleCollectionStatusView: View {
                 .font(.footnote)
                 .foregroundStyle(PajiTheme.textMuted)
                 .fixedSize(horizontal: false, vertical: true)
+
+            if let consistency = plan.consistencyScore, plan.acceptedCount >= 2 {
+                HStack(spacing: 6) {
+                    Image(systemName: consistency >= 0.6 ? "waveform.path.ecg" : "exclamationmark.triangle")
+                        .foregroundStyle(consistency >= 0.6 ? PajiTheme.lime : PajiTheme.pink)
+                    Text(PajiStrings.format("sample.consistency", Int((consistency * 100).rounded())))
+                        .font(.caption)
+                        .foregroundStyle(PajiTheme.textMuted)
+                }
+            }
+
+            ForEach(Array(plan.warnings.enumerated()), id: \.offset) { _, warning in
+                Label(warning, systemImage: "exclamationmark.bubble")
+                    .font(.caption)
+                    .foregroundStyle(PajiTheme.pink)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .padding(12)
         .background(PajiTheme.panelElevated.opacity(0.78))

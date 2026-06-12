@@ -1450,6 +1450,69 @@ import Foundation
     #expect(window.end == 0.95)
 }
 
+@Test func templateFusionFlagsOutlierRecording() {
+    let builder = MotionTemplateBuilder()
+    // 四次一致的 burst + 一次明显不同（方向/类型不同）的录制。
+    let consistent = [
+        builder.makeTemplate(label: "punch", kind: .burst, samples: syntheticBurst(duration: 0.7, amplitude: 1.0)),
+        builder.makeTemplate(label: "punch", kind: .burst, samples: syntheticBurst(duration: 0.72, amplitude: 1.02, phase: 0.02)),
+        builder.makeTemplate(label: "punch", kind: .burst, samples: syntheticBurst(duration: 0.68, amplitude: 0.98, phase: -0.02)),
+        builder.makeTemplate(label: "punch", kind: .burst, samples: syntheticBurst(duration: 0.71, amplitude: 1.01)),
+    ]
+    let outlier = builder.makeTemplate(label: "punch", kind: .sequence, samples: syntheticRotation(duration: 1.4, angle: .pi * 2))
+    let templates = consistent + [outlier]
+
+    let consistency = MotionTemplateFusion().consistency(of: templates)
+    // 离群样本（下标 4）应被检出。
+    #expect(consistency.outlierIndices.contains(4))
+    // 安全阀：不会把过半样本判为离群。
+    #expect(consistency.outlierIndices.count <= templates.count / 3)
+}
+
+@Test func templateFusionConsistentSetHasNoOutliersAndHighScore() {
+    let builder = MotionTemplateBuilder()
+    let templates = (0..<5).map { i in
+        builder.makeTemplate(
+            label: "punch",
+            kind: .burst,
+            samples: syntheticBurst(duration: 0.70 + Double(i) * 0.005, amplitude: 1.0, phase: Double(i) * 0.01)
+        )
+    }
+    let consistency = MotionTemplateFusion().consistency(of: templates)
+    #expect(consistency.outlierIndices.isEmpty)
+    #expect(consistency.score > 0.5)
+}
+
+@Test func fusedPrototypeMatchesMemberGesturesCloselyAndRejectsOthers() {
+    let builder = MotionTemplateBuilder()
+    let matcher = MotionTemplateMatcher()
+    let members = (0..<4).map { i in
+        builder.makeTemplate(label: "punch", kind: .burst, samples: syntheticBurst(duration: 0.7, amplitude: 1.0, phase: Double(i) * 0.01))
+    }
+    guard let fused = MotionTemplateFusion().fusedPrototype(from: members) else {
+        Issue.record("fused prototype should not be nil")
+        return
+    }
+    let memberDistance = matcher.distance(fused.samples, syntheticBurst(duration: 0.7, amplitude: 1.0))
+    let otherDistance = matcher.distance(fused.samples, syntheticRotation(duration: 1.4, angle: .pi * 2))
+    #expect(memberDistance < otherDistance)
+    #expect(fused.samples.count == 48)
+}
+
+@Test func collectionPlanSurfacesOutlierWarning() {
+    let builder = MotionTemplateBuilder()
+    let templates = [
+        builder.makeTemplate(label: "punch", kind: .burst, samples: syntheticBurst(duration: 0.7, amplitude: 1.0)),
+        builder.makeTemplate(label: "punch", kind: .burst, samples: syntheticBurst(duration: 0.71, amplitude: 1.01)),
+        builder.makeTemplate(label: "punch", kind: .burst, samples: syntheticBurst(duration: 0.69, amplitude: 0.99)),
+        builder.makeTemplate(label: "punch", kind: .sequence, samples: syntheticRotation(duration: 1.4, angle: .pi * 2)),
+    ]
+    let plan = GestureSampleCollectionPolicy().plan(templates: templates)
+    #expect(!plan.outlierIndices.isEmpty)
+    #expect(plan.warnings.contains { $0.contains("差异较大") })
+    #expect(plan.consistencyScore != nil)
+}
+
 @Test func runtimeDefaultsToInactiveSelection() {
     // 不显式传 selection 时，runtime 必须默认 .inactive（未选动作不识别）。
     let templateBuilder = MotionTemplateBuilder()

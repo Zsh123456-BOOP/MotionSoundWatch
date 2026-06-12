@@ -945,6 +945,9 @@ private func normalize(_ samples: [MotionSample]) -> [MotionFeatureFrame] {
     let centered = raw.map { row in
         row.indices.map { row[$0] - means[$0] }
     }
+    // 尺度用全通道 |值| 的最大值（保留通道间幅度比例 → 主轴判别）。
+    // 注：单样本尖峰压扁其余维度的问题已由 Phase 2 的低通滤波在上游消除，
+    // 因此这里无需改用 p95 之类的鲁棒统计量（那样会整体抬高距离、使已校准阈值失效）。
     let scale = max(
         centered.flatMap { $0 }.map { abs($0) }.max() ?? 1,
         0.001

@@ -200,3 +200,4 @@
 "library.row.activeSyncing" = "当前动作（同步中…）";
 "library.row.activePending" = "当前动作（待手表同步）";
 "library.row.activeFailed" = "当前动作（切换失败）";
+"sample.consistency" = "动作一致性 %d%%";
