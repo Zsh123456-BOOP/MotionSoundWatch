@@ -33,6 +33,10 @@ public enum RejectReason: String, Codable, Equatable, Sendable {
     case trajectoryDistanceTooHigh
     case poseMismatch
     case stageMismatch
+    /// 候选过于接近某个已知的误触（负样本），在单动作识别下作为背景拒绝层。
+    case negativeTemplateMatch
+    /// 等待二次确认：单次证据不足，需相邻窗口再次命中才触发。
+    case awaitingConfirmation
 }
 
 public enum RecognitionMode: String, Codable, Equatable, Sendable {
@@ -2374,7 +2378,9 @@ public struct MotionRecognitionRouter: Sendable {
              .marginTooSmall,
              .cooldownActive,
              .audioMissing,
-             .noActiveProfile:
+             .noActiveProfile,
+             .negativeTemplateMatch,
+             .awaitingConfirmation:
             return nil
         case .trajectoryDistanceTooHigh:
             return rejectReason
@@ -2421,7 +2427,9 @@ public struct MotionRecognitionRouter: Sendable {
              .marginTooSmall,
              .cooldownActive,
              .audioMissing,
-             .noActiveProfile:
+             .noActiveProfile,
+             .negativeTemplateMatch,
+             .awaitingConfirmation:
             return false
         }
     }
@@ -2451,7 +2459,9 @@ public struct MotionRecognitionRouter: Sendable {
              .marginTooSmall,
              .cooldownActive,
              .audioMissing,
-             .noActiveProfile:
+             .noActiveProfile,
+             .negativeTemplateMatch,
+             .awaitingConfirmation:
             return 1.0
         }
     }

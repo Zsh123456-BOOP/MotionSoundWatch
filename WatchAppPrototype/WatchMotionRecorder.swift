@@ -1571,6 +1571,7 @@ private actor MotionRuntimeActor {
     private var lastSuppressedLogAt: TimeInterval = -.infinity
     private var recognitionSuppressedUntil: TimeInterval = 0
     private var rearmStatesByProfileID: [UUID: GestureRearmState] = [:]
+    private var confirmationGate = GestureConfirmationGate()
 
     private struct GestureRearmState: Sendable {
         var isArmed: Bool
@@ -1600,6 +1601,8 @@ private actor MotionRuntimeActor {
         rearmStatesByProfileID = rearmStatesByProfileID.filter { id, _ in
             profiles.contains { $0.id == id }
         }
+        // 模板可能在同名/同 ID 下更新，重新按当前启用动作自适应分段阈值。
+        adaptSegmenterToActiveProfiles(recognitionRuntime.activeProfileIDs)
         AppDiagnostics.record("watch.runtimeActor.profiles.replace", ["count": profiles.count])
     }
 
@@ -1608,11 +1611,59 @@ private actor MotionRuntimeActor {
         rearmStatesByProfileID = rearmStatesByProfileID.filter { id, _ in
             profileIDs.contains(id)
         }
+        // 切换当前动作时清空待确认状态，避免旧动作的灰区证据带入新动作。
+        confirmationGate.resetAll()
+        adaptSegmenterToActiveProfiles(profileIDs)
         AppDiagnostics.record(
             "watch.runtimeActor.activeProfiles.set",
             [
                 "count": profileIDs.count,
                 "profileIDs": profileIDs.map(\.uuidString).sorted().joined(separator: ","),
+                "segmenterStartEnergy": segmenter.configuration.startEnergyThreshold,
+            ]
+        )
+    }
+
+    /// B4：按当前启用动作自适应分段能量阈值。
+    /// 只在"恰好一个动作启用"时调整，且只会把起始阈值"抬高"到默认值之上——
+    /// 对强动作（如出拳）提高门槛，让微弱的日常手腕移动根本不会成段；
+    /// 对柔和动作则保持安全的默认值，不会降低门槛而引入更多误段。
+    private func adaptSegmenterToActiveProfiles(_ profileIDs: Set<UUID>) {
+        let defaults = GestureSegmenterConfiguration(
+            postRollDuration: 0.05,
+            endConfirmationDuration: 0.12,
+            cooldownDuration: 0.22
+        )
+        guard profileIDs.count == 1,
+              let id = profileIDs.first,
+              let profile = recognitionRuntime.profiles.first(where: { $0.id == id }) else {
+            segmenter.configuration = defaults
+            return
+        }
+
+        // 模板的代表性能量（与分段能量同口径：acc + 0.25*gyro）。
+        let energies: [Double] = profile.templates.compactMap { template in
+            guard let f = template.features else { return nil }
+            return f.peakAcceleration + 0.25 * f.peakRotationRate
+        }
+        guard let peakEnergy = energies.max(), peakEnergy > 0 else {
+            segmenter.configuration = defaults
+            return
+        }
+
+        var config = defaults
+        // 只抬高，不降低；上限避免把阈值设得过高而漏掉真实动作。
+        let adaptedStart = min(1.2, max(defaults.startEnergyThreshold, peakEnergy * 0.30))
+        config.startEnergyThreshold = adaptedStart
+        config.endEnergyThreshold = min(defaults.endEnergyThreshold * 2.0, adaptedStart * 0.42)
+        segmenter.configuration = config
+        AppDiagnostics.record(
+            "watch.runtimeActor.segmenterAdapted",
+            [
+                "profile": profile.name,
+                "peakEnergy": peakEnergy,
+                "startEnergy": adaptedStart,
+                "endEnergy": config.endEnergyThreshold,
             ]
         )
     }
@@ -1630,6 +1681,7 @@ private actor MotionRuntimeActor {
         segmenter.reset()
         recognitionRuntime.resetRuntimeState()
         rearmStatesByProfileID.removeAll()
+        confirmationGate.resetAll()
         lastSuppressedLogAt = -.infinity
     }
 
@@ -1787,6 +1839,31 @@ private actor MotionRuntimeActor {
                 [
                     "profile": candidate.profile.name,
                     "timestamp": timestamp,
+                    "source": source,
+                ]
+            )
+            return evaluation
+        }
+
+        // 二次确认（灰区）：分数刚过线的候选需相邻窗口再次命中才触发。
+        // 高置信候选 confirmationGate 直接放行，不增加延迟。
+        let score = candidate.recognitionScore ?? candidate.confidence
+        let threshold = candidate.profile.thresholds?.triggerScore ?? candidate.profile.acceptanceThreshold
+        if confirmationGate.register(
+            profileID: candidate.profile.id,
+            score: score,
+            threshold: threshold,
+            at: timestamp
+        ) == .wait {
+            candidate.rejectReason = .awaitingConfirmation
+            evaluation.candidate = candidate
+            evaluation.rejectReason = .awaitingConfirmation
+            AppDiagnostics.record(
+                "watch.recognition.awaitingConfirmation",
+                [
+                    "profile": candidate.profile.name,
+                    "score": score,
+                    "threshold": threshold,
                     "source": source,
                 ]
             )

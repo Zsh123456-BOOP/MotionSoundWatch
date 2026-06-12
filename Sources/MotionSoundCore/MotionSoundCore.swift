@@ -868,8 +868,12 @@ public struct MotionTemplateMatcher: Sendable {
             durationPenalty = 0
         } else if ratio < 0.72 {
             durationPenalty = min(0.28, (0.72 - ratio) * 0.55)
+        } else if ratio <= 3.0 {
+            // 略长~中长（1.45~3×）：放慢的重复（尤其旋转/序列）仍是同一动作，轻罚。
+            durationPenalty = min(0.05, (ratio - 1.45) * 0.035)
         } else {
-            durationPenalty = min(0.04, (ratio - 1.45) * 0.035)
+            // 极端过长（>3×）：缓慢游移的大幅日常动作易混入，加重惩罚（B10）。
+            durationPenalty = min(0.26, 0.05 + (ratio - 3.0) * 0.14)
         }
 
         return baseDistance + durationPenalty

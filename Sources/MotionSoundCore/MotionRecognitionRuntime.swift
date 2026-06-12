@@ -55,6 +55,72 @@ public struct ContinuousRecognitionEvaluation: Equatable, Sendable {
     }
 }
 
+/// 二次确认门（灰区确认）。
+///
+/// 设计要点：盲目要求"同一动作命中两次"会破坏离散动作（一次出拳只产生一个 segment）。
+/// 因此这里只对"分数刚好越过触发线"的灰区候选要求二次确认：
+/// - 分数明显高于阈值（margin ≥ confidentMargin）→ 立即触发，零额外延迟，不影响干脆的动作。
+/// - 分数落在灰区（0 ≤ margin < confidentMargin）→ 需要时间窗内再次命中同一动作才触发。
+/// 对 rotation/hold 这类连续动作，单次手势内多个评估窗会自然完成确认；
+/// 对离散动作，仅当确实接近阈值时才要求复核，作为额外防误触层。
+public struct GestureConfirmationGate: Sendable, Equatable {
+    public enum Decision: Equatable, Sendable {
+        case trigger
+        case wait
+    }
+
+    /// margin ≥ 该值视为高置信，立即触发。
+    public var confidentMargin: Double
+    /// 灰区确认的时间窗（秒）。超过则需重新积累证据。
+    public var windowSeconds: Double
+
+    private struct Pending: Equatable {
+        var lastAt: Double
+    }
+    private var pendingByProfile: [UUID: Pending]
+
+    public init(confidentMargin: Double = 0.08, windowSeconds: Double = 1.2) {
+        self.confidentMargin = confidentMargin
+        self.windowSeconds = windowSeconds
+        self.pendingByProfile = [:]
+    }
+
+    public static func == (lhs: GestureConfirmationGate, rhs: GestureConfirmationGate) -> Bool {
+        lhs.confidentMargin == rhs.confidentMargin && lhs.windowSeconds == rhs.windowSeconds
+    }
+
+    /// 登记一个"本应触发"的候选，返回是否真正触发。
+    /// - score: 候选分数；threshold: 触发阈值；timestamp: 当前时间。
+    public mutating func register(
+        profileID: UUID,
+        score: Double,
+        threshold: Double,
+        at timestamp: Double
+    ) -> Decision {
+        let margin = score - threshold
+        if margin >= confidentMargin {
+            pendingByProfile[profileID] = nil
+            return .trigger
+        }
+        // 灰区：查上一次挂起是否仍在窗口内。
+        if let pending = pendingByProfile[profileID],
+           timestamp - pending.lastAt <= windowSeconds {
+            pendingByProfile[profileID] = nil
+            return .trigger
+        }
+        pendingByProfile[profileID] = Pending(lastAt: timestamp)
+        return .wait
+    }
+
+    public mutating func reset(profileID: UUID) {
+        pendingByProfile[profileID] = nil
+    }
+
+    public mutating func resetAll() {
+        pendingByProfile.removeAll()
+    }
+}
+
 public struct GestureRecognitionRuntime: Sendable {
     public var profiles: [GestureProfile]
     public var matcher: MotionTemplateMatcher
@@ -336,9 +402,20 @@ public struct GestureRecognitionRuntime: Sendable {
         var acceptedCandidate = routed.candidate.flatMap { candidate in
             strictCandidateGateAllows(candidate, for: segment) ? candidate : nil
         }
-        let strictRejectReason: RejectReason? = routed.candidate != nil && acceptedCandidate == nil
+        var strictRejectReason: RejectReason? = routed.candidate != nil && acceptedCandidate == nil
             ? .scoreBelowThreshold
             : routed.rejectReason
+
+        // 背景拒绝层（B11）：单动作识别下没有"第二名 margin"可用，
+        // 改用动作自带的负样本（已知误触）作为背景模型。
+        // 若候选到最近负样本的距离不显著大于到正样本的距离，判为误触。
+        if var candidate = acceptedCandidate,
+           candidate.shouldTrigger,
+           let vetoReason = negativeTemplateVetoReason(for: candidate, segment: segment) {
+            candidate.rejectReason = vetoReason
+            acceptedCandidate = candidate
+            strictRejectReason = vetoReason
+        }
 
         if let candidate = acceptedCandidate, !candidate.shouldTrigger {
             acceptedCandidate = candidate
@@ -351,6 +428,32 @@ public struct GestureRecognitionRuntime: Sendable {
             candidateReports: routed.candidateReports,
             rejectReason: acceptedCandidate?.shouldTrigger == true ? nil : strictRejectReason
         )
+    }
+
+    /// 负样本背景拒绝：在统一的原始 DTW 空间里比较候选到正/负样本的最近距离。
+    /// 返回非 nil 表示候选过于接近已知误触，应否决。
+    public var negativeVetoMarginRatio: Double = 1.05
+
+    private func negativeTemplateVetoReason(
+        for candidate: RecognitionCandidate,
+        segment: GestureSegment
+    ) -> RejectReason? {
+        let profile = candidate.profile
+        guard !profile.negativeTemplates.isEmpty, !profile.templates.isEmpty else {
+            return nil
+        }
+        // 在同一 DTW 空间比较，distance 可比（不混用 1-score 的语义分数）。
+        let positiveDistance = profile.templates
+            .map { matcher.distance($0.samples, segment.samples) }
+            .min()
+        let negativeDistance = profile.negativeTemplates
+            .map { matcher.distance($0.samples, segment.samples) }
+            .min()
+        guard let positiveDistance, let negativeDistance else { return nil }
+        // 候选必须明显更接近正样本；否则视为落在已知误触附近。
+        return negativeDistance <= positiveDistance * negativeVetoMarginRatio
+            ? .negativeTemplateMatch
+            : nil
     }
 
     private func evaluationPriority(_ evaluation: RecognitionEvaluation) -> Double {

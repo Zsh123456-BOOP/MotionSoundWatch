@@ -1513,6 +1513,67 @@ import Foundation
     #expect(plan.consistencyScore != nil)
 }
 
+@Test func confirmationGateTriggersHighConfidenceImmediately() {
+    var gate = GestureConfirmationGate(confidentMargin: 0.08, windowSeconds: 1.2)
+    let id = UUID()
+    // 分数明显高于阈值（margin 0.12）→ 立即触发。
+    #expect(gate.register(profileID: id, score: 0.92, threshold: 0.80, at: 0.0) == .trigger)
+}
+
+@Test func confirmationGateRequiresSecondHitInGrayZone() {
+    var gate = GestureConfirmationGate(confidentMargin: 0.08, windowSeconds: 1.2)
+    let id = UUID()
+    // 灰区（margin 0.03）→ 第一次等待。
+    #expect(gate.register(profileID: id, score: 0.83, threshold: 0.80, at: 0.0) == .wait)
+    // 窗口内第二次 → 确认触发。
+    #expect(gate.register(profileID: id, score: 0.82, threshold: 0.80, at: 0.6) == .trigger)
+    // 触发后状态清空：再次灰区命中又要等待。
+    #expect(gate.register(profileID: id, score: 0.83, threshold: 0.80, at: 1.0) == .wait)
+}
+
+@Test func confirmationGateForgetsStaleGrayZoneEvidence() {
+    var gate = GestureConfirmationGate(confidentMargin: 0.08, windowSeconds: 1.0)
+    let id = UUID()
+    #expect(gate.register(profileID: id, score: 0.83, threshold: 0.80, at: 0.0) == .wait)
+    // 超过窗口（1.5 > 1.0）→ 旧证据失效，仍需等待。
+    #expect(gate.register(profileID: id, score: 0.83, threshold: 0.80, at: 1.5) == .wait)
+}
+
+@Test func negativeTemplateVetoBlocksTriggerNearKnownFalseTrigger() {
+    let builder = MotionTemplateBuilder()
+    // 正样本：一个方向的 burst；负样本：与候选几乎相同的"误触"。
+    let positives = [
+        builder.makeTemplate(label: "punch", kind: .burst, samples: syntheticBurst(duration: 0.70, amplitude: 1.0)),
+        builder.makeTemplate(label: "punch", kind: .burst, samples: syntheticBurst(duration: 0.72, amplitude: 1.02, phase: 0.02)),
+        builder.makeTemplate(label: "punch", kind: .burst, samples: syntheticBurst(duration: 0.68, amplitude: 0.98, phase: -0.02)),
+    ]
+    let candidate = syntheticYAxisBurst(duration: 0.71, amplitude: 1.0)
+    // 负样本与候选几乎一致（已知误触）。
+    let negatives = [
+        builder.makeTemplate(label: "punch-neg", kind: .burst, samples: syntheticYAxisBurst(duration: 0.71, amplitude: 1.0)),
+    ]
+    let profile = GestureProfileBuilder().makeProfile(
+        name: "punch",
+        kind: .burst,
+        templates: positives,
+        negativeTemplates: negatives
+    )
+    let segment = GestureSegment(
+        kind: .burst,
+        samples: candidate,
+        startTimestamp: 30,
+        endTimestamp: 30.71,
+        peakTimestamp: 30.32,
+        peakEnergy: 1.0,
+        features: MotionEnergyAnalyzer().features(for: candidate)
+    )
+    var runtime = GestureRecognitionRuntime(profiles: [profile])
+    runtime.setActiveProfileIDs([profile.id])
+    let evaluation = runtime.evaluate(segment: segment, now: 30.8)
+    // 候选落在已知误触附近 → 不应触发。
+    #expect(evaluation.candidate?.shouldTrigger != true)
+}
+
 @Test func runtimeDefaultsToInactiveSelection() {
     // 不显式传 selection 时，runtime 必须默认 .inactive（未选动作不识别）。
     let templateBuilder = MotionTemplateBuilder()
