@@ -1045,6 +1045,64 @@ final class PhoneConnectivityReceiver: NSObject, ObservableObject {
         return true
     }
 
+    /// 接收 Watch 上报的误触反馈，把触发片段作为负样本并入权威库的对应动作，
+    /// 重新校准阈值后保存，并重新下发整库（A5：iPhone 是权威方）。
+    private func receiveFalseTrigger(profileID: String?, profileName: String?, samplesCSV: String?) {
+        guard let samplesCSV,
+              let data = Data(base64Encoded: samplesCSV),
+              let csv = String(data: data, encoding: .utf8),
+              let samples = try? MotionSampleCSVCodec().decode(csv),
+              !samples.isEmpty else {
+            AppDiagnostics.record("phone.falseTrigger.invalidPayload", ["profile": profileName ?? ""])
+            return
+        }
+        let uuid = profileID.flatMap(UUID.init(uuidString:))
+        do {
+            let store = try GestureProfileFileStore.appDocumentsStore(fileManager: fileManager)
+            let stored = try store.list()
+            guard let target = stored.first(where: { archive in
+                archive.archive.profiles.contains { profile in
+                    if let uuid, profile.id == uuid { return true }
+                    if let profileName, profile.name.caseInsensitiveCompare(profileName) == .orderedSame { return true }
+                    return false
+                }
+            }) else {
+                AppDiagnostics.record("phone.falseTrigger.profileNotFound", ["profile": profileName ?? ""])
+                return
+            }
+
+            let builder = MotionTemplateBuilder()
+            let feedbackEngine = GestureFeedbackEngine()
+            let updatedProfiles = target.archive.profiles.map { profile -> GestureProfile in
+                let matchesTarget = (uuid.map { profile.id == $0 } ?? false)
+                    || (profileName.map { profile.name.caseInsensitiveCompare($0) == .orderedSame } ?? false)
+                guard matchesTarget else { return profile }
+                let negative = builder.makeTemplate(
+                    label: "\(profile.name)-false-trigger",
+                    kind: profile.kind,
+                    samples: samples
+                )
+                return feedbackEngine.updatedProfile(profile, addingNegativeTemplate: negative)
+            }
+
+            // 覆盖保存到同一文件。
+            try store.delete(fileURL: target.fileURL)
+            _ = try store.save(
+                GestureProfileArchive(profiles: updatedProfiles),
+                preferredName: updatedProfiles.first?.name
+            )
+            lastMessage = "已并入 Watch 误触反馈：\(profileName ?? "")"
+            AppDiagnostics.record(
+                "phone.falseTrigger.applied",
+                ["profile": profileName ?? "", "samples": samples.count]
+            )
+            // 重新下发整库，让 Watch 收到含新负样本的权威版本。
+            _ = sendProfileLibrarySnapshot(reason: "falseTriggerFeedback")
+        } catch {
+            AppDiagnostics.record(error: error, event: "phone.falseTrigger.error", ["profile": profileName ?? ""])
+        }
+    }
+
     private func receiveActiveProfileAck(payload: String?) {
         guard let payload,
               let data = Data(base64Encoded: payload),
@@ -1794,6 +1852,9 @@ extension PhoneConnectivityReceiver: WCSessionDelegate {
         let profile = message["profile"] as? String
         let volume = message["volume"] as? Double
         let payload = message["payload"] as? String
+        let ftProfileID = message["profileID"] as? String
+        let ftProfileName = message["profileName"] as? String
+        let ftSamplesCSV = message["samplesCSV"] as? String
         let profileSyncAck = Self.fallbackProfileSyncAck(from: message)
         var watchEventFileName: String?
         var watchEventError: String?
@@ -1815,6 +1876,10 @@ extension PhoneConnectivityReceiver: WCSessionDelegate {
             }
             if command == "activeProfileState" {
                 receiveActiveProfileStateFromWatch(payload: payload)
+                return
+            }
+            if command == "gestureFalseTrigger" {
+                receiveFalseTrigger(profileID: ftProfileID, profileName: ftProfileName, samplesCSV: ftSamplesCSV)
                 return
             }
             if command == "watchRecognitionEvent" {
@@ -1854,6 +1919,9 @@ extension PhoneConnectivityReceiver: WCSessionDelegate {
         let profile = userInfo["profile"] as? String
         let volume = userInfo["volume"] as? Double
         let payload = userInfo["payload"] as? String
+        let ftProfileID = userInfo["profileID"] as? String
+        let ftProfileName = userInfo["profileName"] as? String
+        let ftSamplesCSV = userInfo["samplesCSV"] as? String
         let profileSyncAck = Self.fallbackProfileSyncAck(from: userInfo)
         var watchEventFileName: String?
         var watchEventError: String?
@@ -1875,6 +1943,10 @@ extension PhoneConnectivityReceiver: WCSessionDelegate {
             }
             if command == "activeProfileState" {
                 receiveActiveProfileStateFromWatch(payload: payload)
+                return
+            }
+            if command == "gestureFalseTrigger" {
+                receiveFalseTrigger(profileID: ftProfileID, profileName: ftProfileName, samplesCSV: ftSamplesCSV)
                 return
             }
             if command == "watchRecognitionEvent" {

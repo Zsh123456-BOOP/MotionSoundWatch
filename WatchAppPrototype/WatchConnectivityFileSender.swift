@@ -679,6 +679,35 @@ final class WatchConnectivityFileSender: NSObject, ObservableObject {
         }
     }
 
+    /// 上报误触反馈到 iPhone：携带动作标识与触发片段样本（CSV）。
+    /// iPhone 负责把该片段作为负样本并入权威库并重新下发。
+    @discardableResult
+    func sendFalseTrigger(profileID: UUID?, profileName: String?, samples: [MotionSample]) -> Bool {
+        guard let session else {
+            AppDiagnostics.record("watch.falseTrigger.unsupported")
+            return false
+        }
+        guard !samples.isEmpty else { return false }
+        let csv = MotionSampleCSVCodec().encode(samples)
+        let payload = Data(csv.utf8).base64EncodedString()
+        let message: [String: Any] = [
+            "command": "gestureFalseTrigger",
+            "profileID": profileID?.uuidString ?? "",
+            "profileName": profileName ?? "",
+            "samplesCSV": payload,
+            "sampleCount": samples.count,
+            "sentAt": Date().timeIntervalSince1970,
+            "source": "MotionSoundWatch",
+        ]
+        // 用 transferUserInfo 保证离线可达时排队送达。
+        session.transferUserInfo(message)
+        AppDiagnostics.record(
+            "watch.falseTrigger.queued",
+            ["profile": profileName ?? "", "samples": samples.count]
+        )
+        return true
+    }
+
     /// Watch 端本地切换当前动作后，把最新状态推给 iPhone。
     @discardableResult
     func sendActiveProfileState(_ state: ActiveProfileSyncState) -> Bool {
@@ -894,6 +923,46 @@ struct RecordingControlCommand: Identifiable, Equatable {
     var autoSendCSV: Bool
 }
 
+/// WCSession 命令的 Sendable 快照：在 nonisolated 代理里从 [String: Any] 提取，
+/// 再安全地跨越 actor 边界传给 @MainActor 分发器（满足 Swift 6 严格并发）。
+private struct IncomingCommand: Sendable {
+    var command: String?
+    var reason: String?
+    var action: String?
+    var label: String?
+    var kind: String?
+    var sampleRole: String?
+    var autoSendCSV: Bool?
+    var profileID: String?
+    var name: String?
+    var testRunID: String?
+    var buildCommit: String?
+    var clearLogs: Bool?
+    var profileLibraryVersion: String?
+    var profileCount: Int?
+    var payload: String?
+    var activeProfileState: String?
+
+    init(_ dict: [String: Any]) {
+        command = dict["command"] as? String
+        reason = dict["reason"] as? String
+        action = dict["action"] as? String
+        label = dict["label"] as? String
+        kind = dict["kind"] as? String
+        sampleRole = dict["sampleRole"] as? String
+        autoSendCSV = dict["autoSendCSV"] as? Bool
+        profileID = dict["profileID"] as? String
+        name = dict["name"] as? String
+        testRunID = dict["testRunId"] as? String
+        buildCommit = dict["buildCommit"] as? String
+        clearLogs = dict["clearLogs"] as? Bool
+        profileLibraryVersion = dict["profileLibraryVersion"] as? String
+        profileCount = dict["profileCount"] as? Int
+        payload = dict["payload"] as? String
+        activeProfileState = dict["activeProfileState"] as? String
+    }
+}
+
 private enum WatchRecordingStatusTransport {
     static func send(
         session: WCSession,
@@ -981,55 +1050,8 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
     }
 
     nonisolated func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
-        let command = message["command"] as? String
-        let reason = message["reason"] as? String
-        let action = message["action"] as? String
-        let label = message["label"] as? String
-        let kind = message["kind"] as? String
-        let sampleRole = message["sampleRole"] as? String
-        let autoSendCSV = message["autoSendCSV"] as? Bool
-        let profileID = message["profileID"] as? String
-        let name = message["name"] as? String
-        let testRunID = message["testRunId"] as? String
-        let buildCommit = message["buildCommit"] as? String
-        let clearLogs = message["clearLogs"] as? Bool
-        let profileLibraryVersion = message["profileLibraryVersion"] as? String
-        let profileCount = message["profileCount"] as? Int
-        let payload = message["payload"] as? String
-        Task { @MainActor in
-            if command == "configureDiagnostics" {
-                receiveConfigureDiagnostics(runID: testRunID, buildCommit: buildCommit, clearLogs: clearLogs, reason: reason)
-                return
-            }
-            if command == "profileLibraryManifest" {
-                receiveProfileLibraryManifest(payload: payload, reason: reason)
-                return
-            }
-            if command == "profileLibrarySyncBegin" {
-                receiveProfileLibrarySyncBegin(version: profileLibraryVersion, profileCount: profileCount, reason: reason)
-                return
-            }
-            if command == "prepareRuntime" {
-                receivePrepareRuntime(reason: reason)
-                return
-            }
-            if command == "deleteProfile" {
-                receiveDeleteProfile(profileID: profileID, name: name, kind: kind)
-                return
-            }
-            if command == "setActiveProfile" {
-                receiveActiveProfileCommand(profileID: profileID, name: name, reason: reason, payload: payload)
-                return
-            }
-            guard command == "recordingControl" else { return }
-            receiveRecordingCommand(
-                action: action,
-                label: label,
-                kind: kind,
-                sampleRole: sampleRole,
-                autoSendCSV: autoSendCSV
-            )
-        }
+        let incoming = IncomingCommand(message)
+        Task { @MainActor in dispatchIncoming(incoming) }
     }
 
     nonisolated func session(
@@ -1037,96 +1059,10 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
         didReceiveMessage message: [String: Any],
         replyHandler: @escaping ([String: Any]) -> Void
     ) {
-        let command = message["command"] as? String
-        let reason = message["reason"] as? String
-        let action = message["action"] as? String
-        let label = message["label"] as? String
-        let kind = message["kind"] as? String
-        let sampleRole = message["sampleRole"] as? String
-        let autoSendCSV = message["autoSendCSV"] as? Bool
-        let profileID = message["profileID"] as? String
-        let name = message["name"] as? String
-        let testRunID = message["testRunId"] as? String
-        let buildCommit = message["buildCommit"] as? String
-        let clearLogs = message["clearLogs"] as? Bool
-        let profileLibraryVersion = message["profileLibraryVersion"] as? String
-        let profileCount = message["profileCount"] as? Int
-        let payload = message["payload"] as? String
-
-        if command == "configureDiagnostics" {
-            replyHandler([
-                "status": "accepted",
-                "command": "configureDiagnostics",
-                "receivedAt": Date().timeIntervalSince1970,
-            ])
-            Task { @MainActor in
-                receiveConfigureDiagnostics(runID: testRunID, buildCommit: buildCommit, clearLogs: clearLogs, reason: reason)
-            }
-            return
-        }
-
-        if command == "profileLibraryManifest" {
-            replyHandler([
-                "status": "accepted",
-                "command": "profileLibraryManifest",
-                "receivedAt": Date().timeIntervalSince1970,
-            ])
-            Task { @MainActor in
-                receiveProfileLibraryManifest(payload: payload, reason: reason)
-            }
-            return
-        }
-
-        if command == "profileLibrarySyncBegin" {
-            replyHandler([
-                "status": "accepted",
-                "command": "profileLibrarySyncBegin",
-                "receivedAt": Date().timeIntervalSince1970,
-            ])
-            Task { @MainActor in
-                receiveProfileLibrarySyncBegin(version: profileLibraryVersion, profileCount: profileCount, reason: reason)
-            }
-            return
-        }
-
-        if command == "prepareRuntime" {
-            replyHandler([
-                "status": "accepted",
-                "command": "prepareRuntime",
-                "receivedAt": Date().timeIntervalSince1970,
-            ])
-            Task { @MainActor in
-                receivePrepareRuntime(reason: reason)
-            }
-            return
-        }
-
-        if command == "deleteProfile" {
-            replyHandler([
-                "status": "accepted",
-                "command": "deleteProfile",
-                "receivedAt": Date().timeIntervalSince1970,
-            ])
-            Task { @MainActor in
-                receiveDeleteProfile(profileID: profileID, name: name, kind: kind)
-            }
-            return
-        }
-
-        if command == "setActiveProfile" {
-            replyHandler([
-                "status": "accepted",
-                "command": "setActiveProfile",
-                "receivedAt": Date().timeIntervalSince1970,
-            ])
-            Task { @MainActor in
-                receiveActiveProfileCommand(profileID: profileID, name: name, reason: reason, payload: payload)
-            }
-            return
-        }
-
-        guard command == "recordingControl",
-              RecordingControlAction(rawValue: action ?? "") != nil else {
+        let incoming = IncomingCommand(message)
+        // sendMessage 需要同步回执；不识别的录制命令仍返回 rejected 以兼容旧逻辑。
+        if incoming.command == "recordingControl",
+           RecordingControlAction(rawValue: incoming.action ?? "") == nil {
             replyHandler([
                 "status": "rejected",
                 "reason": "unknownRecordingCommand",
@@ -1134,111 +1070,76 @@ extension WatchConnectivityFileSender: WCSessionDelegate {
             ])
             return
         }
-
         replyHandler([
             "status": "accepted",
-            "action": action ?? "",
+            "command": incoming.command ?? "",
             "receivedAt": Date().timeIntervalSince1970,
         ])
-
-        Task { @MainActor in
-            receiveRecordingCommand(
-                action: action,
-                label: label,
-                kind: kind,
-                sampleRole: sampleRole,
-                autoSendCSV: autoSendCSV
-            )
-        }
+        Task { @MainActor in dispatchIncoming(incoming) }
     }
 
     nonisolated func session(_ session: WCSession, didReceiveUserInfo userInfo: [String: Any] = [:]) {
-        let command = userInfo["command"] as? String
-        let reason = userInfo["reason"] as? String
-        let action = userInfo["action"] as? String
-        let label = userInfo["label"] as? String
-        let kind = userInfo["kind"] as? String
-        let sampleRole = userInfo["sampleRole"] as? String
-        let autoSendCSV = userInfo["autoSendCSV"] as? Bool
-        let profileID = userInfo["profileID"] as? String
-        let name = userInfo["name"] as? String
-        let testRunID = userInfo["testRunId"] as? String
-        let buildCommit = userInfo["buildCommit"] as? String
-        let clearLogs = userInfo["clearLogs"] as? Bool
-        let profileLibraryVersion = userInfo["profileLibraryVersion"] as? String
-        let profileCount = userInfo["profileCount"] as? Int
-        let payload = userInfo["payload"] as? String
-        Task { @MainActor in
-            if command == "configureDiagnostics" {
-                receiveConfigureDiagnostics(runID: testRunID, buildCommit: buildCommit, clearLogs: clearLogs, reason: reason)
-                return
-            }
-            if command == "profileLibraryManifest" {
-                receiveProfileLibraryManifest(payload: payload, reason: reason)
-                return
-            }
-            if command == "profileLibrarySyncBegin" {
-                receiveProfileLibrarySyncBegin(version: profileLibraryVersion, profileCount: profileCount, reason: reason)
-                return
-            }
-            if command == "prepareRuntime" {
-                receivePrepareRuntime(reason: reason)
-                return
-            }
-            if command == "deleteProfile" {
-                receiveDeleteProfile(profileID: profileID, name: name, kind: kind)
-                return
-            }
-            if command == "setActiveProfile" {
-                receiveActiveProfileCommand(profileID: profileID, name: name, reason: reason, payload: payload)
-                return
-            }
-            guard command == "recordingControl" else { return }
-            receiveRecordingCommand(
-                action: action,
-                label: label,
-                kind: kind,
-                sampleRole: sampleRole,
-                autoSendCSV: autoSendCSV
-            )
-        }
+        let incoming = IncomingCommand(userInfo)
+        Task { @MainActor in dispatchIncoming(incoming) }
     }
 
     nonisolated func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) {
-        let command = applicationContext["command"] as? String
-        let reason = applicationContext["reason"] as? String
-        let testRunID = applicationContext["testRunId"] as? String
-        let buildCommit = applicationContext["buildCommit"] as? String
-        let clearLogs = applicationContext["clearLogs"] as? Bool
-        let profileLibraryVersion = applicationContext["profileLibraryVersion"] as? String
-        let profileCount = applicationContext["profileCount"] as? Int
-        let payload = applicationContext["payload"] as? String
-        // 手机端把"当前启用动作"作为独立 key 常驻在 applicationContext 中，
-        // 即使 Watch 离线，重新连接后也能收敛到最新选择。
-        let activeProfilePayload = applicationContext["activeProfileState"] as? String
-        Task { @MainActor in
-            if let activeProfilePayload {
-                receiveActiveProfileCommand(
-                    profileID: nil,
-                    name: nil,
-                    reason: "applicationContext",
-                    payload: activeProfilePayload
-                )
-            }
-            if command == "configureDiagnostics" {
-                receiveConfigureDiagnostics(runID: testRunID, buildCommit: buildCommit, clearLogs: clearLogs, reason: reason)
-                return
-            }
-            if command == "profileLibraryManifest" {
-                receiveProfileLibraryManifest(payload: payload, reason: reason)
-                return
-            }
-            if command == "profileLibrarySyncBegin" {
-                receiveProfileLibrarySyncBegin(version: profileLibraryVersion, profileCount: profileCount, reason: reason)
-                return
-            }
-            guard command == "prepareRuntime" else { return }
-            receivePrepareRuntime(reason: reason)
+        let incoming = IncomingCommand(applicationContext)
+        Task { @MainActor in dispatchIncoming(incoming) }
+    }
+
+    /// 单一入口：解析并分发来自 message / userInfo / applicationContext 的命令。
+    /// 四条 WCSession 通道此前各有一份重复解析（A7）；现在收敛到这里。
+    @MainActor
+    private func dispatchIncoming(_ incoming: IncomingCommand) {
+        // 常驻 applicationContext 的"当前启用动作"侧信道：与 command 互不排斥，
+        // 即使 Watch 离线，重连后也能收敛到最新选择。
+        if let activeProfilePayload = incoming.activeProfileState {
+            receiveActiveProfileCommand(
+                profileID: nil,
+                name: nil,
+                reason: "applicationContext",
+                payload: activeProfilePayload
+            )
+        }
+
+        switch incoming.command {
+        case "configureDiagnostics":
+            receiveConfigureDiagnostics(
+                runID: incoming.testRunID,
+                buildCommit: incoming.buildCommit,
+                clearLogs: incoming.clearLogs,
+                reason: incoming.reason
+            )
+        case "profileLibraryManifest":
+            receiveProfileLibraryManifest(payload: incoming.payload, reason: incoming.reason)
+        case "profileLibrarySyncBegin":
+            receiveProfileLibrarySyncBegin(
+                version: incoming.profileLibraryVersion,
+                profileCount: incoming.profileCount,
+                reason: incoming.reason
+            )
+        case "prepareRuntime":
+            receivePrepareRuntime(reason: incoming.reason)
+        case "deleteProfile":
+            receiveDeleteProfile(profileID: incoming.profileID, name: incoming.name, kind: incoming.kind)
+        case "setActiveProfile":
+            receiveActiveProfileCommand(
+                profileID: incoming.profileID,
+                name: incoming.name,
+                reason: incoming.reason,
+                payload: incoming.payload
+            )
+        case "recordingControl":
+            receiveRecordingCommand(
+                action: incoming.action,
+                label: incoming.label,
+                kind: incoming.kind,
+                sampleRole: incoming.sampleRole,
+                autoSendCSV: incoming.autoSendCSV
+            )
+        default:
+            break
         }
     }
 

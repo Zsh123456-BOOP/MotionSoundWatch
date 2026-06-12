@@ -1513,6 +1513,34 @@ import Foundation
     #expect(plan.consistencyScore != nil)
 }
 
+@Test func makeEventBuildsConsistentEventWithoutRuntimeInstance() {
+    // A3：无状态事件构建器应与实例 record() 行为一致（用于消除 Watch 第二个 runtime）。
+    let builder = MotionTemplateBuilder()
+    let profile = GestureProfileBuilder().makeProfile(
+        name: "punch",
+        kind: .burst,
+        templates: [builder.makeTemplate(label: "punch", kind: .burst, samples: syntheticBurst(duration: 0.7, amplitude: 1.0))]
+    )
+    let samples = syntheticBurst(duration: 0.71, amplitude: 1.02)
+    let segment = GestureSegment(
+        kind: .burst, samples: samples, startTimestamp: 0, endTimestamp: 0.71,
+        peakTimestamp: 0.32, peakEnergy: 1.2,
+        features: MotionEnergyAnalyzer().features(for: samples)
+    )
+    let candidate = RecognitionCandidate(
+        profile: profile, distance: 0.1, confidence: 0.9, templateID: profile.templates[0].id
+    )
+    let event = GestureRecognitionRuntime.makeEvent(
+        segment: segment, candidate: candidate, audioPlayed: true,
+        wearContext: WearContext(wristLocation: "left", crownOrientation: "right")
+    )
+    #expect(event.triggered == candidate.shouldTrigger)
+    #expect(event.profile?.id == profile.id)
+    #expect(event.logEntry.bestProfileID == profile.id)
+    // audioPlayed 只在触发时为真。
+    #expect(event.logEntry.audioPlayed == candidate.shouldTrigger)
+}
+
 @Test func confirmationGateTriggersHighConfidenceImmediately() {
     var gate = GestureConfirmationGate(confidentMargin: 0.08, windowSeconds: 1.2)
     let id = UUID()

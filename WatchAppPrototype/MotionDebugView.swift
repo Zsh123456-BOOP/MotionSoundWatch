@@ -165,6 +165,9 @@ struct MotionDebugView: View {
             recorder.activeProfileStateSink = { [weak fileSender] state in
                 _ = fileSender?.sendActiveProfileState(state)
             }
+            recorder.falseTriggerSink = { [weak fileSender] id, name, samples in
+                _ = fileSender?.sendFalseTrigger(profileID: id, profileName: name, samples: samples)
+            }
             fileSender.reloadReceivedSoundFiles()
             preloadReceivedSounds()
             syncRuntimeSession(reason: "viewAppear")
@@ -207,6 +210,7 @@ struct MotionDebugView: View {
             recorder.recognitionEventSink = nil
             recorder.activeProfileAckSink = nil
             recorder.activeProfileStateSink = nil
+            recorder.falseTriggerSink = nil
             recorder.stopLiveUpdates()
             runtimeSession.stop(reason: "viewDisappear")
         }
@@ -339,11 +343,18 @@ struct MotionDebugView: View {
         if let feedback = recorder.lastFeedbackMessage {
             return feedback
         }
+        // 只在传输消息表示错误时才打扰用户；常规队列/同步进度由顶部状态条体现。
+        // 用"是否像错误"做正向判定，比此前 contains("队列") 的反向过滤更稳健。
         if let transfer = fileSender.lastTransferMessage,
-           !transfer.contains("队列") {
+           Self.looksLikeError(transfer) {
             return transfer
         }
         return nil
+    }
+
+    private static func looksLikeError(_ message: String) -> Bool {
+        let errorMarkers = ["失败", "错误", "无法", "不支持", "缺少", "校验", "为空", "不存在"]
+        return errorMarkers.contains { message.contains($0) }
     }
 
     private func syncProfileLibraryState(reason: String) {

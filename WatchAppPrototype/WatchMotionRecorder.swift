@@ -48,6 +48,9 @@ final class WatchMotionRecorder: ObservableObject {
     var activeProfileAckSink: ((ActiveProfileSyncAck) -> Void)?
     /// Watch 本地切换动作后向 iPhone 推送的最新状态。
     var activeProfileStateSink: ((ActiveProfileSyncState) -> Void)?
+    /// 误触反馈上报 iPhone（profileID, profileName, 触发片段样本）。
+    /// iPhone 是动作库的权威方，必须由它把负样本并入并重新下发（A5）。
+    var falseTriggerSink: ((UUID?, String?, [MotionSample]) -> Void)?
 
     private let motionManager = CMMotionManager()
     private let motionQueue = OperationQueue()
@@ -57,7 +60,9 @@ final class WatchMotionRecorder: ObservableObject {
     private let feedbackEngine = GestureFeedbackEngine()
     private let soundPlayer: WatchSoundPlayer?
     private let runtimeActor = MotionRuntimeActor()
-    private var recognitionRuntime = GestureRecognitionRuntime(activeRecognitionSelection: .inactive)
+    // 主线程只保存动作库快照用于展示/反馈/落盘；真正的识别 runtime 只在
+    // MotionRuntimeActor 内部存在一份（消除 A3 双 runtime 状态分叉）。
+    private var loadedProfiles: [GestureProfile] = []
     private var standardTemplates: [MotionTemplate] = []
     private var standardNegativeTemplates: [MotionTemplate] = []
     private var standardLabel: String?
@@ -174,7 +179,7 @@ final class WatchMotionRecorder: ObservableObject {
         do {
             let store = try GestureProfileFileStore.appDocumentsStore()
             let profiles = deduplicateProfiles(try store.list().flatMap(\.archive.profiles))
-            recognitionRuntime.replaceProfiles(profiles)
+            loadedProfiles = profiles
             Task { await runtimeActor.replaceProfiles(profiles) }
             availableProfileSummaries = profiles.map {
                 WatchGestureProfileSummary(id: $0.id, name: $0.name, kind: $0.kind)
@@ -225,7 +230,7 @@ final class WatchMotionRecorder: ObservableObject {
     /// Watch 端本地切换当前动作（profileID 为 nil 表示关闭识别）。
     func selectActiveProfileLocally(profileID: UUID?, reason: String) {
         let profile = profileID.flatMap { id in
-            recognitionRuntime.profiles.first { $0.id == id }
+            loadedProfiles.first { $0.id == id }
         }
         let state = ActiveProfileSyncState(
             revision: nextLocalSelectionRevision(),
@@ -320,13 +325,13 @@ final class WatchMotionRecorder: ObservableObject {
     }
 
     private func findProfile(id: UUID?, name: String?) -> GestureProfile? {
-        if let id, let profile = recognitionRuntime.profiles.first(where: { $0.id == id }) {
+        if let id, let profile = loadedProfiles.first(where: { $0.id == id }) {
             return profile
         }
         guard let name = name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else {
             return nil
         }
-        return recognitionRuntime.profiles.first {
+        return loadedProfiles.first {
             $0.name.caseInsensitiveCompare(name) == .orderedSame
         }
     }
@@ -334,7 +339,6 @@ final class WatchMotionRecorder: ObservableObject {
     private func deactivateRecognition(reason: String) {
         activeRecognitionProfileID = nil
         activeRecognitionProfileName = nil
-        recognitionRuntime.setActiveProfileIDs([])
         Task { await runtimeActor.setActiveProfileIDs([]) }
         AppDiagnostics.record("watch.activeProfile.deactivated", ["reason": reason])
     }
@@ -342,7 +346,6 @@ final class WatchMotionRecorder: ObservableObject {
     private func applyActiveRecognitionProfile(_ profile: GestureProfile, reason: String) {
         activeRecognitionProfileID = profile.id
         activeRecognitionProfileName = profile.name
-        recognitionRuntime.setActiveProfileIDs([profile.id])
         Task { await runtimeActor.setActiveProfileIDs([profile.id]) }
         lastFeedbackMessage = nil
         AppDiagnostics.record(
@@ -380,7 +383,6 @@ final class WatchMotionRecorder: ObservableObject {
             lastFeedbackMessage = expectedProfileCount > 0 ? nil : "动作库为空，请在 iPhone 创建动作。"
         } else {
             lastFeedbackMessage = "等待 iPhone 同步动作库。"
-            recognitionRuntime.resetRuntimeState()
             Task { await runtimeActor.resetRuntimeState() }
         }
         Task {
@@ -428,10 +430,17 @@ final class WatchMotionRecorder: ObservableObject {
         }
 
         do {
+            // 1) 即时在内存里并入负样本，让背景否决层立刻生效（无需等待往返）。
+            //    注意：不再向本地写"feedback-updated-profiles"独立档案——那会和
+            //    iPhone 的整库快照打架并很快被覆盖（A5 的根因）。
             let updatedProfiles = feedbackEngine.applyFalseTrigger(
                 event: event,
-                to: recognitionRuntime.profiles
+                to: loadedProfiles
             )
+            loadedProfiles = updatedProfiles
+            Task { await runtimeActor.replaceProfiles(updatedProfiles) }
+
+            // 2) 落盘一份反馈样本用于诊断。
             lastFeedbackSampleURL = try persistFeedbackSample(
                 role: "false-trigger",
                 profile: event.profile,
@@ -443,13 +452,11 @@ final class WatchMotionRecorder: ObservableObject {
                     "rejectReason": event.logEntry.rejectReason?.rawValue ?? "",
                 ]
             )
-            let archive = GestureProfileArchive(profiles: updatedProfiles)
-            let store = try GestureProfileFileStore.appDocumentsStore()
-            _ = try store.save(archive, preferredName: "feedback-updated-profiles")
-            recognitionRuntime.replaceProfiles(updatedProfiles)
-            Task { await runtimeActor.replaceProfiles(updatedProfiles) }
-            loadedProfileCount = updatedProfiles.count
-            lastFeedbackMessage = "已记录误触反馈并更新阈值"
+
+            // 3) 上报 iPhone（权威库），由它持久化并重新下发整库。
+            falseTriggerSink?(event.profile?.id, event.profile?.name, event.segment.samples)
+
+            lastFeedbackMessage = "已记录误触反馈，正在更新动作"
             AppDiagnostics.record("watch.feedback.falseTriggerApplied", ["profileCount": updatedProfiles.count])
         } catch {
             lastFeedbackMessage = error.localizedDescription
@@ -458,7 +465,7 @@ final class WatchMotionRecorder: ObservableObject {
     }
 
     func markRecentMotionAsMissed(profileID: UUID? = nil, name: String? = nil) {
-        let profile = recognitionRuntime.profiles.first { profile in
+        let profile = loadedProfiles.first { profile in
             if let profileID, profile.id == profileID {
                 return true
             }
@@ -694,7 +701,7 @@ final class WatchMotionRecorder: ObservableObject {
             negativeTemplates: standardNegativeTemplates,
             sound: sound,
             wearContext: currentWearContext(),
-            existingProfiles: recognitionRuntime.profiles
+            existingProfiles: loadedProfiles
         )
         return GestureProfileArchive(profiles: [profile])
     }
@@ -720,7 +727,7 @@ final class WatchMotionRecorder: ObservableObject {
             .evaluate(
                 templates: standardTemplates,
                 negativeTemplates: standardNegativeTemplates,
-                existingProfiles: recognitionRuntime.profiles
+                existingProfiles: loadedProfiles
             )
             .quality
     }
@@ -815,12 +822,13 @@ final class WatchMotionRecorder: ObservableObject {
         let audioStartLatencyMs = candidate?.shouldTrigger == true
             ? max(0, liveSample.timestamp - segment.peakTimestamp) * 1000
             : nil
-        lastRecognitionEvent = recognitionRuntime.record(
+        // 触发决策已在 actor 内（rearm / 二次确认 / 背景否决）落到 candidate 上，
+        // 这里只用无状态构建器生成事件用于展示与落盘（不再持有第二个识别 runtime）。
+        lastRecognitionEvent = GestureRecognitionRuntime.makeEvent(
             segment: segment,
             candidate: candidate,
-            now: liveSample.timestamp,
-            wearContext: currentWearContext(),
             audioPlayed: audioPlayed,
+            wearContext: currentWearContext(),
             burstGateRejectionReason: evaluation.burstGateRejectionReason,
             tokens: evaluation.tokens,
             classifiedKind: evaluation.classifiedKind,
@@ -1004,7 +1012,7 @@ final class WatchMotionRecorder: ObservableObject {
             return true
         }
 
-        guard !recognitionRuntime.profiles.isEmpty else {
+        guard !loadedProfiles.isEmpty else {
             return false
         }
 
@@ -1084,7 +1092,7 @@ final class WatchMotionRecorder: ObservableObject {
         candidate: RecognitionCandidate?,
         rejectionReason: BurstGateRejectionReason?
     ) -> String {
-        if recognitionRuntime.profiles.isEmpty {
+        if loadedProfiles.isEmpty {
             return "no-profiles"
         }
         if triggered {
@@ -1129,7 +1137,7 @@ final class WatchMotionRecorder: ObservableObject {
             "audioReady": audioReady,
             "audioStartLatencyMs": audioStartLatencyMs ?? NSNull(),
             "recognitionMs": recognitionMs,
-            "profileCount": recognitionRuntime.profiles.count,
+            "profileCount": loadedProfiles.count,
             "profileLibraryReady": isProfileLibraryReady,
             "profileLibraryVersion": activeProfileLibraryVersion,
             "segmentKind": segment.kind.rawValue,
@@ -1274,7 +1282,7 @@ final class WatchMotionRecorder: ObservableObject {
             "audioReady": audioReady,
             "audioStartLatencyMs": audioStartLatencyMs ?? -1,
             "recognitionMs": recognitionMs,
-            "profileCount": recognitionRuntime.profiles.count,
+            "profileCount": loadedProfiles.count,
             "profileLibraryReady": isProfileLibraryReady,
             "profileLibraryVersion": activeProfileLibraryVersion,
             "segmentKind": segment.kind.rawValue,
@@ -1394,7 +1402,7 @@ final class WatchMotionRecorder: ObservableObject {
         candidate: RecognitionCandidate?,
         rejectionReason: BurstGateRejectionReason?
     ) {
-        if recognitionRuntime.profiles.isEmpty {
+        if loadedProfiles.isEmpty {
             lastRecognitionSummary = "已检测到动作，但 Watch 没有已同步动作。"
             if segment.endTimestamp - lastNoProfileSummaryLogAt >= 10 {
                 lastNoProfileSummaryLogAt = segment.endTimestamp
@@ -1430,7 +1438,7 @@ final class WatchMotionRecorder: ObservableObject {
                 "watch.recognition.noCandidate",
                 [
                     "segmentKind": segment.kind.rawValue,
-                    "profileCount": recognitionRuntime.profiles.count,
+                    "profileCount": loadedProfiles.count,
                     "duration": segment.duration,
                     "peak": segment.features.peakAcceleration,
                 ]

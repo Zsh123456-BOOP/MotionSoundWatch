@@ -701,10 +701,9 @@ public struct GestureRecognitionRuntime: Sendable {
             lastTriggerTimes[profileID] = now ?? segment.endTimestamp
         }
 
-        let logEntry = makeLogEntry(
+        let event = Self.makeEvent(
             segment: segment,
             candidate: candidate,
-            triggered: shouldTrigger,
             audioPlayed: shouldTrigger && audioPlayed,
             batteryLevel: batteryLevel,
             wearContext: wearContext,
@@ -714,8 +713,48 @@ public struct GestureRecognitionRuntime: Sendable {
             candidateReports: candidateReports,
             rejectReason: rejectReason
         )
-        logs.append(logEntry)
+        logs.append(event.logEntry)
+        return event
+    }
 
+    /// 无需 runtime 实例即可构建识别事件（含日志条目）。
+    /// 供展示/落盘侧（如 Watch 主线程）复用，避免再持有第二个识别 runtime（A3）。
+    /// triggered 直接取自 candidate.shouldTrigger —— 触发决策应在更上游
+    /// （rearm / 二次确认 / 背景否决）已经体现到 candidate.rejectReason 中。
+    public static func makeEvent(
+        segment: GestureSegment,
+        candidate: RecognitionCandidate?,
+        audioPlayed: Bool = false,
+        batteryLevel: Double? = nil,
+        wearContext: WearContext? = nil,
+        burstGateRejectionReason: BurstGateRejectionReason? = nil,
+        tokens: [MotionToken] = [],
+        classifiedKind: MotionTokenKind? = nil,
+        candidateReports: [CandidateRecognitionReport] = [],
+        rejectReason: RejectReason? = nil
+    ) -> GestureRecognitionEvent {
+        let triggered = candidate?.shouldTrigger == true
+        let logEntry = RecognitionLogEntry(
+            timestamp: segment.endTimestamp,
+            gestureKindDetected: segment.kind,
+            duration: segment.duration,
+            peakAcceleration: segment.features.peakAcceleration,
+            peakRotationRate: segment.features.peakRotationRate,
+            bestProfileID: candidate?.profile.id,
+            bestDistance: candidate?.distance,
+            secondBestDistance: candidate?.secondBestDistance,
+            threshold: candidate?.profile.acceptanceThreshold,
+            margin: candidate?.margin,
+            triggered: triggered,
+            audioPlayed: triggered && audioPlayed,
+            batteryLevel: batteryLevel,
+            wearContext: wearContext,
+            burstGateRejectionReason: burstGateRejectionReason,
+            tokens: tokens,
+            classifiedKind: classifiedKind,
+            candidateReports: candidateReports,
+            rejectReason: rejectReason
+        )
         return GestureRecognitionEvent(segment: segment, candidate: candidate, logEntry: logEntry)
     }
 
@@ -735,41 +774,6 @@ public struct GestureRecognitionRuntime: Sendable {
         resetLogs()
     }
 
-    private func makeLogEntry(
-        segment: GestureSegment,
-        candidate: RecognitionCandidate?,
-        triggered: Bool,
-        audioPlayed: Bool,
-        batteryLevel: Double?,
-        wearContext: WearContext?,
-        burstGateRejectionReason: BurstGateRejectionReason?,
-        tokens: [MotionToken],
-        classifiedKind: MotionTokenKind?,
-        candidateReports: [CandidateRecognitionReport],
-        rejectReason: RejectReason?
-    ) -> RecognitionLogEntry {
-        RecognitionLogEntry(
-            timestamp: segment.endTimestamp,
-            gestureKindDetected: segment.kind,
-            duration: segment.duration,
-            peakAcceleration: segment.features.peakAcceleration,
-            peakRotationRate: segment.features.peakRotationRate,
-            bestProfileID: candidate?.profile.id,
-            bestDistance: candidate?.distance,
-            secondBestDistance: candidate?.secondBestDistance,
-            threshold: candidate?.profile.acceptanceThreshold,
-            margin: candidate?.margin,
-            triggered: triggered,
-            audioPlayed: audioPlayed,
-            batteryLevel: batteryLevel,
-            wearContext: wearContext,
-            burstGateRejectionReason: burstGateRejectionReason,
-            tokens: tokens,
-            classifiedKind: classifiedKind,
-            candidateReports: candidateReports,
-            rejectReason: rejectReason
-        )
-    }
 }
 
 public struct RecognitionLogArchive: Codable, Equatable, Sendable {
